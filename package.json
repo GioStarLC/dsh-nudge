@@ -26,7 +26,7 @@
     "README.md"
   ],
   "scripts": {
-    "prepare": "git config core.hooksPath .githooks || true",
+    "hooks:install": "git config core.hooksPath .githooks",
     "check": "node scripts/check-client.mjs && node scripts/check-host.mjs",
     "check:client": "node scripts/check-client.mjs",
     "check:host": "node scripts/check-host.mjs",

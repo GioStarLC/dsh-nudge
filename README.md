@@ -44,11 +44,14 @@ dsh plugin --profile web     add github:GioStarLC/dsh-nudge   # dsh web
 
 ```sh
 npm install
+npm run hooks:install   # 首次克隆后执行，启用 .githooks/pre-commit
 npm run check
 npm run preview:all
 ```
 
 `check` 跑 client 和 host 检查，提交钩子也会调用；`preview:all` 把界面场景渲染到 `preview-out/`。
+
+仓库不含任何安装期钩子（没有 `prepare`、`postinstall`），所以以 git 方式安装的消费方不会触发 pnpm 的构建脚本审批。
 
 ## 许可
 
