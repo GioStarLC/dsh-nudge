@@ -1,0 +1,9 @@
+#!/bin/sh
+# Guardrail: run the client + host checks before every commit.
+# Installed by `npm run prepare` (see package.json) or:
+#   git config core.hooksPath .githooks
+# Skip once with: git commit --no-verify
+set -e
+echo "pre-commit: running checks (npm run check)…"
+npm run --silent check
+echo "pre-commit: checks passed."

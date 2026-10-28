@@ -8,10 +8,20 @@
  *
  * Run: node scripts/check-client.mjs
  */
-import { readFile } from 'node:fs/promises'
-import vm from 'node:vm'
-
-const source = await readFile(new URL('../client.js', import.meta.url), 'utf8')
+import {
+  source,
+  sleep,
+  tick,
+  findByClass,
+  findAllByClass,
+  findByProp,
+  observable,
+  ReactStub,
+  storageStub,
+  boot,
+  pointerAt,
+  // boot/builds the VM instance; the rest are shared with scripts/preview.mjs
+} from './harness.mjs'
 
 let failures = 0
 function check(label, actual, expected) {
@@ -24,183 +34,6 @@ function includes(label, haystack, needle) {
   if (!ok) failures += 1
   console.log(`${ok ? 'ok  ' : 'FAIL'}  ${label}: ${JSON.stringify(haystack)}${ok ? '' : ` (expected to include ${JSON.stringify(needle)})`}`)
 }
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
-const tick = () => sleep(20)
-
-/** Depth-first search for one rendered element by CSS class. */
-function findByClass(node, className) {
-  if (!node || typeof node !== 'object') return null
-  const classes = node.props && typeof node.props.className === 'string' ? node.props.className.split(/\s+/) : []
-  if (classes.includes(className)) return node
-  for (const child of node.children ?? []) {
-    const hit = findByClass(child, className)
-    if (hit) return hit
-  }
-  return null
-}
-
-/** Depth-first collection of every rendered element with one CSS class. */
-function findAllByClass(node, className, out = []) {
-  if (!node || typeof node !== 'object') return out
-  const classes = node.props && typeof node.props.className === 'string' ? node.props.className.split(/\s+/) : []
-  if (classes.includes(className)) out.push(node)
-  for (const child of node.children ?? []) findAllByClass(child, className, out)
-  return out
-}
-
-/** Depth-first search for one rendered element by prop value. */
-function findByProp(node, key, value) {
-  if (!node || typeof node !== 'object') return null
-  if (node.props && node.props[key] === value) return node
-  for (const child of node.children ?? []) {
-    const hit = findByProp(child, key, value)
-    if (hit) return hit
-  }
-  return null
-}
-
-/** One synthetic pointer event for the component wiring checks. */
-function pointerAt(clientX, clientY, target) {
-  return {
-    button: 0,
-    pointerId: 7,
-    clientX,
-    clientY,
-    preventDefault() {},
-    target: target ?? { closest: () => null },
-    currentTarget: { setPointerCapture() {} },
-  }
-}
-
-/** One observable store stub (getSnapshot/subscribe), like a Client store. */
-function observable(initial) {
-  const listeners = new Set()
-  return {
-    value: initial,
-    getSnapshot() {
-      return this.value
-    },
-    subscribe(listener) {
-      listeners.add(listener)
-      return () => listeners.delete(listener)
-    },
-    set(next) {
-      this.value = next
-      for (const listener of [...listeners]) listener()
-    },
-  }
-}
-
-/** A minimal React stub: the factory only reads createElement and hooks. */
-const ReactStub = {
-  createElement: (type, props, ...children) => ({ type, props, children }),
-  Fragment: 'Fragment',
-  useRef: (initial) => ({ current: initial }),
-  useState: (initial) => [typeof initial === 'function' ? initial() : initial, () => {}],
-  useEffect: () => {},
-  useSyncExternalStore: (subscribe, getSnapshot) => getSnapshot(),
-}
-
-/** A localStorage stub. */
-function storageStub() {
-  const data = new Map()
-  return {
-    data,
-    getItem: (key) => (data.has(key) ? data.get(key) : null),
-    setItem: (key, value) => data.set(key, String(value)),
-    removeItem: (key) => data.delete(key),
-  }
-}
-
-/**
- * Boot one bundle instance.
- * @param options - `{ bindings, promptResult, language, innerWidth, innerHeight }`.
- * @returns the sandbox handles used by the checks.
- */
-async function boot(options = {}) {
-  const calls = { prompt: [] }
-  const injects = []
-  const registrations = []
-  const effects = []
-  const sessionsList = observable({ ids: [], byId: {} })
-  const statusMap = observable(new Map())
-  const remoteSession = {
-    prompt(request, signal) {
-      calls.prompt.push({ request, signal })
-      return Promise.resolve(options.promptResult ?? { ok: true, value: { accepted: true } })
-    },
-  }
-  const binds = options.bindings ?? {}
-  const services = {
-    sessions: {
-      list: sessionsList,
-      binding: (id) => (binds[id] ? { eventSource: binds[id] } : undefined),
-    },
-    uiSession: { sessionStatus: statusMap },
-    'remote.session': remoteSession,
-    remote: { session: remoteSession },
-    locale: undefined,
-    shortcuts: options.shortcuts,
-  }
-  const ctx = {
-    get: (name) => services[name],
-    effect(fn, label) {
-      const dispose = fn()
-      effects.push({ label, dispose })
-      return () => {
-        if (typeof dispose === 'function') dispose()
-      }
-    },
-    slots: {
-      inject(name, callback) {
-        injects.push(name)
-        return callback()
-      },
-      register(entry, Component) {
-        registrations.push({ entry, Component })
-        return () => {
-          const index = registrations.findIndex((item) => item.Component === Component)
-          if (index >= 0) registrations.splice(index, 1)
-        }
-      },
-    },
-  }
-
-  const localStorage = storageStub()
-  const sandbox = {
-    console,
-    setTimeout,
-    clearTimeout,
-    Date,
-    Math,
-    Intl,
-    JSON,
-    Promise,
-    AbortController,
-    navigator: { language: options.language ?? 'zh-CN' },
-    document: { querySelector: () => null },
-    localStorage,
-    innerWidth: options.innerWidth ?? 1440,
-    innerHeight: options.innerHeight ?? 900,
-    getComputedStyle: () => ({ getPropertyValue: () => '' }),
-    addEventListener: () => {},
-    removeEventListener: () => {},
-  }
-  sandbox.window = sandbox
-  sandbox.__ModuleLoader__ = {
-    load(definition) {
-      sandbox.__module = definition.factory((id) => {
-        if (id === 'react') return ReactStub
-        throw new Error(`unexpected require: ${id}`)
-      })
-    },
-  }
-  vm.createContext(sandbox)
-  vm.runInContext(source, sandbox, { filename: 'client.js' })
-  sandbox.__module.apply(ctx)
-  return { sandbox, runtime: sandbox.__dshNudge, calls, injects, registrations, effects, sessionsList, statusMap, localStorage }
-}
-
 // --- activation ---------------------------------------------------------
 
 {
@@ -273,6 +106,9 @@ async function boot(options = {}) {
   await tick()
   check('delivery switch accepted', booted.runtime.setDelivery('followup'), true)
   check('effective delivery', booted.runtime.effectiveDelivery(), 'followup')
+  check('switching delivery says so in words', booted.runtime.getSnapshot().flash, '方式：排队')
+  check('turbo toggle says so in words', booted.runtime.setTurbo(true) && booted.runtime.getSnapshot().flash, '急速模式：开')
+  check('quick toggle says so in words', booted.runtime.setQuick(true) && booted.runtime.getSnapshot().flash, '快速批注：开')
   booted.runtime.ask()
   await tick()
   check('queue maps to queue', booted.calls.prompt[0].request.mode, 'queue')
@@ -460,19 +296,12 @@ async function boot(options = {}) {
   check('titlebar drag moves y', after.y - before.y, 30)
   check('titlebar drag does not collapse', booted.runtime.getSnapshot().collapsed, false)
 
-  // A plain click on the titlebar collapses in place; a cancelled pointer does not.
-  tree = View()
-  const titleAgain = findByClass(tree, 'dsh-nudge-title')
-  titleAgain.props.onPointerDown(pointerAt(300, 200))
-  titleAgain.props.onPointerCancel()
-  check('a cancelled titlebar press does not collapse', booted.runtime.getSnapshot().collapsed, false)
-
+  // A plain click on the titlebar no longer collapses the card.
   tree = View()
   const titleClick = findByClass(tree, 'dsh-nudge-title')
   titleClick.props.onPointerDown(pointerAt(300, 200))
   titleClick.props.onPointerUp()
-  check('a plain titlebar click collapses', booted.runtime.getSnapshot().collapsed, true)
-  check('titlebar click persists collapse', JSON.parse(booted.localStorage.getItem('dsh-nudge:ui')).collapsed, true)
+  check('a plain titlebar click does not collapse', booted.runtime.getSnapshot().collapsed, false)
 }
 
 // --- settings gear: open the shell panel on this plugin's section ------
@@ -687,8 +516,13 @@ function composerFocus() {
   const View = booted.registrations.find((item) => item.entry.name === 'shell.overlay').Component
   const askButton = findByClass(View(), 'dsh-nudge-ask')
   check('primary button relabels for write mode', askButton?.children?.[0], '写入输入框')
-  const modeGroup = findByClass(View(), 'dsh-nudge-mode')
-  check('delivery switch is inactive in write mode', modeGroup?.props?.['aria-disabled'], 'true')
+  const deliveryToggle = findByClass(View(), 'dsh-nudge-delivery-toggle')
+  check('delivery switch is inactive in write mode', deliveryToggle?.props?.disabled, true)
+  check(
+    'delivery switch is an icon on the quick-input row',
+    deliveryToggle?.props?.className?.includes('dsh-nudge-head-icon'),
+    true,
+  )
 }
 
 {
@@ -707,12 +541,15 @@ function composerFocus() {
 // --- annotations: selection -> tray -> send / write ---------------------
 
 /** A window.getSelection() stub over one non-collapsed range. */
-function selectionStub(text, element) {
+function selectionStub(text, element, rect) {
   return () => ({
     rangeCount: 1,
     isCollapsed: false,
     toString: () => text,
-    getRangeAt: () => ({ commonAncestorContainer: element }),
+    getRangeAt: () => ({
+      commonAncestorContainer: element,
+      getBoundingClientRect: () => rect ?? { left: 100, top: 300, right: 300, bottom: 320, width: 200, height: 20 },
+    }),
   })
 }
 
@@ -800,10 +637,46 @@ function selectionStub(text, element) {
   includes('annotation: repository explains the gesture', hint?.children?.[0], '选中对话里的文字')
   booted.sandbox.getSelection = selectionStub('原文内容', { nodeType: 1, closest: () => null })
   booted.runtime.captureSelection()
-  const popup = findByClass(View(), 'dsh-nudge-popup')
-  check('annotation: capture opens the beside card', Boolean(popup), true)
-  check('annotation: card shows the quote', popup?.children?.[0]?.children?.[0], '原文内容')
-  check('annotation: window keeps no compose box', findByClass(View(), 'dsh-nudge-annotation-compose'), null)
+  const tree = View()
+  const popup = findByClass(tree, 'dsh-nudge-popup')
+  check('annotation: capture opens the selection card', Boolean(popup), true)
+  check(
+    'annotation: card no longer repeats the quoted text',
+    findByClass(popup, 'dsh-nudge-popup-quote'),
+    null,
+  )
+  check(
+    'annotation: card carries its own close button',
+    Boolean(findByClass(popup, 'dsh-nudge-popup-close')),
+    true,
+  )
+  check(
+    'annotation: card keeps the single quick-action row',
+    (findAllByClass(popup, 'dsh-nudge-popup-quick') ?? []).length,
+    2,
+  )
+  check(
+    'annotation: card offers save and copy',
+    Boolean(findByClass(popup, 'dsh-nudge-popup-save')) &&
+      Boolean(findByClass(popup, 'dsh-nudge-popup-copy')),
+    true,
+  )
+  check(
+    'annotation: copy reports its own result',
+    await booted.runtime.copyDraftQuote(),
+    false,
+  )
+  check(
+    'annotation: card spells out the keys',
+    findByClass(popup, 'dsh-nudge-popup-hint')?.children?.[0]?.children?.[0]?.children?.[0],
+    'Enter',
+  )
+  check(
+    'annotation: card is placed over the quote, not beside it',
+    popup?.props?.style?.transform,
+    'translateY(-100%)',
+  )
+  check('annotation: window keeps no compose box', findByClass(tree, 'dsh-nudge-annotation-compose'), null)
 }
 
 // --- turbo mode: no primary button, double-click runs a prompt ----------
@@ -819,7 +692,7 @@ function selectionStub(text, element) {
   check('turbo state published', booted.runtime.getSnapshot().turbo, true)
   const tree = View()
   check('turbo hides the primary button', findByClass(tree, 'dsh-nudge-ask'), null)
-  check('turbo shows the double-click hint', findByClass(tree, 'dsh-nudge-turbo-hint')?.children?.[0], '双击口径直接询问状态')
+  check('turbo shows no double-click hint line', findByClass(tree, 'dsh-nudge-turbo-hint'), null)
   check('turbo prompt exposes double-click', typeof findByClass(tree, 'dsh-nudge-chip')?.props?.onDoubleClick, 'function')
 
   const settings = booted.registrations.find((item) => item.entry.name === 'settings.section')
@@ -856,7 +729,7 @@ function selectionStub(text, element) {
   booted.sandbox.document = composerFocus()
   booted.runtime.attachComposer({ readDraft: () => '', setDraft: (value) => writes.push(value) })
   const View = booted.registrations.find((item) => item.entry.name === 'shell.overlay').Component
-  check('turbo write hint follows the caret', findByClass(View(), 'dsh-nudge-turbo-hint')?.children?.[0], '双击口径写入输入框')
+  check('turbo keeps no hint line in write mode either', findByClass(View(), 'dsh-nudge-turbo-hint'), null)
   findByClass(View(), 'dsh-nudge-chip').props.onDoubleClick()
   check('turbo double-click writes instead of sending', writes.length, 1)
   check('turbo double-click delivers nothing', booted.calls.prompt.length, 0)

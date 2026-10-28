@@ -25,6 +25,14 @@
     "icon.svg",
     "README.md"
   ],
+  "scripts": {
+    "prepare": "git config core.hooksPath .githooks || true",
+    "check": "node scripts/check-client.mjs && node scripts/check-host.mjs",
+    "check:client": "node scripts/check-client.mjs",
+    "check:host": "node scripts/check-host.mjs",
+    "preview": "node scripts/preview.mjs",
+    "preview:all": "node scripts/preview.mjs --all"
+  },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
