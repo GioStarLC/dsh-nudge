@@ -118,8 +118,8 @@ window.__ModuleLoader__.load({
       modeInactive: '写入输入框时不需要投递方式',
       turboTitle: '急速模式',
       turboDesc: '隐藏底部按钮：双击口径直接执行（光标在输入框就写入，否则发送）。',
-      turboAskHint: '双击口径直接询问状态',
-      turboInsertHint: '双击口径写入输入框',
+      switchOn: '开',
+      switchOff: '关',
       answerLabel: '我的回答：',
       annotationsTitle: '批注',
       annotationPlaceholder: '对这段内容说点什么…',
@@ -141,11 +141,13 @@ window.__ModuleLoader__.load({
       copyQuote: '复制',
       copied: '引用已复制到剪贴板。',
       copyFailed: '复制失败，请手动选中后复制。',
+      copiedShort: '已复制',
+      copyFailedShort: '复制失败',
       saveAnnotation: '保存',
       asking: '等待回答…',
       again: '再问一次',
       collapse: '收起',
-      collapseHint: '点击标题栏收起；拖动可移动',
+      collapseHint: '拖动可移动',
       expand: '展开 dsh-nudge 窗口',
       statusIdle: '未询问',
       statusWaiting: '等待中',
@@ -154,8 +156,6 @@ window.__ModuleLoader__.load({
       mode: '方式',
       queue: '排队',
       steer: '直接打断',
-      queueHint: '排到当前任务之后，作为下一轮发出',
-      steerHint: '立即插入当前任务，下一个 step 边界生效',
       preset: '口径',
       noSession: '没有打开的会话，无法询问。',
       waitingQuestion: 'agent 正在等待你的回答',
@@ -198,8 +198,8 @@ window.__ModuleLoader__.load({
       modeInactive: 'Delivery mode does not apply when inserting text',
       turboTitle: 'Turbo mode',
       turboDesc: 'Hide the primary button: double-click a prompt to run it right away (insert when the caret is in the input box, send otherwise).',
-      turboAskHint: 'Double-click a prompt to ask',
-      turboInsertHint: 'Double-click a prompt to insert',
+      switchOn: 'on',
+      switchOff: 'off',
       answerLabel: 'My answer: ',
       annotationsTitle: 'Notes',
       annotationPlaceholder: 'Say something about this passage…',
@@ -221,11 +221,13 @@ window.__ModuleLoader__.load({
       copyQuote: 'Copy',
       copied: 'The passage was copied to the clipboard.',
       copyFailed: 'Could not copy; select and copy it manually.',
+      copiedShort: 'Copied',
+      copyFailedShort: 'Copy failed',
       saveAnnotation: 'Save',
       asking: 'Waiting…',
       again: 'Ask again',
       collapse: 'Collapse',
-      collapseHint: 'Click the title bar to collapse; drag to move',
+      collapseHint: 'Drag to move',
       expand: 'Expand the dsh-nudge window',
       statusIdle: 'Not asked',
       statusWaiting: 'Waiting',
@@ -234,8 +236,6 @@ window.__ModuleLoader__.load({
       mode: 'Mode',
       queue: 'Queue',
       steer: 'Interrupt',
-      queueHint: 'Queued after the current task, sent as the next turn',
-      steerHint: 'Interjects into the current task at the next step boundary',
       preset: 'Prompt',
       noSession: 'No open conversation to ask.',
       waitingQuestion: 'The agent is waiting for your answer',
@@ -840,6 +840,8 @@ window.__ModuleLoader__.load({
         phase: 'idle',
         note: '',
         error: '',
+        /** Short-lived confirmation of a toggle, cleared on a timer. */
+        flash: '',
         lastAt: undefined,
         lastSessionId: undefined,
         unread: false,
@@ -1271,6 +1273,7 @@ window.__ModuleLoader__.load({
 
       let selectionTimer
       let attentionTimer
+      let flashTimer
       let repaintTimer
       let highlightObserver
       /** Ranges painted for the current notes, used to hit-test clicks. */
@@ -1289,13 +1292,18 @@ window.__ModuleLoader__.load({
        * double-click word selection and drag-then-adjust smooth: the browser's
        * own finalisation, the second click and the following mouseup all land
        * before the draft appears, and focus is not stolen mid-gesture.
+       * The pointer's own position is kept so the card can open right at the cursor.
        */
-      function captureSelectionLater() {
+      function captureSelectionLater(event) {
         if (state.quick !== true) return
         if (selectionTimer !== undefined) clearTimeout(selectionTimer)
+        const pointer =
+          event && typeof event.clientX === 'number' && typeof event.clientY === 'number'
+            ? { x: event.clientX, y: event.clientY }
+            : null
         selectionTimer = setTimeout(() => {
           selectionTimer = undefined
-          captureSelection()
+          captureSelection(pointer)
         }, 200)
       }
 
@@ -1314,8 +1322,24 @@ window.__ModuleLoader__.load({
         }, 900)
       }
 
+      /**
+       * Show one short confirmation line after a toggle, so a icon-only button
+       * still says in words what it just switched to.
+       */
+      function notify(message) {
+        const line = typeof message === 'string' ? message : ''
+        if (line === '') return false
+        setState({ flash: line })
+        if (flashTimer !== undefined) clearTimeout(flashTimer)
+        flashTimer = setTimeout(() => {
+          flashTimer = undefined
+          setState({ flash: '' })
+        }, 1600)
+        return true
+      }
+
       /** Turn the current selection into the pending annotation draft. */
-      function captureSelection() {
+      function captureSelection(pointer = null) {
         const selection = readSelection()
         if (selection === null) return false
         if (
@@ -1342,6 +1366,7 @@ window.__ModuleLoader__.load({
             rect: rect
               ? { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom }
               : null,
+            pointer,
           },
           annotationNote: '',
           annotationEditingId: null,
@@ -1350,27 +1375,6 @@ window.__ModuleLoader__.load({
         })
         repaintHighlights()
         return true
-      }
-
-      /**
-       * Re-apply the captured Range after the note field takes focus. Focus
-       * collapses the real selection and every keystroke clears it again, so
-       * the window keeps restoring it: the passage stays genuinely selected
-       * (native deep-blue) while the caret types in the window.
-       */
-      function restoreCaptureSelection() {
-        const draft = state.annotationDraft
-        if (draft === null || draft.range == null) return false
-        try {
-          const selection = window.getSelection?.()
-          if (!selection) return false
-          if (selection.rangeCount > 0 && selection.isCollapsed === false) return true
-          selection.removeAllRanges()
-          selection.addRange(draft.range)
-          return true
-        } catch {
-          return false
-        }
       }
 
       /** Drop the browser selection only when it is still our captured quote. */
@@ -1403,6 +1407,7 @@ window.__ModuleLoader__.load({
         })
         if (next) repaintHighlights()
         else repaintHighlights()
+        notify(next ? text('quickOn') : text('quickOff'))
         return true
       }
 
@@ -1535,24 +1540,22 @@ window.__ModuleLoader__.load({
         return true
       }
 
-      /** Copy the captured passage to the clipboard (the copy the flow hides). */
+      /**
+       * Copy the captured passage. Resolves to whether the clipboard took it;
+       * the card reports that in place, the way ds-popup's copy button does.
+       */
       function copyDraftQuote() {
         const quote = state.annotationDraft?.quote
-        if (typeof quote !== 'string' || quote === '') return false
+        if (typeof quote !== 'string' || quote === '') return Promise.resolve(false)
         try {
           const clipboard = navigator.clipboard
-          if (typeof clipboard?.writeText !== 'function') {
-            setState({ note: text('copyFailed') })
-            return false
-          }
-          clipboard.writeText(quote).then(
-            () => setState({ note: text('copied') }),
-            () => setState({ note: text('copyFailed') }),
+          if (typeof clipboard?.writeText !== 'function') return Promise.resolve(false)
+          return Promise.resolve(clipboard.writeText(quote)).then(
+            () => true,
+            () => false,
           )
-          return true
         } catch {
-          setState({ note: text('copyFailed') })
-          return false
+          return Promise.resolve(false)
         }
       }
 
@@ -1683,22 +1686,59 @@ window.__ModuleLoader__.load({
         startEditAnnotation(note.id)
       }
 
-      /** Viewport box for the selection card: beside the quote, flipped when cramped. */
+      /**
+       * Viewport box for the selection card: pinned to the pointer that finished
+       * the selection, opened below-right of it when there is room and flipped to
+       * the other side when the viewport edge is near. Without a pointer (keyboard
+       * selection) it falls back to the quote box, centred above/below it.
+       */
       function popupPosition() {
         const draft = state.annotationDraft
-        const width = 320
-        const margin = 12
-        const approxHeight = 240
+        const width = 340
+        const margin = 8
+        const gap = 10
+        const offset = 12
+        const approxHeight = 280
         const vw = viewport().width
         const vh = viewport().height
+        const boxWidth = Math.min(width, vw - margin * 2)
         const rect = draft?.rect ?? null
-        if (!rect) return { left: `${Math.max(margin, vw - width - margin)}px`, top: '96px', width: `${width}px` }
-        let left = rect.right + 10
-        if (left + width > vw - margin) left = rect.left - width - 10
-        if (left < margin) left = Math.max(margin, Math.min(rect.left, vw - width - margin))
-        let top = rect.bottom + 8
-        if (top + approxHeight > vh - margin) top = Math.max(margin, rect.top - approxHeight - 8)
-        return { left: `${Math.round(left)}px`, top: `${Math.round(top)}px`, width: `${width}px` }
+        const pointer = draft?.pointer ?? null
+        const clampX = (value) => Math.max(margin, Math.min(value, vw - boxWidth - margin))
+        if (pointer) {
+          const { x, y } = pointer
+          const left = clampX(x + offset)
+          const flipLeft = x + offset + boxWidth > vw - margin
+          const top = y + offset
+          if (top + approxHeight <= vh - margin) {
+            return { left: `${Math.round(flipLeft ? clampX(x - offset - boxWidth) : left)}px`, top: `${Math.round(top)}px`, transform: 'none' }
+          }
+          // Not enough room below: open above the cursor instead.
+          const aboveTop = Math.max(margin, y - offset)
+          return {
+            left: `${Math.round(flipLeft ? clampX(x - offset - boxWidth) : left)}px`,
+            top: `${Math.round(aboveTop)}px`,
+            transform: 'translateY(-100%)',
+          }
+        }
+        if (!rect) {
+          return {
+            left: `${Math.max(margin, vw - boxWidth - margin)}px`,
+            top: '96px',
+            transform: 'none',
+          }
+        }
+        const left = clampX(rect.left + rect.width / 2 - boxWidth / 2)
+        if (rect.top - gap - approxHeight >= margin) {
+          return {
+            left: `${Math.round(left)}px`,
+            top: `${Math.round(rect.top - gap)}px`,
+            transform: 'translateY(-100%)',
+          }
+        }
+        const below = rect.bottom + gap
+        const top = Math.min(below, Math.max(margin, vh - approxHeight - margin))
+        return { left: `${Math.round(left)}px`, top: `${Math.round(top)}px`, transform: 'none' }
       }
 
       /** Close the selection card, dropping its draft and the restored selection. */
@@ -1942,6 +1982,7 @@ window.__ModuleLoader__.load({
           /* best effort */
         }
         setState({ deliveryOverride: value })
+        notify(`${text('mode')}：${value === 'steer' ? text('steer') : text('queue')}`)
         return true
       }
 
@@ -1961,6 +2002,7 @@ window.__ModuleLoader__.load({
           /* best effort */
         }
         setState({ turbo: next })
+        notify(`${text('turboTitle')}：${next ? text('switchOn') : text('switchOff')}`)
         return true
       }
 
@@ -2384,7 +2426,6 @@ window.__ModuleLoader__.load({
         /** Annotation tray. */
         captureSelection,
         popupPosition,
-        restoreCaptureSelection,
         setQuick,
         setAnnotationExpanded,
         setNudgeExpanded,
@@ -2410,17 +2451,23 @@ window.__ModuleLoader__.load({
     // ---------------------------------------------------------------------
 
     const CSS = `
-.dsh-nudge-card,.dsh-nudge-pill,.dsh-nudge-settings{--dn-accent:color-mix(in srgb,var(--dsw-static-deepseek-450,#5686fe) 78%,var(--dsw-alias-label-primary,#1a1a1a) 22%);--dn-accent-soft:color-mix(in srgb,var(--dsw-static-deepseek-450,#5686fe) 14%,transparent);--dn-accent-line:color-mix(in srgb,var(--dsw-static-deepseek-450,#5686fe) 38%,transparent);--dn-line:var(--dsw-alias-border-l1,rgba(127,127,127,.25));--dn-hover:color-mix(in srgb,var(--dsw-alias-label-primary,#1a1a1a) 6%,transparent)}
+.dsh-nudge-card,.dsh-nudge-pill,.dsh-nudge-settings,.dsh-nudge-popup{--dn-accent:color-mix(in srgb,var(--dsw-static-deepseek-450,#5686fe) 78%,var(--dsw-alias-label-primary,#1a1a1a) 22%);--dn-accent-soft:color-mix(in srgb,var(--dsw-static-deepseek-450,#5686fe) 14%,transparent);--dn-accent-line:color-mix(in srgb,var(--dsw-static-deepseek-450,#5686fe) 38%,transparent);--dn-line:var(--dsw-alias-border-l1,rgba(127,127,127,.25));--dn-line-strong:color-mix(in srgb,var(--dsw-alias-label-primary,#1a1a1a) 28%,transparent);--dn-hover:color-mix(in srgb,var(--dsw-alias-label-primary,#1a1a1a) 6%,transparent);--dn-agree:#2e7d32}
 .dsh-nudge-card{position:fixed;z-index:${Z_INDEX};width:min(304px,calc(100vw - 24px));display:flex;flex-direction:column;border-radius:16px;border:1px solid var(--dn-line);background:var(--dsw-alias-bg-layer-1,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);box-shadow:0 1px 2px rgba(15,23,42,.04),0 18px 44px -22px rgba(15,23,42,.3);font:13px/1.55 ui-sans-serif,system-ui,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;overflow:hidden;pointer-events:auto;animation:dsh-nudge-in .18s ease-out}
 @keyframes dsh-nudge-in{from{opacity:0;transform:translateY(-5px) scale(.985)}to{opacity:1;transform:none}}
 .dsh-nudge-title{display:flex;align-items:center;gap:8px;padding:12px 12px 10px 14px;cursor:grab;user-select:none;touch-action:none;border-bottom:1px solid var(--dn-line)}
 .dsh-nudge-title:active{cursor:grabbing}
 .dsh-nudge-name{font-size:12.5px;font-weight:600;letter-spacing:.2px}
 .dsh-nudge-spacer{flex:1 1 auto}
-.dsh-nudge-dot{width:8px;height:8px;border-radius:50%;background:var(--dsw-alias-state-idle-primary,#9a9aa4);flex:0 0 auto;box-shadow:0 0 0 3px color-mix(in srgb,var(--dsw-alias-state-idle-primary,#9a9aa4) 16%,transparent);transition:background .2s ease,box-shadow .2s ease}
-.dsh-nudge-dot.waiting{background:var(--dsw-alias-state-warn-primary,#d99b1e);box-shadow:0 0 0 3px color-mix(in srgb,var(--dsw-alias-state-warn-primary,#d99b1e) 20%,transparent);animation:dsh-nudge-pulse 1.2s ease-in-out infinite}
-.dsh-nudge-dot.done{background:var(--dsw-alias-state-success-primary,#2f9e63);box-shadow:0 0 0 3px color-mix(in srgb,var(--dsw-alias-state-success-primary,#2f9e63) 18%,transparent)}
-.dsh-nudge-dot.error{background:var(--dsw-alias-state-error-primary,#c8433c);box-shadow:0 0 0 3px color-mix(in srgb,var(--dsw-alias-state-error-primary,#c8433c) 18%,transparent)}
+.dsh-nudge-mark{display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;width:16px;height:16px;color:var(--dsw-alias-state-idle-primary,#9a9aa4);transition:color .2s ease}
+.dsh-nudge-mark svg{display:block;overflow:visible}
+.dsh-nudge-mark .dsh-nudge-mark-tap{opacity:.55;transition:opacity .2s ease}
+.dsh-nudge-mark.waiting{color:var(--dsw-alias-state-warn-primary,#d99b1e)}
+.dsh-nudge-mark.waiting .dsh-nudge-mark-tap{opacity:1;transform-box:fill-box;transform-origin:center;animation:dsh-nudge-tap 1.2s ease-out infinite}
+.dsh-nudge-mark.done{color:var(--dsw-alias-state-success-primary,#2f9e63)}
+.dsh-nudge-mark.done .dsh-nudge-mark-tap{opacity:0}
+.dsh-nudge-mark.error{color:var(--dsw-alias-state-error-primary,#c8433c)}
+.dsh-nudge-mark.error .dsh-nudge-mark-tap{opacity:0}
+@keyframes dsh-nudge-tap{0%{opacity:1;transform:scale(.55)}45%{opacity:.5;transform:scale(1)}100%{opacity:0;transform:scale(1)}}
 @keyframes dsh-nudge-pulse{0%,100%{opacity:1}50%{opacity:.35}}
 .dsh-nudge-icon{width:24px;height:24px;display:inline-flex;align-items:center;justify-content:center;padding:0;border:0;border-radius:8px;background:transparent;color:var(--dsw-alias-label-secondary,#5a5a66);cursor:pointer;transition:background .15s ease,color .15s ease}
 .dsh-nudge-icon:hover{background:var(--dn-hover);color:var(--dsw-alias-label-primary,#1a1a1a)}
@@ -2428,6 +2475,8 @@ window.__ModuleLoader__.load({
 .dsh-nudge-alert{margin:10px 14px 0;padding:8px 10px;border-radius:10px;font-size:12px;line-height:1.5;word-break:break-word}
 .dsh-nudge-alert.error{background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#c8433c) 10%,transparent);color:var(--dsw-alias-state-error-primary,#c8433c)}
 .dsh-nudge-alert.note{background:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#d99b1e) 12%,transparent);color:var(--dsw-alias-state-warn-primary,#a06a00)}
+.dsh-nudge-flash{margin:8px 14px 0;font-size:11.5px;line-height:1.4;color:var(--dn-accent);animation:dsh-nudge-flash-in .16s ease-out}
+@keyframes dsh-nudge-flash-in{from{opacity:0;transform:translateY(-2px)}to{opacity:1;transform:none}}
 .dsh-nudge-content{display:flex;flex-direction:column;gap:12px;padding:12px 14px 14px}
 .dsh-nudge-field{display:flex;flex-direction:column;gap:7px;min-width:0}
 .dsh-nudge-field-inline{flex-direction:row;align-items:center;gap:10px}
@@ -2438,25 +2487,37 @@ window.__ModuleLoader__.load({
 .dsh-nudge-chip:hover{border-color:var(--dn-accent-line);color:var(--dsw-alias-label-primary,#1a1a1a);background:var(--dn-accent-soft)}
 .dsh-nudge-chip:focus-visible{outline:2px solid var(--dn-accent-line);outline-offset:2px}
 .dsh-nudge-chip.active{background:var(--dn-accent-soft);border-color:var(--dn-accent-line);color:var(--dn-accent);font-weight:600}
-.dsh-nudge-mode{display:inline-flex;gap:3px;padding:3px;border-radius:10px;background:color-mix(in srgb,var(--dsw-alias-label-primary,#1a1a1a) 5%,transparent);border:1px solid var(--dn-line)}
-.dsh-nudge-mode button{height:24px;padding:0 11px;border:0;border-radius:7px;background:transparent;color:var(--dsw-alias-label-secondary,#5a5a66);font:inherit;font-size:12px;white-space:nowrap;cursor:pointer;transition:background .15s ease,color .15s ease}
-.dsh-nudge-mode button:hover{color:var(--dsw-alias-label-primary,#1a1a1a)}
-.dsh-nudge-mode button.active{background:var(--dn-accent-soft);color:var(--dn-accent);font-weight:600}
-.dsh-nudge-mode button:focus-visible{outline:2px solid var(--dn-accent-line);outline-offset:1px}
-.dsh-nudge-mode.inactive{opacity:.45;pointer-events:none}
 .dsh-nudge-ask{height:38px;border:0;border-radius:11px;cursor:pointer;font:inherit;font-size:13px;font-weight:600;letter-spacing:.2px;color:var(--dsw-alias-label-primary-inverted,#fff);background:var(--dn-accent);box-shadow:0 8px 20px -10px color-mix(in srgb,var(--dsw-static-deepseek-450,#5686fe) 55%,transparent);transition:filter .15s ease,transform .1s ease,box-shadow .15s ease}
 .dsh-nudge-ask:hover{filter:brightness(1.05);box-shadow:0 10px 24px -10px color-mix(in srgb,var(--dsw-static-deepseek-450,#5686fe) 65%,transparent)}
 .dsh-nudge-ask:active{transform:translateY(1px)}
 .dsh-nudge-ask:disabled{opacity:.55;cursor:default;box-shadow:none;filter:none}
 .dsh-nudge-ask:focus-visible{outline:2px solid var(--dn-accent-line);outline-offset:2px}
-.dsh-nudge-turbo-hint{font-size:11px;line-height:1.5;color:var(--dsw-alias-label-secondary,#5a5a66);text-align:center;padding:2px 0 0;user-select:none}
 .dsh-nudge-annotation-compose{display:flex;flex-direction:column;gap:8px;padding:10px;border-radius:12px;border:1px solid var(--dn-accent-line);background:var(--dn-accent-soft)}
 .dsh-nudge-annotation-compose .dsh-nudge-annotation-quote{min-height:34px;-webkit-line-clamp:2}
 .dsh-nudge-annotation-quote{font-size:11.5px;line-height:1.5;color:var(--dsw-alias-label-secondary,#5a5a66);white-space:pre-wrap;word-break:break-word;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
 .dsh-nudge-annotation-hint{font-size:11px;line-height:1.5;color:var(--dsw-alias-label-secondary,#5a5a66)}
-.dsh-nudge-popup{position:fixed;z-index:${Z_INDEX + 1};box-sizing:border-box;display:flex;flex-direction:column;gap:8px;padding:12px;border-radius:14px;border:1px solid var(--dn-line);background:var(--dsw-alias-bg-layer-1,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);box-shadow:0 1px 2px rgba(15,23,42,.06),0 18px 44px -20px rgba(15,23,42,.35);font:13px/1.55 ui-sans-serif,system-ui,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;pointer-events:auto;animation:dsh-nudge-in .16s ease-out}
-.dsh-nudge-popup-quote{font-size:11.5px;line-height:1.5;color:var(--dsw-alias-label-secondary,#5a5a66);white-space:pre-wrap;word-break:break-word;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
-.dsh-nudge-annotation-input{width:100%;box-sizing:border-box;min-height:52px;field-sizing:content;max-height:min(160px,28vh);overflow-y:auto;border:1px solid var(--dn-line);border-radius:9px;background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);font:inherit;font-size:12px;line-height:1.55;padding:8px 10px}
+.dsh-nudge-popup{position:fixed;z-index:${Z_INDEX + 1};box-sizing:border-box;width:340px;max-width:calc(100vw - 16px);display:flex;flex-direction:column;gap:8px;padding:10px;border-radius:12px;border:1px solid var(--dn-line);background:var(--dsw-alias-bg-layer-1,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);box-shadow:0 10px 30px rgba(0,0,0,.16),0 2px 8px rgba(0,0,0,.08);font:13px/1.45 ui-sans-serif,system-ui,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;pointer-events:auto;opacity:.72;transition:opacity .22s ease;animation:dsh-nudge-popup-in .18s ease-out}
+.dsh-nudge-popup:hover,.dsh-nudge-popup:focus-within{opacity:1}
+@keyframes dsh-nudge-popup-in{from{opacity:0}to{opacity:.72}}
+@media (prefers-reduced-motion:reduce){.dsh-nudge-popup{animation:none;transition:none}}
+.dsh-nudge-popup-close{position:absolute;top:6px;right:6px;width:22px;height:22px;padding:0;border:0;border-radius:6px;background:transparent;color:var(--dsw-alias-label-secondary,#5a5a66);font:inherit;font-size:16px;line-height:20px;cursor:pointer}
+.dsh-nudge-popup-close:hover{background:var(--dn-hover);color:var(--dsw-alias-label-primary,#1a1a1a)}
+.dsh-nudge-popup-row{display:flex;align-items:center;gap:6px}
+.dsh-nudge-popup-row button{height:32px;padding:0 9px;border:1px solid var(--dn-line);border-radius:8px;background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);font:inherit;font-size:13px;line-height:1;white-space:nowrap;cursor:pointer;transition:background-color .12s ease,border-color .12s ease,transform .12s ease}
+.dsh-nudge-popup-row button:active{transform:scale(.97)}
+.dsh-nudge-popup-row button:focus-visible{outline:2px solid var(--dn-accent-line);outline-offset:2px}
+.dsh-nudge-popup-quick{flex:1 1 0;display:inline-flex;align-items:center;justify-content:center;gap:5px;min-width:0}
+.dsh-nudge-popup-quick .emoji{font-size:15px;line-height:1}
+.dsh-nudge-popup-quick:hover{background:var(--dn-hover)}
+.dsh-nudge-popup-quick.agree{border-color:var(--dn-agree);background:var(--dn-agree);color:#fff;font-weight:600}
+.dsh-nudge-popup-quick.agree:hover{filter:brightness(.94)}
+.dsh-nudge-popup-row .dsh-nudge-popup-save{border-color:var(--dn-accent-line);background:var(--dn-accent-soft);color:var(--dn-accent);font-weight:600}
+.dsh-nudge-popup-row .dsh-nudge-popup-save:hover{background:color-mix(in srgb,var(--dn-accent) 20%,transparent)}
+.dsh-nudge-popup-row .dsh-nudge-popup-copy{min-width:62px;color:var(--dn-accent)}
+.dsh-nudge-popup-copy[data-copied="true"]{border-color:var(--dn-accent-line);background:var(--dn-accent-soft)}
+.dsh-nudge-popup-hint{display:flex;justify-content:space-between;gap:8px;font-size:11px;line-height:1.5;color:var(--dsw-alias-label-secondary,#5a5a66)}
+.dsh-nudge-popup-hint kbd{font:inherit;padding:0 3px;border:1px solid var(--dn-line);border-radius:4px;background:color-mix(in srgb,var(--dsw-alias-label-primary,#1a1a1a) 4%,transparent)}
+.dsh-nudge-annotation-input{width:100%;box-sizing:border-box;min-height:34px;field-sizing:content;max-height:132px;overflow-y:auto;border:1px solid var(--dn-line);border-radius:8px;background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);font:inherit;font-size:13px;line-height:20px;padding:7px 10px}
 .dsh-nudge-annotation-input:disabled{opacity:.6;cursor:not-allowed}
 .dsh-nudge-btn:disabled{opacity:.45;cursor:default}
 .dsh-nudge-annotation-input:focus{outline:none;border-color:var(--dn-accent-line);box-shadow:0 0 0 3px var(--dn-accent-soft)}
@@ -2474,11 +2535,23 @@ window.__ModuleLoader__.load({
 .dsh-nudge-annotation-open .dsh-nudge-annotation-note{-webkit-line-clamp:1}
 .dsh-nudge-annotation-open:hover .dsh-nudge-annotation-quote{color:var(--dsw-alias-label-primary,#1a1a1a)}
 .dsh-nudge-module{display:flex;flex-direction:column;gap:8px}
-.dsh-nudge-module-head{display:flex;align-items:center;gap:7px;padding:1px 0 8px;border:0;border-bottom:1px solid var(--dn-line);background:transparent;color:var(--dsw-alias-label-primary,#1a1a1a);font:inherit;font-size:12.5px;font-weight:700;letter-spacing:.2px;cursor:pointer;text-align:left;user-select:none}
-.dsh-nudge-module-head::before{content:'';flex:0 0 auto;width:3px;height:13px;border-radius:2px;background:var(--dn-accent)}
-.dsh-nudge-module-head:hover{color:var(--dn-accent)}
+.dsh-nudge-module-head{display:flex;align-items:center;gap:7px;padding:1px 0 8px;border:0;border-bottom:1px solid var(--dn-line);background:transparent;color:var(--dsw-alias-label-primary,#1a1a1a);font:inherit;font-size:12.5px;font-weight:700;letter-spacing:.2px;text-align:left;user-select:none}
+.dsh-nudge-module-head::before{content:'';flex:0 0 auto;width:3px;height:13px;border-radius:2px;background:var(--dn-accent);margin-left:2px}
 .dsh-nudge-module-title{white-space:nowrap}
-.dsh-nudge-module-chevron{font-size:11px;line-height:1;opacity:.7}
+.dsh-nudge-module-main{display:inline-flex;align-items:center;gap:6px;min-width:0;padding:2px 4px;margin-left:-4px;border:0;border-radius:6px;background:transparent;color:inherit;font:inherit;letter-spacing:inherit;cursor:pointer;transition:color .15s ease,background .15s ease}
+.dsh-nudge-module-main:hover{color:var(--dn-accent);background:var(--dn-hover)}
+.dsh-nudge-module-main:focus-visible{outline:2px solid var(--dn-accent-line);outline-offset:1px}
+.dsh-nudge-module-actions{display:inline-flex;align-items:center;gap:2px;flex:0 0 auto}
+.dsh-nudge-head-btn,.dsh-nudge-head-icon{display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;height:22px;padding:0 8px;border:0;border-radius:6px;background:transparent;color:var(--dsw-alias-label-secondary,#5a5a66);font:inherit;font-size:11.5px;font-weight:600;letter-spacing:0;line-height:1;white-space:nowrap;cursor:pointer;transition:background .15s ease,color .15s ease}
+.dsh-nudge-head-icon{width:22px;padding:0}
+.dsh-nudge-head-btn:hover,.dsh-nudge-head-icon:hover{background:var(--dn-hover);color:var(--dsw-alias-label-primary,#1a1a1a)}
+.dsh-nudge-head-btn:focus-visible,.dsh-nudge-head-icon:focus-visible{outline:2px solid var(--dn-accent-line);outline-offset:1px}
+.dsh-nudge-head-btn.active,.dsh-nudge-head-icon.active{background:var(--dn-accent-soft);color:var(--dn-accent)}
+.dsh-nudge-head-btn.inactive,.dsh-nudge-head-btn:disabled{opacity:.45;cursor:default;background:transparent;color:var(--dsw-alias-label-secondary,#5a5a66)}
+.dsh-nudge-module-chevron-btn{display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;width:20px;height:20px;padding:0;border:0;border-radius:6px;background:transparent;color:var(--dsw-alias-label-secondary,#5a5a66);cursor:pointer;transition:background .15s ease,color .15s ease}
+.dsh-nudge-module-chevron-btn:hover{background:var(--dn-hover);color:var(--dsw-alias-label-primary,#1a1a1a)}
+.dsh-nudge-module-chevron-btn:focus-visible{outline:2px solid var(--dn-accent-line);outline-offset:1px}
+.dsh-nudge-module-chevron{font-size:11px;line-height:1;opacity:.75}
 .dsh-nudge-module-body{display:flex;flex-direction:column;gap:10px;padding-top:2px}
 .dsh-nudge-icon.active{background:var(--dn-accent-soft);color:var(--dn-accent)}
 @keyframes dsh-nudge-attention{0%{box-shadow:inset 0 0 0 0 var(--dn-accent-line);opacity:0}20%{box-shadow:inset 0 0 0 3px var(--dn-accent-soft);opacity:1}100%{box-shadow:inset 0 0 0 0 transparent;opacity:0}}
@@ -2544,6 +2617,7 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
         /** A drag that moved must not also toggle the pill. */
         const suppressPillClick = React.useRef(false)
         const noteInputRef = React.useRef(null)
+        const popupInputRef = React.useRef(null)
         // Only the repository edit box takes the caret. The selection card never
         // steals focus from the transcript: the native selection stays intact.
         React.useEffect(() => {
@@ -2557,9 +2631,50 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
             }
           }
         }, [state.annotationEditingId])
+        // The selection card is a writing box: opening it puts the caret straight
+        // into the note field so the user can type without clicking first.
+        React.useEffect(() => {
+          if (state.annotationDraft === null || state.annotationEditingId !== null) return
+          const node = popupInputRef.current
+          if (node && typeof node.focus === 'function') {
+            try {
+              node.focus({ preventScroll: true })
+            } catch {
+              /* unfocusable */
+            }
+          }
+        }, [state.annotationDraft])
         const t = runtime.text
         const delivery = runtime.effectiveDelivery()
         const draft = state.annotationDraft
+        // Copy reports back in place for a moment, the way ds-popup's card does;
+        // the timer is reset when the card moves to another passage.
+        const [copyFlash, setCopyFlash] = React.useState('')
+        const copyFlashTimer = React.useRef(0)
+        React.useEffect(
+          () => () => {
+            window.clearTimeout(copyFlashTimer.current)
+          },
+          [],
+        )
+        React.useEffect(() => {
+          window.clearTimeout(copyFlashTimer.current)
+          setCopyFlash('')
+        }, [draft?.quote])
+        const copyQuote = () => {
+          const pending = runtime.copyDraftQuote()
+          Promise.resolve(pending).then((ok) => {
+            setCopyFlash(ok === true ? 'done' : 'failed')
+            window.clearTimeout(copyFlashTimer.current)
+            copyFlashTimer.current = window.setTimeout(() => setCopyFlash(''), 1400)
+          })
+        }
+        const copyLabel =
+          copyFlash === 'done'
+            ? t('copiedShort')
+            : copyFlash === 'failed'
+              ? t('copyFailedShort')
+              : t('copyQuote')
         const popup =
           state.quick && draft !== null
             ? h(
@@ -2571,20 +2686,33 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
                   role: 'dialog',
                   'aria-label': t('annotationsTitle'),
                 },
-                h('div', { className: 'dsh-nudge-popup-quote', title: draft.quote }, draft.quote),
+                h(
+                  'button',
+                  {
+                    key: 'close',
+                    type: 'button',
+                    className: 'dsh-nudge-popup-close',
+                    title: `${t('dismissAnnotation')} (Esc)`,
+                    'aria-label': t('dismissAnnotation'),
+                    onClick: () => runtime.dismissAnnotationDraft(),
+                  },
+                  '×',
+                ),
                 h('textarea', {
+                  key: 'note',
+                  ref: popupInputRef,
+                  rows: 1,
                   className: 'dsh-nudge-annotation-input',
                   value: state.annotationNote,
                   placeholder: t('annotationPlaceholder'),
                   'aria-label': t('annotationPlaceholder'),
+                  // Typing must never be interrupted: the note field owns the
+                  // caret, so the transcript selection is left alone here.
                   onChange: (event) => {
                     runtime.setAnnotationNote(event.target.value)
-                    runtime.restoreCaptureSelection()
                   },
-                  onMouseUp: () => runtime.restoreCaptureSelection(),
-                  onKeyUp: () => runtime.restoreCaptureSelection(),
                   onKeyDown: (event) => {
-                    if (event.key === 'Enter' && !event.shiftKey) {
+                    if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
                       event.preventDefault()
                       runtime.addAnnotation()
                     } else if (event.key === 'Escape') {
@@ -2595,16 +2723,59 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
                 }),
                 h(
                   'div',
-                  { className: 'dsh-nudge-annotation-actions' },
-                  h('button', { type: 'button', className: 'dsh-nudge-btn', onClick: () => runtime.quickReply('agree') }, t('agree')),
-                  h('button', { type: 'button', className: 'dsh-nudge-btn', onClick: () => runtime.quickReply('disagree') }, t('disagree')),
-                  h('button', { type: 'button', className: 'dsh-nudge-btn', onClick: () => runtime.copyDraftQuote() }, t('copyQuote')),
+                  { key: 'actions', className: 'dsh-nudge-popup-row' },
+                  h(
+                    'button',
+                    {
+                      type: 'button',
+                      className: 'dsh-nudge-popup-quick agree',
+                      onClick: () => runtime.quickReply('agree'),
+                    },
+                    h('span', { className: 'emoji', 'aria-hidden': true }, '👍'),
+                    h('span', null, t('agree')),
+                  ),
+                  h(
+                    'button',
+                    {
+                      type: 'button',
+                      className: 'dsh-nudge-popup-quick',
+                      onClick: () => runtime.quickReply('disagree'),
+                    },
+                    h('span', { className: 'emoji', 'aria-hidden': true }, '👎'),
+                    h('span', null, t('disagree')),
+                  ),
+                  h(
+                    'button',
+                    {
+                      type: 'button',
+                      className: 'dsh-nudge-popup-save',
+                      title: `${t('addAnnotation')} (Enter)`,
+                      onClick: () => runtime.addAnnotation(),
+                    },
+                    t('addAnnotation'),
+                  ),
+                  h(
+                    'button',
+                    {
+                      type: 'button',
+                      className: 'dsh-nudge-popup-copy',
+                      'data-copied': copyFlash === 'done' ? 'true' : undefined,
+                      onClick: copyQuote,
+                    },
+                    copyLabel,
+                  ),
                 ),
                 h(
                   'div',
-                  { className: 'dsh-nudge-annotation-actions' },
-                  h('button', { type: 'button', className: 'dsh-nudge-btn', onClick: () => runtime.dismissAnnotationDraft() }, t('dismissAnnotation')),
-                  h('button', { type: 'button', className: 'dsh-nudge-btn primary', onClick: () => runtime.addAnnotation() }, t('addAnnotation')),
+                  { key: 'hint', className: 'dsh-nudge-popup-hint' },
+                  h(
+                    'span',
+                    null,
+                    h('kbd', null, 'Enter'),
+                    ` ${t('addAnnotation')} · `,
+                    h('kbd', null, 'Esc'),
+                    ` ${t('dismissAnnotation')}`,
+                  ),
                 ),
               )
             : null
@@ -2670,6 +2841,67 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
             strokeLinecap: 'round',
           }),
         )
+        /** Turbo: a filled bolt, the universal "go fast" mark. */
+        const boltIcon = h(
+          'svg',
+          { width: 14, height: 14, viewBox: '0 0 16 16', 'aria-hidden': true },
+          h('path', {
+            d: 'M8.9 1.4 2.85 9.05h3.3l-.85 5.55 6.85-8.05h-3.6l.85-5.15Z',
+            fill: 'currentColor',
+          }),
+        )
+        /** Delivery "steer": jump the queue and cut in now. */
+        const steerIcon = h(
+          'svg',
+          { width: 14, height: 14, viewBox: '0 0 16 16', fill: 'none', 'aria-hidden': true },
+          h('path', { d: 'M2.8 3.3 8.9 8l-6.1 4.7V3.3Z', fill: 'currentColor' }),
+          h('path', {
+            d: 'M11.9 3.1v9.8',
+            stroke: 'currentColor',
+            strokeWidth: 1.6,
+            strokeLinecap: 'round',
+          }),
+        )
+        /** Delivery "queue": wait for the current turn, then go. */
+        const queueIcon = h(
+          'svg',
+          { width: 14, height: 14, viewBox: '0 0 16 16', fill: 'none', 'aria-hidden': true },
+          h('path', {
+            d: 'M2.6 4.6 6.1 8l-3.5 3.4',
+            stroke: 'currentColor',
+            strokeWidth: 1.6,
+            strokeLinecap: 'round',
+            strokeLinejoin: 'round',
+          }),
+          h('path', {
+            d: 'M8.4 4.6 11.9 8l-3.5 3.4',
+            stroke: 'currentColor',
+            strokeWidth: 1.6,
+            strokeLinecap: 'round',
+            strokeLinejoin: 'round',
+          }),
+        )
+        /**
+         * The title mark: a tapping fingertip plus the tap it lands.
+         * Colour carries the phase (idle grey / waiting amber / done green / error red);
+         * the tap ripple only breathes while a nudge is in flight.
+         */
+        const markIcon = h(
+          'span',
+          { className: `dsh-nudge-mark ${dotClass}`, title: statusLabel, 'aria-hidden': true },
+          h(
+            'svg',
+            { width: 16, height: 16, viewBox: '0 0 18 18', fill: 'none', 'aria-hidden': true },
+            h('circle', { className: 'dsh-nudge-mark-tap', cx: 2.6, cy: 2.6, r: 1.9, fill: 'currentColor' }),
+            h('path', {
+              d: 'M9.6 2.4c.62 0 1.1.5 1.1 1.1v4.1c.1-.6.6-1.05 1.25-1.05.6 0 1.1.45 1.15 1.05.2-.5.65-.8 1.15-.8.7 0 1.2.55 1.2 1.25v5.3a3.3 3.3 0 0 1-3.3 3.3H9.4a3 3 0 0 1-2.1-.85L4.6 13a1 1 0 0 1 1.35-1.45l1.35 1.15V3.5c0-.6.5-1.1 1.1-1.1Z',
+              stroke: 'currentColor',
+              strokeWidth: 1.8,
+              strokeLinecap: 'round',
+              strokeLinejoin: 'round',
+            }),
+          ),
+        )
 
         if (state.collapsed) {
           return h(
@@ -2691,7 +2923,7 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
                 onPointerUp: onPillPointerUp,
                 onPointerCancel: onPillPointerUp,
               },
-              h('span', { className: `dsh-nudge-dot ${dotClass}`, title: statusLabel }),
+              markIcon,
               h('span', null, t('title')),
               state.unread ? h('span', { className: 'dsh-nudge-unread', title: t('newResult') }) : null,
             ),
@@ -2744,11 +2976,9 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
           moveDrag(event)
         }
 
-        /** A title-bar click (no movement) collapses the card in place. */
+        /** Finish a title-bar drag; a plain click does nothing. */
         function onPointerUp() {
-          const current = drag.current
           endDrag()
-          if (current && !current.moved) runtime.setCollapsed(true)
         }
 
         /** A cancelled pointer must never be treated as a click. */
@@ -2805,21 +3035,9 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
               onPointerUp,
               onPointerCancel,
             },
-            h('span', { className: `dsh-nudge-dot ${dotClass}`, title: statusLabel }),
+            markIcon,
             h('span', { className: 'dsh-nudge-name' }, t('title')),
             h('span', { className: 'dsh-nudge-spacer' }),
-            h(
-              'button',
-              {
-                type: 'button',
-                className: `dsh-nudge-icon${state.quick ? ' active' : ''}`,
-                title: state.quick ? t('quickOn') : t('quickOff'),
-                'aria-label': state.quick ? t('quickOn') : t('quickOff'),
-                'aria-pressed': state.quick ? 'true' : 'false',
-                onClick: () => runtime.setQuick(!state.quick),
-              },
-              quoteIcon,
-            ),
             h(
               'button',
               {
@@ -2851,158 +3069,233 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
           state.note.length > 0
             ? h('div', { key: 'note', className: 'dsh-nudge-alert note' }, state.note)
             : null,
+          state.flash.length > 0
+            ? h('div', { key: 'flash', className: 'dsh-nudge-flash', role: 'status' }, state.flash)
+            : null,
           h(
             'div',
             { key: 'content', className: 'dsh-nudge-content' },
-            state.quick
-              ? h(
-                  'div',
-                  { key: 'annotation-module', className: 'dsh-nudge-module' },
-                  h(
-                    'button',
-                    {
-                      type: 'button',
-                      className: 'dsh-nudge-module-head',
-                      title: state.annotationExpanded ? t('collapseAnnotations') : t('expandAnnotations'),
-                      onClick: () => runtime.setAnnotationExpanded(!state.annotationExpanded),
-                    },
-                    h('span', { className: 'dsh-nudge-module-title' }, t('annotationsTitle')),
-                    state.annotations.length > 0
-                      ? h('span', { className: 'dsh-nudge-annotations-count' }, String(state.annotations.length))
-                      : null,
-                    h('span', { className: 'dsh-nudge-spacer' }),
-                    h('span', { className: 'dsh-nudge-module-chevron' }, state.annotationExpanded ? '⌃' : '⌄'),
-                  ),
-                  state.annotationExpanded
-                    ? h(
-                        'div',
-                        { className: 'dsh-nudge-module-body' },
-                        state.annotationEditingId !== null
-                          ? h(
-                              'div',
-                              { key: 'annotation-compose', className: 'dsh-nudge-annotation-compose' },
-                              h(
-                                'div',
-                                { className: 'dsh-nudge-annotation-quote' },
-                                state.annotations.find((item) => item.id === state.annotationEditingId)?.quote ?? '',
-                              ),
-                              h('textarea', {
-                                className: 'dsh-nudge-annotation-input',
-                                ref: noteInputRef,
-                                value: state.annotationNote,
-                                placeholder: t('annotationPlaceholder'),
-                                'aria-label': t('annotationPlaceholder'),
-                                onChange: (event) => runtime.setAnnotationNote(event.target.value),
-                                onKeyDown: (event) => {
-                                  if (event.key === 'Enter' && !event.shiftKey) {
-                                    event.preventDefault()
-                                    runtime.saveEditedAnnotation()
-                                  } else if (event.key === 'Escape') {
-                                    event.preventDefault()
-                                    runtime.cancelAnnotationEdit()
-                                  }
-                                },
-                              }),
-                              h(
-                                'div',
-                                { className: 'dsh-nudge-annotation-actions' },
-                                h(
-                                  'button',
-                                  {
-                                    type: 'button',
-                                    className: 'dsh-nudge-btn danger',
-                                    onClick: () => runtime.removeAnnotation(state.annotationEditingId),
-                                  },
-                                  t('deleteAnnotation'),
-                                ),
-                                h(
-                                  'button',
-                                  { type: 'button', className: 'dsh-nudge-btn', onClick: () => runtime.cancelAnnotationEdit() },
-                                  t('dismissAnnotation'),
-                                ),
-                                h(
-                                  'button',
-                                  {
-                                    type: 'button',
-                                    className: 'dsh-nudge-btn primary',
-                                    onClick: () => runtime.saveEditedAnnotation(),
-                                  },
-                                  t('saveAnnotation'),
-                                ),
-                              ),
-                            )
-                          : state.annotations.length === 0
-                            ? h(
-                                'div',
-                                { key: 'annotation-empty', className: 'dsh-nudge-annotation-hint' },
-                                t('annotationsHint'),
-                              )
-                            : null,
-                        state.annotations.length > 0
-                          ? h(
-                              'div',
-                              { key: 'annotation-list', className: 'dsh-nudge-annotation-list' },
-                              ...state.annotations.map((item) =>
-                                h(
-                                  'div',
-                                  { key: item.id, className: 'dsh-nudge-annotation-item' },
-                                  h(
-                                    'div',
-                                    { className: 'dsh-nudge-annotation-item-head' },
-                                    h(
-                                      'button',
-                                      {
-                                        type: 'button',
-                                        className: 'dsh-nudge-annotation-open',
-                                        onClick: () => runtime.startEditAnnotation(item.id),
-                                      },
-                                      h('span', { className: 'dsh-nudge-annotation-quote', title: item.quote }, item.quote),
-                                      item.note !== ''
-                                        ? h('span', { className: 'dsh-nudge-annotation-note' }, item.note)
-                                        : null,
-                                    ),
-                                    h(
-                                      'button',
-                                      {
-                                        type: 'button',
-                                        className: 'dsh-nudge-annotation-remove',
-                                        title: t('deleteAnnotation'),
-                                        'aria-label': t('deleteAnnotation'),
-                                        onClick: () => runtime.removeAnnotation(item.id),
-                                      },
-                                      '×',
-                                    ),
-                                  ),
-                                ),
-                              ),
-                            )
-                          : null,
-                        state.annotations.length > 0
-                          ? h(
-                              'div',
-                              { key: 'annotation-actions', className: 'dsh-nudge-annotation-actions' },
-                              h('button', { type: 'button', className: 'dsh-nudge-btn', onClick: () => runtime.writeAnnotations() }, t('writeAnnotations')),
-                              h('button', { type: 'button', className: 'dsh-nudge-btn primary', onClick: () => runtime.sendAnnotations() }, t('sendAnnotations')),
-                            )
-                          : null,
-                      )
+            h(
+              'div',
+              { key: 'annotation-module', className: 'dsh-nudge-module' },
+              h(
+                'div',
+                { key: 'annotation-head', className: 'dsh-nudge-module-head' },
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    className: 'dsh-nudge-module-main',
+                    title: state.annotationExpanded ? t('collapseAnnotations') : t('expandAnnotations'),
+                    'aria-expanded': state.annotationExpanded ? 'true' : 'false',
+                    onClick: () => runtime.setAnnotationExpanded(!state.annotationExpanded),
+                  },
+                  h('span', { className: 'dsh-nudge-module-title' }, t('annotationsTitle')),
+                  state.annotations.length > 0
+                    ? h('span', { className: 'dsh-nudge-annotations-count' }, String(state.annotations.length))
                     : null,
-                )
-              : null,
+                ),
+                h('span', { className: 'dsh-nudge-spacer' }),
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    className: `dsh-nudge-head-icon dsh-nudge-annotation-quick${state.quick ? ' active' : ''}`,
+                    title: state.quick ? t('quickOn') : t('quickOff'),
+                    'aria-label': state.quick ? t('quickOn') : t('quickOff'),
+                    'aria-pressed': state.quick ? 'true' : 'false',
+                    onClick: () => runtime.setQuick(!state.quick),
+                  },
+                  quoteIcon,
+                ),
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    className: 'dsh-nudge-module-chevron-btn',
+                    title: state.annotationExpanded ? t('collapseAnnotations') : t('expandAnnotations'),
+                    'aria-label': state.annotationExpanded ? t('collapseAnnotations') : t('expandAnnotations'),
+                    onClick: () => runtime.setAnnotationExpanded(!state.annotationExpanded),
+                  },
+                  h('span', { className: 'dsh-nudge-module-chevron' }, state.annotationExpanded ? '⌃' : '⌄'),
+                ),
+              ),
+              state.annotationExpanded
+                ? h(
+                    'div',
+                    { className: 'dsh-nudge-module-body' },
+                    state.annotationEditingId !== null
+                      ? h(
+                          'div',
+                          { key: 'annotation-compose', className: 'dsh-nudge-annotation-compose' },
+                          h(
+                            'div',
+                            { className: 'dsh-nudge-annotation-quote' },
+                            state.annotations.find((item) => item.id === state.annotationEditingId)?.quote ?? '',
+                          ),
+                          h('textarea', {
+                            className: 'dsh-nudge-annotation-input',
+                            ref: noteInputRef,
+                            value: state.annotationNote,
+                            placeholder: t('annotationPlaceholder'),
+                            'aria-label': t('annotationPlaceholder'),
+                            onChange: (event) => runtime.setAnnotationNote(event.target.value),
+                            onKeyDown: (event) => {
+                              if (event.key === 'Enter' && !event.shiftKey) {
+                                event.preventDefault()
+                                runtime.saveEditedAnnotation()
+                              } else if (event.key === 'Escape') {
+                                event.preventDefault()
+                                runtime.cancelAnnotationEdit()
+                              }
+                            },
+                          }),
+                          h(
+                            'div',
+                            { className: 'dsh-nudge-annotation-actions' },
+                            h(
+                              'button',
+                              {
+                                type: 'button',
+                                className: 'dsh-nudge-btn danger',
+                                onClick: () => runtime.removeAnnotation(state.annotationEditingId),
+                              },
+                              t('deleteAnnotation'),
+                            ),
+                            h(
+                              'button',
+                              { type: 'button', className: 'dsh-nudge-btn', onClick: () => runtime.cancelAnnotationEdit() },
+                              t('dismissAnnotation'),
+                            ),
+                            h(
+                              'button',
+                              {
+                                type: 'button',
+                                className: 'dsh-nudge-btn primary',
+                                onClick: () => runtime.saveEditedAnnotation(),
+                              },
+                              t('saveAnnotation'),
+                            ),
+                          ),
+                        )
+                      : state.annotations.length === 0
+                        ? h(
+                            'div',
+                            { key: 'annotation-empty', className: 'dsh-nudge-annotation-hint' },
+                            state.quick ? t('annotationsHint') : t('annotationsOffHint'),
+                          )
+                        : null,
+                    state.annotations.length > 0
+                      ? h(
+                          'div',
+                          { key: 'annotation-list', className: 'dsh-nudge-annotation-list' },
+                          ...state.annotations.map((item) =>
+                            h(
+                              'div',
+                              { key: item.id, className: 'dsh-nudge-annotation-item' },
+                              h(
+                                'div',
+                                { className: 'dsh-nudge-annotation-item-head' },
+                                h(
+                                  'button',
+                                  {
+                                    type: 'button',
+                                    className: 'dsh-nudge-annotation-open',
+                                    onClick: () => runtime.startEditAnnotation(item.id),
+                                  },
+                                  h('span', { className: 'dsh-nudge-annotation-quote', title: item.quote }, item.quote),
+                                  item.note !== ''
+                                    ? h('span', { className: 'dsh-nudge-annotation-note' }, item.note)
+                                    : null,
+                                ),
+                                h(
+                                  'button',
+                                  {
+                                    type: 'button',
+                                    className: 'dsh-nudge-annotation-remove',
+                                    title: t('deleteAnnotation'),
+                                    'aria-label': t('deleteAnnotation'),
+                                    onClick: () => runtime.removeAnnotation(item.id),
+                                  },
+                                  '×',
+                                ),
+                              ),
+                            ),
+                          ),
+                        )
+                      : null,
+                    state.annotations.length > 0
+                      ? h(
+                          'div',
+                          { key: 'annotation-actions', className: 'dsh-nudge-annotation-actions' },
+                          h('button', { type: 'button', className: 'dsh-nudge-btn', onClick: () => runtime.writeAnnotations() }, t('writeAnnotations')),
+                          h('button', { type: 'button', className: 'dsh-nudge-btn primary', onClick: () => runtime.sendAnnotations() }, t('sendAnnotations')),
+                        )
+                      : null,
+                  )
+                : null,
+            ),
             h(
               'div',
               { key: 'nudge-module', className: 'dsh-nudge-module' },
               h(
-                'button',
-                {
-                  type: 'button',
-                  className: 'dsh-nudge-module-head',
-                  title: state.nudgeExpanded ? t('collapseNudge') : t('expandNudge'),
-                  onClick: () => runtime.setNudgeExpanded(!state.nudgeExpanded),
-                },
-                h('span', { className: 'dsh-nudge-module-title' }, t('nudgeModule')),
+                'div',
+                { key: 'nudge-head', className: 'dsh-nudge-module-head' },
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    className: 'dsh-nudge-module-main',
+                    title: state.nudgeExpanded ? t('collapseNudge') : t('expandNudge'),
+                    'aria-expanded': state.nudgeExpanded ? 'true' : 'false',
+                    onClick: () => runtime.setNudgeExpanded(!state.nudgeExpanded),
+                  },
+                  h('span', { className: 'dsh-nudge-module-title' }, t('nudgeModule')),
+                ),
                 h('span', { className: 'dsh-nudge-spacer' }),
-                h('span', { className: 'dsh-nudge-module-chevron' }, state.nudgeExpanded ? '⌃' : '⌄'),
+                h(
+                  'div',
+                  { className: 'dsh-nudge-module-actions' },
+                  h(
+                    'button',
+                    {
+                      type: 'button',
+                      className: `dsh-nudge-head-icon dsh-nudge-delivery-toggle${insertMode ? ' inactive' : ''}${
+                        delivery === 'steer' ? ' steer' : ''
+                      }`,
+                      title: insertMode
+                        ? t('modeInactive')
+                        : `${t('mode')}：${delivery === 'steer' ? t('steer') : t('queue')}（点击切换）`,
+                      'aria-label': `${t('mode')}：${delivery === 'steer' ? t('steer') : t('queue')}`,
+                      disabled: insertMode,
+                      onClick: () => runtime.setDelivery(delivery === 'steer' ? 'followup' : 'steer'),
+                    },
+                    delivery === 'steer' ? steerIcon : queueIcon,
+                  ),
+                  h(
+                    'button',
+                    {
+                      type: 'button',
+                      className: `dsh-nudge-head-icon dsh-nudge-turbo-toggle${turbo ? ' active' : ''}`,
+                      title: `${t('turboTitle')}：${turbo ? t('switchOn') : t('switchOff')}（点击切换）`,
+                      'aria-label': t('turboTitle'),
+                      'aria-pressed': turbo ? 'true' : 'false',
+                      onClick: () => runtime.setTurbo(!turbo),
+                    },
+                    boltIcon,
+                  ),
+                ),
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    className: 'dsh-nudge-module-chevron-btn',
+                    title: state.nudgeExpanded ? t('collapseNudge') : t('expandNudge'),
+                    'aria-label': state.nudgeExpanded ? t('collapseNudge') : t('expandNudge'),
+                    onClick: () => runtime.setNudgeExpanded(!state.nudgeExpanded),
+                  },
+                  h('span', { className: 'dsh-nudge-module-chevron' }, state.nudgeExpanded ? '⌃' : '⌄'),
+                ),
               ),
               state.nudgeExpanded
                 ? h(
@@ -3021,9 +3314,7 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
                       key: preset.id,
                       type: 'button',
                       className: `dsh-nudge-chip${state.presetId === preset.id ? ' active' : ''}`,
-                      title: turbo
-                        ? `${preset.text}\n${insertMode ? t('turboInsertHint') : t('turboAskHint')}`
-                        : preset.text,
+                      title: preset.text,
                       onMouseDown: keepFocus,
                       onPointerDown: keepFocus,
                       onClick: () => runtime.setPreset(preset.id),
@@ -3039,57 +3330,8 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
                 ),
               ),
             ),
-            h(
-              'div',
-              { key: 'mode', className: 'dsh-nudge-field dsh-nudge-field-inline' },
-              h('div', { className: 'dsh-nudge-field-label' }, t('mode')),
-              h(
-                'div',
-                {
-                  className: `dsh-nudge-mode${insertMode ? ' inactive' : ''}`,
-                  role: 'group',
-                  'aria-label': t('mode'),
-                  'aria-disabled': insertMode ? 'true' : undefined,
-                  title: insertMode
-                    ? t('modeInactive')
-                    : state.pendingQuestion
-                      ? t('waitingQuestion')
-                      : t('settings'),
-                },
-                h(
-                  'button',
-                  {
-                    type: 'button',
-                    className: delivery === 'steer' ? 'active' : '',
-                    title: t('steerHint'),
-                    disabled: insertMode,
-                    onClick: () => runtime.setDelivery('steer'),
-                  },
-                  t('steer'),
-                ),
-                h(
-                  'button',
-                  {
-                    type: 'button',
-                    className: delivery === 'followup' ? 'active' : '',
-                    title: t('queueHint'),
-                    disabled: insertMode,
-                    onClick: () => runtime.setDelivery('followup'),
-                  },
-                  t('queue'),
-                ),
-              ),
-            ),
             turbo
-              ? h(
-                  'div',
-                  {
-                    key: 'turbo',
-                    className: 'dsh-nudge-turbo-hint',
-                    title: t('turboDesc'),
-                  },
-                  insertMode ? t('turboInsertHint') : t('turboAskHint'),
-                )
+              ? null
               : h(
                   'button',
                   {
