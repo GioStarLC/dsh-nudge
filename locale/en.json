@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Status Nudge",
+    "description": "A floating button that asks the agent for a status report with one chosen prompt; the answer lands in the conversation."
+  }
+}

@@ -1,0 +1,7 @@
+# dsh-nudge bundle patch
+#
+# One plugin row, zero configuration required: the probe presets and the
+# delivery mode are chosen in the floating window itself.
+- insert:
+    - id: nudge
+      name: dsh-nudge
