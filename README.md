@@ -46,11 +46,15 @@
 
 设置齿轮会按“注册的命令 → 侧栏触发器 → 合成快捷键”的顺序依次尝试打开 DSH 的设置面板，每试一条都等面板真的出现（最多 0.6 秒）才继续，成功后再点到本插件这一节。命令被拒绝时不留副作用，所以排在最前；只有按下这一点仍未打开时才会去点侧栏触发器，而且只点能自证身份的按钮（标签写着设置，或挂着设置快捷键），绝不盲点侧栏里其它弹窗按钮——那样会先闪一个无关的弹层。如果当前壳层没有任何可达的入口（侧边栏入口被账户菜单占用、快捷键服务不可用、命令被模态框挡住），它就直接在悬浮窗里把同一份设置表单渲染出来，齿轮不再点了没反应。再点一次齿轮、点面板右上角的 × 或按 Esc 都能退回原窗口。
 
-### 设置跳转层（`client.js` 的 settings navigation 段）
+### 设置跳转层（`client.settings-jump.js`）
 
-这段逻辑收在一个与业务解耦的驱动里：`createSettingsJump({ getShortcuts, getSlots, sectionTitle, onDiag, onFallback })` 返回 `{ open, cancel, probe }`。它不读插件自身的 state，也不写插件自己的存储——“跳到哪一节”由 `sectionTitle` 决定，“没有入口时怎么办”由 `onFallback` 决定，采样写到哪里由 `onDiag` 决定。本插件只是其中一份接线：`sectionTitle: () => text('settingsTitle')`、`onFallback` 渲染窗内表单、`onDiag` 落到 `nudge-store.json` 的 `ui.settingsDiag`。
+跳转逻辑不在主 bundle 里，而是同目录的包内 chunk `client.settings-jump.js`：按下齿轮时 `client.js` 用 `require.async('./client.settings-jump.js')` 把它取回来，取到后缓存复用。这是 DSH 加载器支持的形态——chunk 名必须匹配 `client.<名>.js`、与 `client.js` 同目录，host 会把该目录下的同批文件直接 serve 出去；`package.json` 的 `files` 必须带上它，否则 git 安装的副本里没有这个文件。
 
-以后要跳别的目标（别的设置节、插件的 Plugins 页、某个会话），在同一文件里用这份驱动再建一个实例即可，路线表和“面板真的出现才算成功”的判定不必重写。真要跨插件复用则只能拆成单独的 client 服务包：本仓库的 client 半是单个 `window.__ModuleLoader__.load({...})` 产物，没有构建步骤，DSH 加载器也只取 `exports['./client']` 一个入口，文件级拆分拿不到模块边界。
+chunk 导出 `createSettingsJump({ getShortcuts, getSlots, sectionTitle, onDiag, onFallback })`，返回 `{ open, cancel, probe }`。它不读插件自身的 state，也不写插件自己的存储——“跳到哪一节”由 `sectionTitle` 决定，“没有入口时怎么办”由 `onFallback` 决定，采样写到哪里由 `onDiag` 决定。本插件只是其中一份接线：`sectionTitle: () => text('settingsTitle')`、`onFallback` 渲染窗内表单、`onDiag` 落到 `nudge-store.json` 的 `ui.settingsDiag`。
+
+以后要跳别的目标（别的设置节、插件的 Plugins 页），复制这个 chunk 再建一个实例即可：路线表、每路 0.6 秒的回执等待、“面板真的出现才算成功”的判定都不必重写。真要跨插件共用，则把它做成独立的 client 服务包（消费方 `inject` 后 `ctx.get(...)` 调用），代价是多一个包与版本配对。
+
+因为 chunk 只能异步取回，`openSettings()` 返回 `Promise<boolean>`。文件缺失（旧安装副本）或壳层加载器不支持 chunk 时，齿轮退回窗内表单，不会变成死按钮。
 
 ## 安装
 
