@@ -154,7 +154,26 @@ export async function boot(options = {}) {
     },
   }
 
-  const localStorage = storageStub()
+  const localStorage = options.storage ?? storageStub()
+  /**
+   * Document listeners are recorded instead of dropped, so the checks can
+   * dispatch the same capture-phase events a browser would (Ctrl+C on an open
+   * card, a settled selection) without a DOM implementation.
+   */
+  const docListeners = new Map()
+  const documentStub = {
+    querySelector: () => null,
+    querySelectorAll: () => [],
+    activeElement: null,
+    addEventListener(type, fn) {
+      if (typeof fn !== 'function') return
+      if (!docListeners.has(type)) docListeners.set(type, new Set())
+      docListeners.get(type).add(fn)
+    },
+    removeEventListener(type, fn) {
+      docListeners.get(type)?.delete(fn)
+    },
+  }
   const sandbox = {
     console,
     setTimeout,
@@ -166,7 +185,7 @@ export async function boot(options = {}) {
     Promise,
     AbortController,
     navigator: { language: options.language ?? 'zh-CN' },
-    document: { querySelector: () => null },
+    document: documentStub,
     localStorage,
     innerWidth: options.innerWidth ?? 1440,
     innerHeight: options.innerHeight ?? 900,
@@ -174,6 +193,9 @@ export async function boot(options = {}) {
     addEventListener: () => {},
     removeEventListener: () => {},
   }
+  // Only when a check supplies one: the bundle then mirrors its settings to the
+  // Host half and adopts the durable record on boot, exactly as in the browser.
+  if (typeof options.fetch === 'function') sandbox.fetch = options.fetch
   sandbox.window = sandbox
   sandbox.__ModuleLoader__ = {
     load(definition) {
@@ -186,7 +208,29 @@ export async function boot(options = {}) {
   vm.createContext(sandbox)
   vm.runInContext(source, sandbox, { filename: 'client.js' })
   sandbox.__module.apply(ctx)
-  return { sandbox, runtime: sandbox.__dshNudge, calls, injects, registrations, effects, sessionsList, statusMap, localStorage }
+  /** Fire one recorded document listener pass, like a capture-phase browser event. */
+  const dispatch = (type, event) => {
+    let handled = false
+    for (const fn of [...(docListeners.get(type) ?? [])]) {
+      handled = true
+      fn(event ?? {})
+    }
+    return handled
+  }
+  return {
+    sandbox,
+    runtime: sandbox.__dshNudge,
+    dispatch,
+    document: documentStub,
+    docListeners,
+    calls,
+    injects,
+    registrations,
+    effects,
+    sessionsList,
+    statusMap,
+    localStorage,
+  }
 }
 
 // --- JSX-tree -> HTML serialization (for the preview renderer) -----------
@@ -211,6 +255,8 @@ function flattenChildren(children) {
  * - `style` objects become inline styles
  * - className passes through
  * - function/event props are dropped
+ * Nested function components are rendered one level at a time instead of being
+ * flattened to a bare <div>, so the preview shows what the component renders.
  * Unknown element types render as <div>.
  */
 export function renderToHtml(node) {
@@ -221,6 +267,10 @@ export function renderToHtml(node) {
 
   const { type, props, children } = node
   if (type === 'Fragment' || type == null) return flattenChildren(children).map(renderToHtml).join('')
+  if (typeof type === 'function') {
+    const rendered = type({ ...(props ?? {}), children: flattenChildren(children) })
+    return renderToHtml(rendered === undefined ? null : rendered)
+  }
 
   const tag = typeof type === 'string' ? type : 'div'
   const attrs = []

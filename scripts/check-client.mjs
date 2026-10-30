@@ -435,15 +435,157 @@ function includes(label, haystack, needle) {
   check('settings section selected after keystroke', dispatched[1], 'nudge')
 }
 
+// A shell with no reachable settings entry (launcher seat owned by the account
+// menu, no shortcuts service) used to leave the gear doing nothing at all. The
+// window now shows the same form itself, so this is the regression guard.
 {
   const booted = await boot({})
-  booted.sandbox.document = { querySelector: () => null }
-  check('missing settings entry returns false', booted.runtime.openSettings(), false)
-  check(
-    'missing settings entry explains the fallback',
-    booted.runtime.getSnapshot().note,
-    '无法打开设置页面，请从侧边栏进入设置。',
-  )
+  booted.sandbox.document = {
+    querySelector: () => null,
+    querySelectorAll: () => [],
+  }
+  const overlay = booted.registrations.find((item) => item.entry.name === 'shell.overlay')
+  const tree = () => overlay.Component()
+  check('settings gear still rendered', Boolean(findByProp(tree(), 'aria-label', '打开设置')), true)
+  check('no shell route reports false', booted.runtime.openSettings(), false)
+  check('no shell route opens the in-window form', booted.runtime.getSnapshot().settingsOpen, true)
+  check('the window renders the settings panel', Boolean(findByClass(tree(), 'dsh-nudge-settings-panel')), true)
+  // The form is a component element, so the walker sees it, not its insides;
+  // the shell section test above already proves what it renders.
+  check('the in-window form is the settings section', Boolean(findByProp(tree(), 'key', 'settings-form')), true)
+  booted.runtime.closeSettings()
+  check('closing the panel restores the body', booted.runtime.getSnapshot().settingsOpen, false)
+  check('closing the panel brings the modules back', Boolean(findByClass(tree(), 'dsh-nudge-content')), true)
+}
+
+// The shell accepted `settings.open` but never painted a panel: the retry gives
+// up and the window shows the form instead of leaving the gear dead.
+{
+  const booted = await boot({
+    shortcuts: {
+      runtime: 'desktop',
+      registry: { invoke: () => {} },
+    },
+  })
+  booted.sandbox.document = {
+    querySelector: () => null,
+    querySelectorAll: () => [],
+  }
+  check('command route is accepted', booted.runtime.openSettings(), true)
+  check('no panel yet, nothing shown', booted.runtime.getSnapshot().settingsOpen, false)
+  await sleep(1500)
+  check('a shell that never paints the panel falls back to the window', booted.runtime.getSnapshot().settingsOpen, true)
+}
+
+// The trigger is found by the marks the shell ships on it — a Settings label or
+// the settings keybinding — even when the sidebar seat is elsewhere and the shell
+// omits `aria-keyshortcuts` (it does whenever the binding is unavailable).
+{
+  const calls = []
+  let panel
+  const booted = await boot({ shortcuts: { runtime: 'desktop' } })
+  const trigger = {
+    getAttribute: (name) => {
+      if (name === 'aria-expanded') return 'false'
+      if (name === 'aria-label') return '设置'
+      return null
+    },
+    click: () => {
+      calls.push('trigger')
+      panel = {
+        querySelectorAll: () => [
+          { textContent: '状态询问', click: () => calls.push('nudge') },
+        ],
+      }
+    },
+  }
+  booted.sandbox.document = {
+    querySelector: (selector) => {
+      if (selector === '[data-shortcut-modal="settings"]') return panel ?? null
+      return null
+    },
+    querySelectorAll: (selector) =>
+      selector === 'button[aria-haspopup="dialog"]' ? [trigger] : [],
+  }
+  check('a labelled trigger without aria-keyshortcuts is still found', booted.runtime.openSettings(), true)
+  check('that trigger is clicked', calls[0], 'trigger')
+  check('the section is selected after it opens the panel', calls[1], 'nudge')
+  check('the in-window form stays closed', booted.runtime.getSnapshot().settingsOpen, false)
+}
+
+// Some other dialog button in the sidebar (a usage popover) is not the Settings
+// trigger: clicking it would flash an unrelated popup on the way to Settings.
+{
+  const calls = []
+  const booted = await boot({ shortcuts: { runtime: 'desktop' } })
+  const usage = {
+    getAttribute: (name) => {
+      if (name === 'aria-expanded') return 'false'
+      if (name === 'aria-label') return '本轮用量'
+      return null
+    },
+    click: () => calls.push('usage'),
+  }
+  booted.sandbox.document = {
+    querySelector: () => null,
+    querySelectorAll: (selector) =>
+      selector === 'button[aria-haspopup="dialog"]' ? [usage] : [],
+  }
+  check('an unrelated dialog button is not clicked', booted.runtime.openSettings(), false)
+  check('no popup is opened on the way', calls.length, 0)
+}
+
+// A shell that accepts `settings.open` but paints nothing must not swallow the
+// gear: the next route runs and the section is selected from the panel it opens.
+{
+  const calls = []
+  let panel
+  const booted = await boot({
+    shortcuts: {
+      runtime: 'desktop',
+      registry: { invoke: () => {} },
+    },
+  })
+  const trigger = {
+    click: () => {
+      calls.push('trigger')
+      panel = {
+        querySelectorAll: () => [
+          { textContent: '状态询问', click: () => calls.push('nudge') },
+        ],
+      }
+    },
+  }
+  const root = { querySelector: () => trigger }
+  booted.sandbox.document = {
+    querySelector: (selector) => {
+      if (selector === '[data-shortcut-modal="settings"]') return panel ?? null
+      if (selector === '[data-slot="sidebar.settings"]') return root
+      return null
+    },
+  }
+  check('a silent settings command is not trusted', booted.runtime.openSettings(), true)
+  check('nothing is shown while the command is being verified', booted.runtime.getSnapshot().settingsOpen, false)
+  await sleep(900)
+  check('the next route clicks the settings trigger', calls[0], 'trigger')
+  check('the section is selected from that panel', calls[1], 'nudge')
+  check('the in-window form stays closed', booted.runtime.getSnapshot().settingsOpen, false)
+}
+
+// The gear button itself must reach the form, not only the runtime call.
+{
+  const booted = await boot({})
+  booted.sandbox.document = {
+    querySelector: () => null,
+    querySelectorAll: () => [],
+  }
+  const overlay = booted.registrations.find((item) => item.entry.name === 'shell.overlay')
+  const gear = findByProp(overlay.Component(), 'aria-label', '打开设置')
+  gear.props.onClick()
+  check('the gear opens the in-window form', booted.runtime.getSnapshot().settingsOpen, true)
+  const gearAgain = findByProp(overlay.Component(), 'aria-label', '打开设置')
+  gearAgain.props.onClick()
+  check('the gear closes it again', booted.runtime.getSnapshot().settingsOpen, false)
 }
 
 // --- write mode: caret in the composer appends instead of sending -------
@@ -885,6 +1027,474 @@ const durable = (type, seq, data) => ({ type: 'event', event: { type, seq, time:
   check('switch: status reset for the new conversation', state.phase, 'idle')
   check('switch: new target', state.target?.sessionId, 'B')
   check('switch: previous result stays bound to A', state.lastSessionId, 'A')
+}
+
+// --- annotation: second note, copy shortcut, auto-expand ------------------
+
+{
+  const booted = await boot({})
+  booted.runtime.setQuick(true)
+  booted.sandbox.getSelection = selectionStub('第一段', { nodeType: 1, closest: () => null })
+  check('annotation: first note captured', booted.runtime.captureSelection(), true)
+  booted.runtime.addAnnotation()
+  check('annotation: tray opens after adding', booted.runtime.getSnapshot().annotationExpanded, true)
+  booted.sandbox.getSelection = selectionStub('第二段', { nodeType: 1, closest: () => null })
+  check('annotation: a second capture is accepted', booted.runtime.captureSelection(), true)
+  booted.runtime.addAnnotation()
+  check('annotation: two notes collected', booted.runtime.getSnapshot().annotations.length, 2)
+
+  // The card folded itself away: a settled selection has to bring it back even
+  // when the pointer path never fires again (drag ending outside, re-render).
+  booted.runtime.setAnnotationExpanded(false)
+  booted.sandbox.getSelection = selectionStub('第三段', { nodeType: 1, closest: () => null })
+  check('annotation: selectionchange listener wired', booted.dispatch('selectionchange', {}), true)
+  await sleep(320)
+  check('annotation: settled selection reopens the card', booted.runtime.getSnapshot().annotationDraft?.quote, '第三段')
+}
+
+{
+  // The card waits for the release: `selectionchange` keeps firing while the
+  // button is still down, and opening mid-drag would steal the caret and the
+  // focus in the middle of the gesture.
+  const booted = await boot({})
+  booted.runtime.setQuick(true)
+  booted.sandbox.getSelection = selectionStub('拖出来的原文', { nodeType: 1, closest: () => null })
+  check('drag: pointerdown listener wired', booted.dispatch('pointerdown', {}), true)
+  booted.dispatch('selectionchange', {})
+  await sleep(320)
+  check('drag: no card while the button is down', booted.runtime.getSnapshot().annotationDraft, null)
+  check('drag: pointerup listener wired', booted.dispatch('pointerup', {}), true)
+  booted.dispatch('selectionchange', {})
+  await sleep(320)
+  check('drag: settled selection opens after the release', booted.runtime.getSnapshot().annotationDraft?.quote, '拖出来的原文')
+}
+
+// --- copy: Ctrl+C keeps working while the card holds the focus -----------
+
+{
+  const booted = await boot({})
+  const copied = []
+  let prevented = 0
+  booted.sandbox.navigator.clipboard = { writeText: (value) => (copied.push(value), Promise.resolve()) }
+  booted.runtime.setQuick(true)
+  booted.sandbox.getSelection = selectionStub('要复制的原文', { nodeType: 1, closest: () => null })
+  booted.runtime.captureSelection()
+  check('copy: card holds the passage', booted.runtime.getSnapshot().annotationDraft?.quote, '要复制的原文')
+  check(
+    'copy: keydown listener wired',
+    booted.dispatch('keydown', {
+      key: 'c',
+      ctrlKey: true,
+      altKey: false,
+      shiftKey: false,
+      metaKey: false,
+      preventDefault: () => (prevented += 1),
+    }),
+    true,
+  )
+  await tick()
+  check('copy: ctrl+c writes the passage', copied[0], '要复制的原文')
+  check('copy: ctrl+c stands in for the browser copy', prevented, 1)
+
+  // While the caret sits in our own note field with a real selection, the
+  // browser's own copy must win — that is the text the user highlighted.
+  booted.sandbox.document = {
+    querySelector: () => null,
+    activeElement: {
+      selectionStart: 0,
+      selectionEnd: 3,
+      closest: (selector) => (selector === '.dsh-nudge-card, .dsh-nudge-pill, .dsh-nudge-popup' ? {} : null),
+    },
+  }
+  copied.length = 0
+  prevented = 0
+  booted.dispatch('keydown', {
+    key: 'c',
+    ctrlKey: true,
+    altKey: false,
+    shiftKey: false,
+    metaKey: false,
+    preventDefault: () => (prevented += 1),
+  })
+  await tick()
+  check('copy: a field selection is left to the browser', prevented, 0)
+  check('copy: nothing copied over it', copied.length, 0)
+}
+
+// --- auto-paste: pending notes flow into the composer on focus -----------
+
+{
+  const booted = await boot({})
+  check('auto-paste: off by default', booted.runtime.getSnapshot().autoPaste, false)
+  check('auto-paste: switch accepted', booted.runtime.setAutoPaste(true), true)
+  check('auto-paste: persisted', booted.localStorage.getItem('dsh-nudge:autopaste'), '1')
+  booted.runtime.setQuick(true)
+  booted.sandbox.getSelection = selectionStub('待粘贴的批注', { nodeType: 1, closest: () => null })
+  booted.runtime.captureSelection()
+  booted.runtime.addAnnotation()
+  const writes = []
+  booted.sandbox.document = composerFocus()
+  booted.runtime.attachComposer({ readDraft: () => '', setDraft: (value) => writes.push(value) })
+  await tick()
+  check('auto-paste: focused composer receives the note', writes[0], '> 待粘贴的批注')
+  check('auto-paste: tray emptied after pasting', booted.runtime.getSnapshot().annotations.length, 0)
+  check('auto-paste: switch back off', booted.runtime.setAutoPaste(false), true)
+  check('auto-paste: off clears the stored flag', booted.localStorage.getItem('dsh-nudge:autopaste'), null)
+}
+
+// --- preset order: the arrows move a row and the order survives ----------
+
+{
+  const booted = await boot({})
+  const ids = () => booted.runtime.getSnapshot().presets.map((preset) => preset.id)
+  check('presets: builtin order', JSON.stringify(ids()), '["brief","fast","four-line"]')
+  check('presets: move down accepted', booted.runtime.movePreset('brief', 1), true)
+  check('presets: order after the move', JSON.stringify(ids()), '["fast","brief","four-line"]')
+  check(
+    'presets: order persisted',
+    JSON.stringify(JSON.parse(booted.localStorage.getItem('dsh-nudge:presets')).map((preset) => preset.id)),
+    '["fast","brief","four-line"]',
+  )
+  check('presets: cannot move past the top', booted.runtime.movePreset('fast', -1), false)
+  check('presets: cannot move past the bottom', booted.runtime.movePreset('four-line', 1), false)
+  check('presets: unknown id refused', booted.runtime.movePreset('nope', 1), false)
+}
+
+// --- settings survive an update that wrote an older preset shape ---------
+
+{
+  const storage = storageStub()
+  storage.setItem('dsh-nudge:presets', JSON.stringify({ presets: ['旧版快捷回复', { name: '旧名', body: '旧版正文' }] }))
+  storage.setItem('dsh-nudge:ui', JSON.stringify({ collapsed: true, position: { x: 40, y: 60 } }))
+  const booted = await boot({ storage })
+  const state = booted.runtime.getSnapshot()
+  check('update: a wrapped legacy list is still read', state.presets.length, 2)
+  check('update: a bare-string entry keeps its text', state.presets[0].text, '旧版快捷回复')
+  check('update: a legacy body field keeps its text', state.presets[1].text, '旧版正文')
+  check('update: a legacy name field keeps its label', state.presets[1].label, '旧名')
+  check(
+    'update: the legacy shape is rewritten as a plain list',
+    JSON.stringify(JSON.parse(booted.localStorage.getItem('dsh-nudge:presets')).map((preset) => preset.text)),
+    '["旧版快捷回复","旧版正文"]',
+  )
+  check('update: the window position survives', state.collapsed, true)
+}
+
+// --- settings section mirrors every switch on the window -----------------
+
+{
+  const booted = await boot({})
+  const Settings = booted.registrations.find((item) => item.entry.name === 'settings.section').Component
+  /** Expand one render level of nested function components (the React stub stops there). */
+  function expand(node) {
+    if (!node || typeof node !== 'object') return node
+    if (Array.isArray(node)) return node.map(expand)
+    if (typeof node.type === 'function') return expand(node.type(node.props ?? {}))
+    return { ...node, children: (node.children ?? []).map(expand) }
+  }
+  const tree = expand(Settings())
+  check('settings: one row per window switch', (findAllByClass(tree, 'dsh-nudge-toggle') ?? []).length, 3)
+  const arrowNodes = (node) =>
+    (findAllByClass(node, 'dsh-nudge-btn') ?? []).filter(
+      (item) => item.children?.[0] === '↑' || item.children?.[0] === '↓',
+    )
+  const presetRows = findAllByClass(tree, 'dsh-nudge-preset-row') ?? []
+  const presetArrows = presetRows.reduce((sum, row) => sum + arrowNodes(row).length, 0)
+  check('settings: every preset row carries both arrows', presetArrows, 6)
+  check('settings: every idle line can be reordered too', arrowNodes(tree).length, 6 + 6)
+  check('settings: delivery group rendered', (findAllByClass(tree, 'dsh-nudge-settings-group') ?? []).length, 1)
+  check('settings: delivery offers both modes', (findAllByClass(tree, 'dsh-nudge-chip') ?? []).length, 2)
+}
+
+// --- the whole annotation round trip, in the order a user runs it ---------
+//   select → add → select again → add → agree / disagree → edit → delete →
+//   write / send → Esc → click outside. The painted-passage click needs the
+//   real CSS Custom Highlight API, so it stays a live-window check.
+{
+  const booted = await boot({})
+  const writes = []
+  booted.runtime.attachComposer({ readDraft: () => '', setDraft: (value) => writes.push(value) })
+  booted.sessionsList.set({ ids: ['A'], byId: { A: { title: '会话 A', retainedBy: { mainView: 1 } } } })
+  await tick()
+  booted.runtime.setQuick(true)
+  const plain = { nodeType: 1, closest: () => null }
+  const capture = (passage) => {
+    booted.sandbox.getSelection = selectionStub(passage, plain)
+    return booted.runtime.captureSelection()
+  }
+
+  // 1–2. two passages in a row: the second capture must not be swallowed.
+  check('chain: passage one captured', capture('引用一'), true)
+  check('chain: passage one added', booted.runtime.addAnnotation(), true)
+  check('chain: passage two captured', capture('引用二'), true)
+  check('chain: passage two added', booted.runtime.addAnnotation(), true)
+  check('chain: two annotations in the tray', booted.runtime.getSnapshot().annotations.length, 2)
+
+  // 3. agree / disagree are annotations too.
+  capture('引用三')
+  check('chain: agree accepted', booted.runtime.quickReply('agree'), true)
+  check('chain: agree note recorded', booted.runtime.getSnapshot().annotations[2].note, '同意')
+  capture('引用四')
+  check('chain: disagree accepted', booted.runtime.quickReply('disagree'), true)
+  check('chain: disagree note recorded', booted.runtime.getSnapshot().annotations[3].note, '不同意')
+
+  // 4. edit an existing annotation, then abandon a second edit.
+  const first = booted.runtime.getSnapshot().annotations[0].id
+  check('chain: edit opens', booted.runtime.startEditAnnotation(first), true)
+  check('chain: edit targets the row', booted.runtime.getSnapshot().annotationEditingId, first)
+  booted.runtime.setAnnotationNote('改过的批注')
+  check('chain: edit saved', booted.runtime.saveEditedAnnotation(), true)
+  check('chain: edit text stored', booted.runtime.getSnapshot().annotations[0].note, '改过的批注')
+  booted.runtime.startEditAnnotation(first)
+  booted.runtime.setAnnotationNote('丢掉这段')
+  booted.runtime.cancelAnnotationEdit()
+  check('chain: abandoned edit leaves no target', booted.runtime.getSnapshot().annotationEditingId, null)
+  check('chain: abandoned edit leaves the text alone', booted.runtime.getSnapshot().annotations[0].note, '改过的批注')
+
+  // 5. delete one.
+  const second = booted.runtime.getSnapshot().annotations[1].id
+  check('chain: delete accepted', booted.runtime.removeAnnotation(second), true)
+  check('chain: deleted from the tray', booted.runtime.getSnapshot().annotations.length, 3)
+
+  // 6. write the rest into the composer.
+  check('chain: write accepted', booted.runtime.writeAnnotations(), true)
+  check('chain: one draft written', writes.length, 1)
+  check('chain: draft keeps the surviving passages', writes[0].includes('引用一') && writes[0].includes('不同意'), true)
+  check('chain: draft carries the edited note', writes[0].includes('改过的批注'), true)
+  check('chain: tray emptied after write', booted.runtime.getSnapshot().annotations.length, 0)
+
+  // 7. send one, straight away.
+  check('chain: send passage captured', capture('引用五'), true)
+  booted.runtime.addAnnotation()
+  check('chain: send accepted', booted.runtime.sendAnnotations(), true)
+  check('chain: one prompt delivered', booted.calls.prompt.length, 1)
+  check('chain: prompt carries the passage', booted.calls.prompt[0].request.content[0].text.includes('引用五'), true)
+  check('chain: tray emptied after send', booted.runtime.getSnapshot().annotations.length, 0)
+  check('chain: waiting after send', booted.runtime.getSnapshot().phase, 'waiting')
+
+  // 8. Esc closes the card.
+  capture('Esc 前的引用')
+  let prevented = 0
+  booted.dispatch('keydown', { key: 'Escape', preventDefault: () => (prevented += 1) })
+  check('chain: Esc closes the card', booted.runtime.getSnapshot().annotationDraft, null)
+  check('chain: Esc is consumed', prevented, 1)
+
+  // 9. a click outside closes it; a click on our own card does not.
+  capture('点外前的引用')
+  booted.dispatch('pointerdown', { target: { closest: () => null } })
+  check('chain: outside click closes the card', booted.runtime.getSnapshot().annotationDraft, null)
+  capture('点卡片时的引用')
+  booted.dispatch('pointerdown', { target: { closest: (selector) => (selector ? {} : null) } })
+  check('chain: click on the card keeps it open', booted.runtime.getSnapshot().annotationDraft?.quote, '点卡片时的引用')
+}
+
+// --- the status row is a permanent bar, not a transient line --------------
+
+{
+  const booted = await boot({})
+  const View = booted.registrations.find((item) => item.entry.name === 'shell.overlay').Component
+  const idle = findByClass(View(), 'dsh-nudge-flash')
+  check('status bar is mounted while idle', Boolean(idle), true)
+  check('status bar shows an idle line while idle', typeof idle?.children?.[0], 'string')
+  check('status bar idle line is not empty', (idle?.children?.[0] ?? '').length > 0, true)
+  check(
+    'status bar keeps a fixed line box (toggling cannot resize the window)',
+    source.includes('.dsh-nudge-flash{margin:8px 14px 0;font-size:11.5px;line-height:1.4;min-height:16px'),
+    true,
+  )
+  booted.runtime.setQuick(true)
+  const active = findByClass(View(), 'dsh-nudge-flash')
+  check('status bar shows the toggle message', typeof active?.children?.[0], 'string')
+  check('status bar marks itself active', active?.props?.className, 'dsh-nudge-flash active')
+  check('status bar announces politely', active?.props?.['aria-live'], 'polite')
+  check(
+    'status bar keeps its text to one line (a long idle line cannot wrap)',
+    source.includes('white-space:nowrap;overflow:hidden;text-overflow:ellipsis}'),
+    true,
+  )
+  check('status bar holds a toggle message for 5 seconds', source.includes('const FLASH_HOLD_MS = 5000'), true)
+  check(
+    'status bar rotates a line every 5 seconds too',
+    source.includes('const TIP_ROTATE_MS = FLASH_HOLD_MS'),
+    true,
+  )
+}
+
+// --- idle lines: rotation, editing, reset --------------------------------
+
+{
+  const booted = await boot({})
+  const { runtime } = booted
+  const start = runtime._debug.state().tips.slice()
+  check('tips: built-in lines are loaded', start.length >= 2, true)
+  runtime.advanceTip()
+  check('tips: rotation moves to the next line', runtime._debug.state().tipIndex, 1)
+  runtime.setQuick(true) // writes a confirmation line into the same row
+  const held = runtime._debug.state().tipIndex
+  check('tips: a confirmation line takes over the row', runtime._debug.state().flash.length > 0, true)
+  runtime.advanceTip()
+  check('tips: rotation pauses while that line is held', runtime._debug.state().tipIndex, held)
+  const added = runtime.addTip('  一句自定义提示  ')
+  check('tips: a line can be added', added.ok, true)
+  check('tips: the added line is trimmed', runtime._debug.state().tips.at(-1), '一句自定义提示')
+  check(
+    'tips: the list is written to storage',
+    JSON.parse(booted.localStorage.getItem('dsh-nudge:tips')).length,
+    runtime._debug.state().tips.length,
+  )
+  check('tips: one line can be rewritten', runtime.updateTip(0, '改过的第一句'), true)
+  check('tips: the rewrite is visible', runtime._debug.state().tips[0], '改过的第一句')
+  check('tips: a blank line is refused', runtime.updateTip(0, '   '), false)
+  check('tips: one line can be removed', runtime.removeTip(0), true)
+  const beforeMove = runtime._debug.state().tips.slice(0, 2)
+  check('tips: a line can be moved down', runtime.moveTip(0, 1), true)
+  check('tips: the order is swapped', runtime._debug.state().tips[1], beforeMove[0])
+  check('tips: the order is written to storage', JSON.parse(booted.localStorage.getItem('dsh-nudge:tips'))[1], beforeMove[0])
+  check('tips: moving past the top is refused', runtime.moveTip(0, -1), false)
+  const pasted = runtime.addTips('粘贴一\n粘贴二\r\n粘贴三\n\n粘贴一\n')
+  check('tips: a pasted block is split into lines', pasted.added, 3)
+  check('tips: the pasted lines keep their order', runtime._debug.state().tips.slice(-3).join('|'), '粘贴一|粘贴二|粘贴三')
+  check('tips: a duplicate in the paste is refused', runtime.addTips('粘贴二').ok, false)
+  check('tips: an empty paste is refused', runtime.addTips('  \n \n').ok, false)
+  while (runtime._debug.state().tips.length > 1) runtime.removeTip(0)
+  check('tips: the last line cannot be removed', runtime.removeTip(0), false)
+  runtime.resetTips()
+  check('tips: reset restores the built-ins', runtime._debug.state().tips[0], start[0])
+  const settings = booted.registrations.find((item) => item.entry.name === 'settings.section')
+  const pasteBox = findByProp(settings.Component(), 'placeholder', '整段粘贴会自动拆成一句一句；也可以手写，一行一句（Ctrl+Enter 提交）')
+  check('tips: the paste box is a textarea', pasteBox?.type, 'textarea')
+  check('tips: the paste box starts empty', pasteBox?.props?.value, '')
+  pasteBox?.props?.onPaste?.({
+    clipboardData: { getData: () => '批量一\n批量二\n批量一' },
+    preventDefault() {},
+  })
+  check('tips: pasting a list adds its lines straight away', runtime._debug.state().tips.slice(-2).join('|'), '批量一|批量二')
+}
+
+// --- the fold arrows are gone; the titles do the folding ------------------
+
+{
+  check('no fold-arrow button is left in the bundle', source.includes('module-chevron'), false)
+  const booted = await boot({})
+  const View = booted.registrations.find((item) => item.entry.name === 'shell.overlay').Component
+  const name = findByClass(View(), 'dsh-nudge-name')
+  check('the window title is a control', name?.props?.role, 'button')
+  name?.props?.onClick?.()
+  check('clicking the window title folds the window', booted.runtime._debug.state().collapsed, true)
+  // Dragging the bar captures the pointer, which retargets the click to the
+  // bar itself: folding has to work from there too.
+  booted.runtime.setCollapsed(false)
+  const bar = findByClass(View(), 'dsh-nudge-title')
+  bar?.props?.onClick?.({ target: bar, currentTarget: bar })
+  check('clicking the title bar itself folds the window', booted.runtime._debug.state().collapsed, true)
+  booted.runtime.setCollapsed(false)
+  const buttonOrigin = { closest: (selector) => (selector === 'button' ? { tag: 'BUTTON' } : null) }
+  bar?.props?.onClick?.({ target: buttonOrigin, currentTarget: bar })
+  check('a click on a title-bar button does not fold the window', booted.runtime._debug.state().collapsed, false)
+  booted.runtime.setCollapsed(false)
+  const heads = findAllByClass(View(), 'dsh-nudge-module-main')
+  check('both module titles are controls', heads.length, 2)
+  const before = booted.runtime._debug.state().annotationExpanded
+  heads[0].props.onClick()
+  check(
+    'clicking the annotation title folds its section',
+    booted.runtime._debug.state().annotationExpanded,
+    !before,
+  )
+}
+
+// --- durable settings: the Host half owns the restart-proof copy ---------
+
+/** A fetch stub for the Host route: answers the record, records every call. */
+function hostStub({ store } = {}) {
+  const calls = []
+  const fetch = (url, init) => {
+    calls.push({ url, init })
+    const isRead = (init?.method ?? 'GET') === 'GET'
+    return Promise.resolve({
+      ok: true,
+      status: 200,
+      json: () =>
+        Promise.resolve(isRead ? { ok: true, store: store ?? null } : { ok: true }),
+    })
+  }
+  return { calls, fetch }
+}
+
+{
+  // A restart lands on a new loopback port, i.e. an empty `localStorage`; the
+  // record the Host half kept is the only way the settings come back.
+  const storage = storageStub()
+  const host = hostStub({
+    store: {
+      version: 1,
+      ui: { collapsed: true, pos: { x: 12, y: 34 } },
+      delivery: 'queue',
+      turbo: true,
+      quick: true,
+      autoPaste: true,
+      preset: 'custom-9',
+      presets: [{ id: 'custom-9', label: '恢复的口径', text: '恢复正文' }],
+    },
+  })
+  const booted = await boot({ storage, fetch: host.fetch })
+  await sleep(20)
+  const state = booted.runtime.getSnapshot()
+  check('restore: quick switch comes back', state.quick, true)
+  check('restore: auto-paste switch comes back', state.autoPaste, true)
+  check('restore: turbo switch comes back', state.turbo, true)
+  check('restore: delivery mode comes back', booted.runtime.effectiveDelivery(), 'followup')
+  check('restore: the authored preset comes back', state.presets[0]?.text, '恢复正文')
+  check('restore: the chosen preset comes back', state.presetId, 'custom-9')
+  check('restore: the window position comes back', state.pos?.x, 12)
+  check('restore: the page storage is refilled', booted.localStorage.getItem('dsh-nudge:quick'), '1')
+  check('restore: the record is read over the Host route', host.calls[0]?.url, '/dsh-nudge/store')
+}
+
+{
+  // Every write is mirrored, so the next launch has something to restore.
+  const storage = storageStub()
+  const host = hostStub({ store: null })
+  const booted = await boot({ storage, fetch: host.fetch })
+  await sleep(20)
+  booted.runtime.setQuick(true)
+  booted.runtime.moveTo(120, 240)
+  booted.runtime.saveUi()
+  await sleep(400)
+  const posts = host.calls.filter((call) => call.init?.method === 'POST')
+  check('mirror: a burst of edits becomes one write', posts.length, 1)
+  const payload = JSON.parse(posts[0]?.init?.body ?? '{}')
+  check('mirror: the payload carries the switch', payload.store?.quick, true)
+  check('mirror: the payload carries the window geometry', payload.store?.ui?.pos?.x, 120)
+  check('mirror: the payload is versioned', payload.store?.version, 1)
+  check('mirror: the write goes to the Host route', posts[0]?.url, '/dsh-nudge/store')
+}
+
+{
+  // Same origin restarted: the page is fresher than the file, so the file is
+  // refreshed from it instead of clobbering what the user just changed.
+  const storage = storageStub()
+  storage.setItem('dsh-nudge:quick', '1')
+  const host = hostStub({ store: { version: 1, delivery: 'queue' } })
+  const booted = await boot({ storage, fetch: host.fetch })
+  await sleep(400)
+  check('restart: the local record still wins', booted.runtime.getSnapshot().quick, true)
+  check('restart: the delivery default is kept', booted.runtime.effectiveDelivery(), 'steer')
+  check('restart: the local record is pushed up', host.calls.some((call) => call.init?.method === 'POST'), true)
+}
+
+{
+  // No Host half at all (preview page, plain harness): nothing throws.
+  let threw = false
+  try {
+    const booted = await boot({})
+    booted.runtime.setQuick(true)
+    await sleep(400)
+  } catch (error) {
+    threw = true
+    console.log(`FAIL  boot without a Host half threw: ${error?.message ?? error}`)
+  }
+  check('no Host half: settings still work', threw, false)
 }
 
 console.log(failures === 0 ? '\nclient checks: all passed' : `\nclient checks: ${failures} failure(s)`)
