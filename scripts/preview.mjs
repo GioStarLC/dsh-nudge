@@ -20,7 +20,7 @@
  * Env:   PREVIEW_BROWSER  override the browser binary
  *        PREVIEW_SCALE    device scale factor (default 2)
  */
-import { writeFile, mkdir } from 'node:fs/promises'
+import { writeFile, mkdir, access } from 'node:fs/promises'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { dirname, join, resolve } from 'node:path'
@@ -37,6 +37,17 @@ const BROWSER_CANDIDATES = [
   '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
   '/Applications/Chromium.app/Contents/MacOS/Chromium',
   '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
+  // Windows: the same browsers live under Program Files.
+  ...['PROGRAMFILES', 'PROGRAMFILES(X86)', 'LOCALAPPDATA'].flatMap((key) => {
+    const base = process.env[key]
+    if (!base) return []
+    return [
+      join(base, 'Google/Chrome/Application/chrome.exe'),
+      join(base, 'Microsoft/Edge/Application/msedge.exe'),
+      join(base, 'BraveSoftware/Brave-Browser/Application/brave.exe'),
+      join(base, 'Chromium/Application/chrome.exe'),
+    ]
+  }),
 ].filter(Boolean)
 
 /**
@@ -193,7 +204,18 @@ if (flags.has('--list')) {
   process.exit(0)
 }
 
-const BROWSER = BROWSER_CANDIDATES.find(Boolean)
+/** The first candidate that actually exists on this machine. */
+async function pickBrowser() {
+  for (const candidate of BROWSER_CANDIDATES) {
+    try {
+      await access(candidate)
+      return candidate
+    } catch {}
+  }
+  return null
+}
+
+const BROWSER = await pickBrowser()
 if (!BROWSER) {
   console.error('No browser found. Set PREVIEW_BROWSER to a Chrome/Chromium/Brave binary.')
   process.exit(2)
