@@ -132,6 +132,8 @@ npm run changelog:write && git status --short CHANGELOG.md
 
 工作区里未提交的改动不在任何区间内，脚本会用警告列出它们，避免以为已经记录。
 
+要写给人看的版本说明，放 `scripts/release-notes/<tag>.md`，它会整段替换该版本的正文。完整的发版流程（拆提交、写版本说明的判据与反例、校验、对象库异常的处理）见 [docs/RELEASE.md](docs/RELEASE.md)。
+
 ## 许可
 
 MIT
