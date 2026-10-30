@@ -28,9 +28,10 @@
   ],
   "scripts": {
     "hooks:install": "git config core.hooksPath .githooks",
-    "check": "node scripts/check-client.mjs && node scripts/check-host.mjs",
+    "check": "node scripts/check-client.mjs && node scripts/check-host.mjs && node scripts/check-graph.mjs",
     "check:client": "node scripts/check-client.mjs",
     "check:host": "node scripts/check-host.mjs",
+    "check:graph": "node scripts/check-graph.mjs",
     "preview": "node scripts/preview.mjs",
     "preview:all": "node scripts/preview.mjs --all",
     "changelog": "node scripts/changelog.mjs",
