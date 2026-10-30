@@ -35,11 +35,18 @@ window.__ModuleLoader__.load({
     /** Stable DOM seams of the shell-owned settings panel (nothing is written here). */
     const SETTINGS_PANEL_SELECTOR = '[data-shortcut-modal="settings"]'
     const SETTINGS_ROOT_SELECTOR = '[data-slot="sidebar.settings"]'
+    /** How often a settings open route is checked for the panel it asked for. */
+    const SETTINGS_POLL_MS = 50
+    /** How long one open route gets to paint the panel before the next runs. */
+    const SETTINGS_ROUTE_MS = 600
+    /** Extra time the painted panel gets to render its nav rows. */
+    const SETTINGS_SECTION_MS = 1000
     const ENTRY = 'dsh-nudge'
     const UI_KEY = 'dsh-nudge:ui'
     const DELIVERY_KEY = 'dsh-nudge:delivery'
     const TURBO_KEY = 'dsh-nudge:turbo'
     const QUICK_KEY = 'dsh-nudge:quick'
+    const AUTOPASTE_KEY = 'dsh-nudge:autopaste'
     const NOTES_KEY = 'dsh-nudge:notes'
     /** Flow item attribute the shell uses for stable transcript anchors. */
     const ANCHOR_SELECTOR = '[data-chat-anchor-key]'
@@ -55,6 +62,17 @@ window.__ModuleLoader__.load({
     const MAX_OCCURRENCES = 40
     const PRESET_KEY = 'dsh-nudge:preset'
     const PRESETS_KEY = 'dsh-nudge:presets'
+    /**
+     * Loopback route the Host half serves its durable settings record on. It
+     * exists because `localStorage` is scoped to one origin and the web GUI
+     * picks a fresh loopback port on every launch: without a copy outside the
+     * page, a restart looks like a first run and drops the settings.
+     */
+    const STORE_ROUTE = '/dsh-nudge/store'
+    /** Shape version of the durable settings record the Host half keeps. */
+    const STORE_VERSION = 1
+    /** How long a burst of setting edits settles before one Host write, in ms. */
+    const STORE_SYNC_MS = 300
 
     /** The single source of the delivery default: "直接打断" (steer) is first. */
     const DEFAULT_DELIVERY = 'steer'
@@ -86,6 +104,34 @@ window.__ModuleLoader__.load({
     const DEFAULT_PRESET = 'brief'
     /** Cap on presets so the flat row in the window stays usable. */
     const MAX_PRESETS = 8
+    /**
+     * Lines the status row shows while nothing is happening. It is a plain
+     * list of strings; one is shown at a time and the list rotates.
+     */
+    const TIPS_KEY = 'dsh-nudge:tips'
+    /** Upper bound on those lines, so the settings section stays scrollable. */
+    const MAX_TIPS = 20
+    /** Built-in idle lines; the settings section can edit, add and reset them. */
+    const BUILTIN_TIPS = [
+      {
+        zh: '选中对话里的文字，就能加一条批注。',
+        en: 'Select text in the conversation to leave a note.',
+      },
+      {
+        zh: '开关切换的提示会在这行停 5 秒，然后继续轮换。',
+        en: 'A switch message holds here for 5 seconds, then the rotation resumes.',
+      },
+      {
+        zh: '急速模式下双击口径，可以直接执行。',
+        en: 'In turbo mode, double-click a prompt to run it straight away.',
+      },
+    ]
+    /** How long a change message holds before the idle line returns, in ms. */
+    const FLASH_HOLD_MS = 5000
+    /** How long a line stays up before the next one takes over, in ms. */
+    const TIP_ROTATE_MS = FLASH_HOLD_MS
+    /** Cap on one idle line, in characters; keeps the status row one line tall. */
+    const MAX_TIP_LENGTH = 60
 
     const CARD_WIDTH = 320
     const PILL_WIDTH = 104
@@ -131,6 +177,17 @@ window.__ModuleLoader__.load({
       sendAnnotations: '发送',
       quickOn: '快速批注：开',
       quickOff: '快速批注：关',
+      quickTitle: '快速批注',
+      quickHint: '开启后选中对话文字即刻弹出批注卡片；关闭时用标题栏的「+」手动捕获选区。',
+      autoPasteTitle: '自动粘贴批注',
+      autoPasteDesc: '点选输入框时，把当前待发送的批注自动写入输入框。',
+      autoPasteOn: '自动粘贴：开',
+      autoPasteOff: '自动粘贴：关',
+      copyHint: '复制选中的原文',
+      deliveryTitle: '投递方式',
+      deliveryDesc: '「直接打断」中止当前回答立刻处理；「排队」等这一轮结束后再处理。',
+      sortUp: '上移',
+      sortDown: '下移',
       nudgeModule: '快捷输入',
       collapseAnnotations: '收起批注',
       expandAnnotations: '展开批注',
@@ -148,6 +205,7 @@ window.__ModuleLoader__.load({
       again: '再问一次',
       collapse: '收起',
       collapseHint: '拖动可移动',
+      foldHint: '点击收起为胶囊',
       expand: '展开 dsh-nudge 窗口',
       statusIdle: '未询问',
       statusWaiting: '等待中',
@@ -183,9 +241,23 @@ window.__ModuleLoader__.load({
       presetLimit: '最多 8 条口径，先删一条再新增。',
       presetTextRequired: '内容不能为空。',
       presetLast: '至少保留一条口径。',
+      tipsTitle: '状态行文案',
+      tipsHint: '空闲时这行轮换显示下面的文案；切换开关的提示会停 5 秒，再继续轮换。',
+      tipsEmpty: '还没有文案。',
+      tipsPlaceholder: '一句闲时提示',
+      tipsPastePlaceholder: '整段粘贴会自动拆成一句一句；也可以手写，一行一句（Ctrl+Enter 提交）',
+      tipsAdded: '已添加 {n} 句',
+      tipsSkipped: '跳过 {n} 行空行、重复或超上限的行',
+      addTip: '添加',
+      resetTips: '恢复默认',
+      deleteTip: '删除',
+      tipLimit: '最多 20 句，先删一句再新增。',
+      tipTextRequired: '文案不能为空。',
+      tipLast: '至少保留一句。',
       settingsTitle: '状态询问',
+      settingsHead: '设置',
+      back: '返回',
       openSettings: '打开设置',
-      settingsUnavailable: '无法打开设置页面，请从侧边栏进入设置。',
     }
 
     const EN = {
@@ -211,6 +283,17 @@ window.__ModuleLoader__.load({
       sendAnnotations: 'Send',
       quickOn: 'Quick notes: on',
       quickOff: 'Quick notes: off',
+      quickTitle: 'Quick notes',
+      quickHint: 'When on, selecting text in the conversation opens a note card right away; when off, use the + in the title bar to capture the selection.',
+      autoPasteTitle: 'Auto-paste notes',
+      autoPasteDesc: 'When you click into the input box, write the pending notes into it automatically.',
+      autoPasteOn: 'Auto-paste: on',
+      autoPasteOff: 'Auto-paste: off',
+      copyHint: 'copy this passage',
+      deliveryTitle: 'Delivery mode',
+      deliveryDesc: 'Interrupt stops the current answer and handles this right away; Queue waits for the running turn to finish.',
+      sortUp: 'Move up',
+      sortDown: 'Move down',
       nudgeModule: 'Quick input',
       collapseAnnotations: 'Collapse notes',
       expandAnnotations: 'Expand notes',
@@ -228,6 +311,7 @@ window.__ModuleLoader__.load({
       again: 'Ask again',
       collapse: 'Collapse',
       collapseHint: 'Drag to move',
+      foldHint: 'Click to fold into the pill',
       expand: 'Expand the dsh-nudge window',
       statusIdle: 'Not asked',
       statusWaiting: 'Waiting',
@@ -263,9 +347,23 @@ window.__ModuleLoader__.load({
       presetLimit: 'At most 8 prompts; delete one first.',
       presetTextRequired: 'The text cannot be empty.',
       presetLast: 'Keep at least one prompt.',
+      tipsTitle: 'Status lines',
+      tipsHint: 'While idle this row rotates the lines below; a switch message holds here for 5 seconds, then the rotation resumes.',
+      tipsEmpty: 'No lines yet.',
+      tipsPlaceholder: 'One idle line',
+      tipsPastePlaceholder: 'Paste a whole list and it is split per line; or type one line each (Ctrl+Enter adds them)',
+      tipsAdded: 'Added {n} lines',
+      tipsSkipped: 'skipped {n} blank, duplicate or over-limit lines',
+      addTip: 'Add',
+      resetTips: 'Reset defaults',
+      deleteTip: 'Delete',
+      tipLimit: 'At most 20 lines; delete one first.',
+      tipTextRequired: 'The line cannot be empty.',
+      tipLast: 'Keep at least one line.',
       settingsTitle: 'Status Nudge',
+      settingsHead: 'Settings',
+      back: 'Back',
       openSettings: 'Open settings',
-      settingsUnavailable: 'Could not open Settings; open it from the sidebar instead.',
     }
 
     // ---------------------------------------------------------------------
@@ -442,10 +540,33 @@ window.__ModuleLoader__.load({
       return Math.min(high, Math.max(low, value))
     }
 
-    /** The page storage, or undefined when storage is unavailable (private mode). */
+    /**
+     * The page storage, or undefined when storage is unavailable (private mode).
+     *
+     * Every write is mirrored to the Host half. The durable copy lives in a
+     * file inside the profile directory, because the web GUI's loopback port
+     * changes on every launch and `localStorage` is isolated per origin — a
+     * restart would otherwise look like a first run and silently reset the
+     * presets, the switches and the delivery mode.
+     */
+    let storageFacade
     function storage() {
+      if (storageFacade !== undefined) return storageFacade
       try {
-        return window.localStorage
+        const raw = window.localStorage
+        if (raw === undefined || raw === null) return undefined
+        storageFacade = {
+          getItem: (key) => raw.getItem(key),
+          setItem: (key, value) => {
+            raw.setItem(key, value)
+            scheduleStoreSync()
+          },
+          removeItem: (key) => {
+            raw.removeItem(key)
+            scheduleStoreSync()
+          },
+        }
+        return storageFacade
       } catch {
         return undefined
       }
@@ -469,6 +590,124 @@ window.__ModuleLoader__.load({
         storage()?.setItem(key, JSON.stringify(value))
       } catch {
         /* storage full or disabled: position memory is best-effort */
+      }
+    }
+
+    /** The settings, in the shape the Host half keeps them. */
+    function settingsSnapshot() {
+      const store = storage()
+      if (store === undefined) return undefined
+      const snapshot = { version: STORE_VERSION }
+      const ui = readJson(UI_KEY)
+      if (ui !== undefined) snapshot.ui = ui
+      const delivery = store.getItem(DELIVERY_KEY)
+      if (isDelivery(delivery)) snapshot.delivery = delivery
+      if (store.getItem(TURBO_KEY) === '1') snapshot.turbo = true
+      if (store.getItem(QUICK_KEY) === '1') snapshot.quick = true
+      if (store.getItem(AUTOPASTE_KEY) === '1') snapshot.autoPaste = true
+      const preset = store.getItem(PRESET_KEY)
+      if (typeof preset === 'string' && preset !== '') snapshot.preset = preset
+      const presets = readJson(PRESETS_KEY)
+      if (presets !== undefined) snapshot.presets = presets
+      const tips = readJson(TIPS_KEY)
+      if (Array.isArray(tips)) snapshot.tips = tips
+      const notes = readJson(NOTES_KEY)
+      if (notes !== undefined) snapshot.notes = notes
+      return snapshot
+    }
+
+    /** Whether a snapshot carries any setting at all (the version always counts). */
+    function hasStoredSettings(snapshot) {
+      return snapshot !== undefined && snapshot !== null && Object.keys(snapshot).length > 1
+    }
+
+    /**
+     * Write a Host-supplied record into the page storage.
+     * @returns true when at least one known key was adopted.
+     */
+    function applySettingsStore(value) {
+      if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
+      const store = storage()
+      if (store === undefined) return false
+      try {
+        if (value.ui !== null && typeof value.ui === 'object' && !Array.isArray(value.ui)) {
+          store.setItem(UI_KEY, JSON.stringify(value.ui))
+        }
+        // The stored shape says "queue" (how it reads in the UI); the state
+        // machine only knows `followup`. Normalise so an old record still lands.
+        if (value.delivery === 'queue') store.setItem(DELIVERY_KEY, 'followup')
+        else if (isDelivery(value.delivery)) store.setItem(DELIVERY_KEY, value.delivery)
+        if (value.turbo === true) store.setItem(TURBO_KEY, '1')
+        if (value.quick === true) store.setItem(QUICK_KEY, '1')
+        if (value.autoPaste === true) store.setItem(AUTOPASTE_KEY, '1')
+        if (typeof value.preset === 'string' && value.preset !== '') store.setItem(PRESET_KEY, value.preset)
+        if (Array.isArray(value.presets)) store.setItem(PRESETS_KEY, JSON.stringify(value.presets))
+        if (Array.isArray(value.tips)) store.setItem(TIPS_KEY, JSON.stringify(value.tips))
+        if (value.notes !== null && typeof value.notes === 'object' && !Array.isArray(value.notes)) {
+          store.setItem(NOTES_KEY, JSON.stringify(value.notes))
+        }
+        return true
+      } catch {
+        return false
+      }
+    }
+
+    let storeSyncTimer
+
+    /** Mirror the settings to the Host half once a burst of edits settles. */
+    function scheduleStoreSync() {
+      if (typeof fetch !== 'function') return
+      try {
+        if (storeSyncTimer !== undefined) clearTimeout(storeSyncTimer)
+      } catch {
+        /* no timers */
+      }
+      try {
+        storeSyncTimer = setTimeout(commitSettingsToHost, STORE_SYNC_MS)
+      } catch {
+        storeSyncTimer = undefined
+      }
+    }
+
+    /** Drop a pending settings mirror; used when the window unmounts. */
+    function cancelStoreSync() {
+      try {
+        if (storeSyncTimer !== undefined) clearTimeout(storeSyncTimer)
+      } catch {
+        /* no timers */
+      }
+      storeSyncTimer = undefined
+    }
+
+    /** Send the current settings to the Host half; a missing Host half is fine. */    function commitSettingsToHost() {
+      storeSyncTimer = undefined
+      const snapshot = settingsSnapshot()
+      if (snapshot === undefined || typeof fetch !== 'function') return
+      try {
+        Promise.resolve(
+          fetch(STORE_ROUTE, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ store: snapshot }),
+          }),
+        ).catch(() => {})
+      } catch {
+        /* preview page or check harness: nothing to sync to */
+      }
+    }
+
+    /** The Host half's durable record, or undefined when it has none. */
+    function loadStoreFromHost() {
+      if (typeof fetch !== 'function') return Promise.resolve(undefined)
+      try {
+        return Promise.resolve(fetch(STORE_ROUTE, { headers: { accept: 'application/json' } }))
+          .then((response) => (response?.ok === true ? response.json() : undefined))
+          .then((payload) =>
+            payload !== null && typeof payload === 'object' ? payload.store : undefined,
+          )
+          .catch(() => undefined)
+      } catch {
+        return Promise.resolve(undefined)
       }
     }
 
@@ -513,19 +752,37 @@ window.__ModuleLoader__.load({
       }))
     }
 
+    /** The first non-empty string among a stored preset's text aliases. */
+    function presetTextOf(item) {
+      for (const key of ['text', 'body', 'content', 'prompt']) {
+        const value = item[key]
+        if (typeof value === 'string' && value.trim() !== '') return value.trim()
+      }
+      return ''
+    }
+
     /** Normalize one stored/edited preset list; invalid entries are dropped. */
     function normalizePresetList(value, lang) {
       if (!Array.isArray(value)) return builtinPresets(lang)
       const list = []
       const seen = new Set()
-      for (const item of value) {
+      for (const raw of value) {
+        // An older build could store a bare line of text per entry.
+        const item = typeof raw === 'string' ? { text: raw } : raw
         if (item === null || typeof item !== 'object') continue
-        const text = typeof item.text === 'string' ? item.text.trim() : ''
+        const text = presetTextOf(item)
         if (text.length === 0) continue
         let id = typeof item.id === 'string' && item.id.length > 0 ? item.id : mintPresetId()
         if (seen.has(id)) id = mintPresetId()
         seen.add(id)
-        const rawLabel = typeof item.label === 'string' ? item.label.trim() : ''
+        const rawLabel =
+          typeof item.label === 'string'
+            ? item.label.trim()
+            : typeof item.name === 'string'
+              ? item.name.trim()
+              : typeof item.title === 'string'
+                ? item.title.trim()
+                : ''
         list.push({ id, label: rawLabel.length > 0 ? rawLabel : text.slice(0, 8), text })
         if (list.length >= MAX_PRESETS) break
       }
@@ -536,9 +793,29 @@ window.__ModuleLoader__.load({
       return list
     }
 
-    /** Read the persisted presets; the built-in list is the fallback. */
+    /** The list inside a legacy wrapper object, or undefined. */
+    function presetListOf(value) {
+      if (Array.isArray(value)) return value
+      if (value === null || typeof value !== 'object') return undefined
+      for (const key of ['presets', 'items', 'list']) {
+        if (Array.isArray(value[key])) return value[key]
+      }
+      return undefined
+    }
+
+    /**
+     * Read the persisted presets; the built-in list is the fallback.
+     * A legacy shape (wrapper object, bare strings, other field names) is
+     * normalized and rewritten once, so an update never silently drops the
+     * prompts a user authored in an older build.
+     */
     function readPresets(lang) {
-      return normalizePresetList(readJson(PRESETS_KEY), lang)
+      const stored = readJson(PRESETS_KEY)
+      const raw = presetListOf(stored)
+      if (raw === undefined) return builtinPresets(lang)
+      const list = normalizePresetList(raw, lang)
+      if (!Array.isArray(stored)) writePresets(list)
+      return list
     }
 
     /** Read the chosen preset id, falling back to the first available preset. */
@@ -589,6 +866,46 @@ window.__ModuleLoader__.load({
       } catch {
         return false
       }
+    }
+
+    /** Read the auto-paste switch: notes flow into the composer on focus. */
+    function readAutoPaste() {
+      try {
+        return storage()?.getItem(AUTOPASTE_KEY) === '1'
+      } catch {
+        return false
+      }
+    }
+
+    /** The built-in idle lines, localized to one language. */
+    function builtinTips(lang) {
+      return BUILTIN_TIPS.map((tip) => (lang === 'zh' ? tip.zh : tip.en))
+    }
+
+    /** One idle line: whitespace collapsed, trimmed, length-capped for the row. */
+    function tidyTip(value) {
+      if (typeof value !== 'string') return ''
+      const line = value.replace(/\s+/g, ' ').trim()
+      return line.length > MAX_TIP_LENGTH ? line.slice(0, MAX_TIP_LENGTH) : line
+    }
+
+    /** Normalize a stored list: strings only, no blanks or duplicates, capped. */
+    function normalizeTipList(value, lang) {
+      const list = Array.isArray(value) ? value.map(tidyTip).filter((line) => line !== '') : []
+      const unique = []
+      for (const line of list) if (!unique.includes(line)) unique.push(line)
+      const capped = unique.slice(0, MAX_TIPS)
+      return capped.length > 0 ? capped : builtinTips(lang)
+    }
+
+    /** Read the idle lines; the built-in list is the fallback. */
+    function readTips(lang) {
+      return normalizeTipList(readJson(TIPS_KEY), lang)
+    }
+
+    /** Persist the idle lines. */
+    function writeTips(tips) {
+      writeJson(TIPS_KEY, tips)
     }
 
     /** Every stored annotation set, keyed by Session id. */
@@ -862,6 +1179,11 @@ window.__ModuleLoader__.load({
         composerFocused: false,
         /** Quick annotation master switch (the title-bar button). */
         quick: readQuick(),
+        /** Auto-paste switch: pending notes flow into the composer on focus. */
+        autoPaste: readAutoPaste(),
+        /** Idle lines for the status row, and which one is showing. */
+        tips: readTips(language),
+        tipIndex: 0,
         /** Collected quote + note blocks waiting to be delivered. */
         annotations: notesOfSession(initialTarget?.sessionId),
         /** The selection currently being annotated, or null. */
@@ -874,6 +1196,8 @@ window.__ModuleLoader__.load({
         annotationExpanded: false,
         /** Whether the nudge module (prompts / mode / primary) shows its body. */
         nudgeExpanded: true,
+        /** Whether the window shows the settings form in place of its body. */
+        settingsOpen: false,
         /** Timestamp of the last capture, used to restart the attention pulse. */
         attentionAt: 0,
         lang: language,
@@ -1170,7 +1494,13 @@ window.__ModuleLoader__.load({
       /** Keep the visible mode flag (the primary button label) in sync with focus. */
       function syncComposerFocus() {
         const focused = canInsert()
-        if (focused !== state.composerFocused) setState({ composerFocused: focused })
+        if (focused === state.composerFocused) return
+        setState({ composerFocused: focused })
+        // Auto-paste: the moment the caret lands in the composer, hand the
+        // pending notes over and empty the tray. A failed write keeps them.
+        if (focused && state.autoPaste === true && state.annotations.length > 0) {
+          writeAnnotations()
+        }
       }
 
       /**
@@ -1278,6 +1608,8 @@ window.__ModuleLoader__.load({
       let highlightObserver
       /** Ranges painted for the current notes, used to hit-test clicks. */
       let highlighted = []
+      /** True while a pointer gesture is down, so no card opens mid-drag. */
+      let pointerHeld = false
 
       /** Cancel a capture that has not fired yet (a new press is starting). */
       function cancelPendingCapture() {
@@ -1312,6 +1644,38 @@ window.__ModuleLoader__.load({
         if (state.quick === true && event?.shiftKey === true) captureSelectionLater()
       }
 
+      /**
+       * A card must never open while the button is still down: dragging a
+       * selection keeps firing `selectionchange`, and opening then would steal
+       * the focus (and the caret) in the middle of the gesture. The pointer
+       * path and the safety net both wait for the release.
+       */
+      function onPointerGestureDown() {
+        pointerHeld = true
+        cancelPendingCapture()
+      }
+
+      function onPointerGestureUp() {
+        pointerHeld = false
+      }
+
+      /**
+       * Safety net for a settled selection that never reaches the pointer path:
+       * a drag that ends outside the transcript, a double-click on a boundary,
+       * or a second selection whose mouseup was swallowed by a re-render. It
+       * shares the debounce timer, so the pointer path always wins, and
+       * `captureSelection` itself refuses the quote that is already captured.
+       */
+      function onSelectionChange() {
+        if (state.quick !== true) return
+        if (pointerHeld) return
+        if (selectionTimer !== undefined) clearTimeout(selectionTimer)
+        selectionTimer = setTimeout(() => {
+          selectionTimer = undefined
+          captureSelection()
+        }, 260)
+      }
+
       /** One short pulse so a capture is noticed wherever the eye is. */
       function pulse() {
         setState({ attentionAt: Date.now() })
@@ -1334,7 +1698,7 @@ window.__ModuleLoader__.load({
         flashTimer = setTimeout(() => {
           flashTimer = undefined
           setState({ flash: '' })
-        }, 1600)
+        }, FLASH_HOLD_MS)
         return true
       }
 
@@ -1411,6 +1775,20 @@ window.__ModuleLoader__.load({
         return true
       }
 
+      /** Auto-paste switch: when on, pending notes flow into the composer on focus. */
+      function setAutoPaste(value) {
+        const next = value === true
+        try {
+          if (next) storage()?.setItem(AUTOPASTE_KEY, '1')
+          else storage()?.removeItem(AUTOPASTE_KEY)
+        } catch {
+          /* best effort */
+        }
+        setState({ autoPaste: next })
+        notify(next ? text('autoPasteOn') : text('autoPasteOff'))
+        return true
+      }
+
       /** Whether the annotation module shows its body. */
       function setAnnotationExpanded(value) {
         setState({ annotationExpanded: value === true })
@@ -1474,6 +1852,9 @@ window.__ModuleLoader__.load({
           annotationEditingId: null,
           note: '',
           error: '',
+          // A note just landed: open the tray so the count and the actions are
+          // visible without a second click (the compose box stays expanded).
+          annotationExpanded: true,
         })
         repaintHighlights()
         return true
@@ -1787,11 +2168,47 @@ window.__ModuleLoader__.load({
         closePopup()
       }
 
+      /**
+       * True when the focused node is one of our own text fields and it holds a
+       * real (non-empty) text selection: there the browser's own copy wins.
+       */
+      function fieldHasSelection() {
+        try {
+          const active = document.activeElement
+          if (!active || typeof active.selectionStart !== 'number') return false
+          if (typeof active.closest !== 'function' || active.closest(SELF_SELECTOR) === null) return false
+          return active.selectionStart !== active.selectionEnd
+        } catch {
+          return false
+        }
+      }
+
+      /** Ctrl/Cmd+C while a card is open, with no selection inside our fields. */
+      function copyShortcutActive(event) {
+        if (state.annotationDraft === null) return false
+        if (event.ctrlKey !== true && event.metaKey !== true) return false
+        if (event.altKey === true || event.shiftKey === true) return false
+        return typeof event.key === 'string' && event.key.toLowerCase() === 'c'
+      }
+
       function onPopupKeydown(event) {
+        if (event?.key === 'Escape' && state.settingsOpen) {
+          event.preventDefault()
+          closeSettings()
+          return
+        }
         if (event?.key === 'Escape' && state.annotationDraft !== null) {
           event.preventDefault()
           closePopup()
+          return
         }
+        if (!copyShortcutActive(event)) return
+        if (fieldHasSelection()) return
+        // Focusing the note field drops the editor's native selection, so the
+        // browser has nothing left to copy. The card owns the passage: copy it
+        // ourselves and keep Ctrl+C working, which is the point of the card.
+        event.preventDefault()
+        copyDraftQuote().then((ok) => notify(ok ? text('copiedShort') : text('copyFailedShort')))
       }
 
       /** Append every collected annotation to the composer draft. */
@@ -2074,6 +2491,20 @@ window.__ModuleLoader__.load({
         return true
       }
 
+      /** Move one preset one slot up (`delta` -1) or down (+1); order persists. */
+      function movePreset(id, delta) {
+        const from = state.presets.findIndex((preset) => preset.id === id)
+        if (from < 0) return false
+        const step = delta < 0 ? -1 : 1
+        const to = from + step
+        if (to < 0 || to >= state.presets.length) return false
+        const next = [...state.presets]
+        const [moved] = next.splice(from, 1)
+        next.splice(to, 0, moved)
+        commitPresets(next, state.presetId)
+        return true
+      }
+
       /** Restore the built-in presets (and forget the settings storage). */
       function resetPresets() {
         try {
@@ -2082,6 +2513,114 @@ window.__ModuleLoader__.load({
           /* best effort */
         }
         commitPresets(builtinPresets(state.lang), DEFAULT_PRESET)
+      }
+
+      // --- idle lines ------------------------------------------------------
+
+      /** Commit one idle-line list: storage, state, Host mirror, back to the first line. */
+      function commitTips(list) {
+        const next = normalizeTipList(list, state.lang)
+        writeTips(next)
+        setState({ tips: next, tipIndex: 0 })
+        scheduleStoreSync()
+        return next
+      }
+
+      /** Replace the line at `index`; a blank line is refused. */
+      function updateTip(index, value) {
+        if (index < 0 || index >= state.tips.length) return false
+        const line = tidyTip(value)
+        if (line === '') return false
+        const next = [...state.tips]
+        next[index] = line
+        commitTips(next)
+        return true
+      }
+
+      /** Append one idle line; the list is capped. */
+      function addTip(value) {
+        const line = tidyTip(value)
+        if (line === '') return { ok: false, error: text('tipTextRequired') }
+        if (state.tips.length >= MAX_TIPS) return { ok: false, error: text('tipLimit') }
+        const next = commitTips([...state.tips, line])
+        return { ok: true, index: Math.max(0, next.indexOf(line)) }
+      }
+
+      /**
+       * Append pasted text as separate lines: every line break starts a new
+       * idle line, so a whole list can be pasted at once. Blank lines,
+       * duplicates and overflow past MAX_TIPS are dropped.
+       */
+      function addTips(raw) {
+        if (typeof raw !== 'string') return { ok: false, added: 0, skipped: 0, error: text('tipTextRequired') }
+        const lines = []
+        for (const part of raw.split(/\r\n|\r|\n/)) {
+          const line = tidyTip(part)
+          if (line !== '') lines.push(line)
+        }
+        const incoming = []
+        for (const line of lines) {
+          if (state.tips.includes(line) || incoming.includes(line)) continue
+          incoming.push(line)
+        }
+        if (incoming.length === 0) {
+          return { ok: false, added: 0, skipped: lines.length, error: text('tipTextRequired') }
+        }
+        const room = MAX_TIPS - state.tips.length
+        if (room <= 0) return { ok: false, added: 0, skipped: lines.length, error: text('tipLimit') }
+        const added = incoming.slice(0, room)
+        commitTips([...state.tips, ...added])
+        return {
+          ok: true,
+          added: added.length,
+          skipped: lines.length - added.length,
+          truncated: added.length < incoming.length,
+          error: '',
+        }
+      }
+
+      /** Remove one idle line; the last remaining line cannot be removed. */
+      function removeTip(index) {
+        if (state.tips.length <= 1) return false
+        if (index < 0 || index >= state.tips.length) return false
+        const next = [...state.tips]
+        next.splice(index, 1)
+        commitTips(next)
+        return true
+      }
+
+      /** Move one idle line up (`delta` -1) or down (+1); order is persisted. */
+      function moveTip(index, delta) {
+        const count = state.tips.length
+        const from = index
+        const to = from + (delta < 0 ? -1 : 1)
+        if (from < 0 || from >= count || to < 0 || to >= count || from === to) return false
+        const next = [...state.tips]
+        const [line] = next.splice(from, 1)
+        next.splice(to, 0, line)
+        commitTips(next)
+        return true
+      }
+
+      /** Restore the built-in idle lines. */
+      function resetTips() {
+        try {
+          storage()?.removeItem(TIPS_KEY)
+        } catch {
+          /* best effort */
+        }
+        setState({ tips: builtinTips(state.lang), tipIndex: 0 })
+        scheduleStoreSync()
+      }
+
+      /** Show the next idle line; the status row calls this on a timer. */
+      function advanceTip() {
+        const count = state.tips.length
+        if (count < 2) return
+        // A confirmation line owns the row for its full hold, then the
+        // rotation picks up again with the next line.
+        if (state.flash.length > 0) return
+        setState({ tipIndex: (state.tipIndex + 1) % count })
       }
 
       // --- window state ---------------------------------------------------
@@ -2095,6 +2634,7 @@ window.__ModuleLoader__.load({
         if (state.collapsed === value) return
         setState({
           collapsed: value,
+          settingsOpen: value ? false : state.settingsOpen,
           unread: value ? state.unread : false,
           pos: clampPoint(state.pos, value),
         })
@@ -2108,159 +2648,444 @@ window.__ModuleLoader__.load({
 
       /** Persist the current window state. */
       function saveUi() {
-        writeJson(UI_KEY, { collapsed: state.collapsed, pos: state.pos })
+        // Keep keys this build does not own (an older record may carry more).
+        writeJson(UI_KEY, { ...(readJson(UI_KEY) ?? {}), collapsed: state.collapsed, pos: state.pos })
+      }
+
+      // --- durable settings (Host half) -----------------------------------
+
+      /**
+       * Adopt the Host half's durable record when this origin has no settings
+       * of its own — the state a restart on a fresh loopback port starts from.
+       * When the page does have settings they are the fresher copy (the user
+       * just changed them), so the Host record is refreshed from them instead
+       * of overwriting them.
+       * @returns true when a restored record changed the state.
+       */
+      function hydrateFromHost() {
+        return loadStoreFromHost().then((remote) => {
+          const local = settingsSnapshot()
+          if (
+            remote !== null &&
+            remote !== undefined &&
+            typeof remote === 'object' &&
+            !hasStoredSettings(local)
+          ) {
+            if (!applySettingsStore(remote)) return false
+            reloadFromStorage()
+            return true
+          }
+          if (hasStoredSettings(local)) scheduleStoreSync()
+          return false
+        })
+      }
+
+      /** Re-derive every persisted preference from the storage record. */
+      function reloadFromStorage() {
+        const presets = readPresets(state.lang)
+        const saved = readJson(UI_KEY) ?? {}
+        const narrow = viewport().width < 720
+        const collapsed = typeof saved.collapsed === 'boolean' ? saved.collapsed : narrow
+        setState({
+          presets,
+          presetId: readPresetId(presets),
+          deliveryOverride: readDeliveryOverride(),
+          turbo: readTurbo(),
+          quick: readQuick(),
+          autoPaste: readAutoPaste(),
+          tips: readTips(state.lang),
+          tipIndex: 0,
+          annotations: notesOfSession(state.target?.sessionId),
+          collapsed,
+          pos: isPoint(saved.pos) ? clampPoint(saved.pos, collapsed) : dockPosition(collapsed),
+        })
       }
 
       // --- settings navigation --------------------------------------------
 
-      let settingsTimer
-
-      /** The settings dialog, tolerating shell versions with slightly different seams. */
-      function findSettingsPanel() {
-        return (
-          document.querySelector?.(SETTINGS_PANEL_SELECTOR) ??
-          document.querySelector?.('[role="dialog"][aria-modal="true"]')
-        )
-      }
-
-      /** Click the settings nav row that owns this plugin's section. */
-      function selectSettingsSection(panel) {
-        if (typeof panel?.querySelectorAll !== 'function') return false
-        const target = text('settingsTitle')
-        const buttons = [...panel.querySelectorAll('button')]
-        const textOf = (button) => (button.textContent ?? '').replace(/\s+/g, '')
-        const labelOf = (button) => (button.getAttribute?.('aria-label') ?? '').replace(/\s+/g, '')
-        const match =
-          buttons.find((button) => textOf(button) === target) ??
-          buttons.find((button) => textOf(button).includes(target)) ??
-          buttons.find((button) => labelOf(button).includes(target))
-        if (!match || typeof match.click !== 'function') return false
-        match.click()
-        return true
-      }
-
-      /** The modal id the shortcuts adapter would report, so the command's own guard applies. */
-      function currentModalId() {
+      /**
+       * Keep the last few navigation samples in the persisted UI record.
+       *
+       * The shell's open seams report nothing when they fail — `invoke` returns
+       * void, a blocked command returns silently, a click on the wrong button is
+       * accepted — so the only place a failure can be observed is the running
+       * page. The samples land in `nudge-store.json`, next to the other settings.
+       */
+      function recordSettingsDiag(entry) {
         try {
-          const dialogs = document.querySelectorAll?.(
-            '[data-shortcut-modal], [role="dialog"][aria-modal="true"]',
-          )
-          const top = dialogs?.[dialogs.length - 1]
-          if (!top) return null
-          return top.getAttribute?.('data-shortcut-modal') ?? 'other'
+          const ui = readJson(UI_KEY) ?? {}
+          const list = Array.isArray(ui.settingsDiag) ? ui.settingsDiag.slice(-5) : []
+          list.push({ at: Date.now(), ...entry })
+          ui.settingsDiag = list
+          storage()?.setItem(UI_KEY, JSON.stringify(ui))
         } catch {
-          return null
+          /* diagnostics are best-effort and never block the gear */
         }
       }
 
       /**
-       * Run the shell's registered `settings.open` command. The sidebar launcher
-       * seat may be occupied by the account menu, so the plain Settings trigger
-       * is not always in the sidebar. The command is the shell's own entry point
-       * and works for either launcher and for both runtimes; the Desktop shell
-       * routes real key events to a native bridge, so synthesizing a keydown is
-       * only a last resort for Web shells.
+       * A reusable "open DSH Settings and land on a section" driver.
+       *
+       * The shell exposes no plugin-facing API for this: the panel's open state
+       * lives inside the shell component, `settings.open` returns void and is
+       * refused silently while another modal owns the page, and the sidebar
+       * trigger shares its seat with other plugins' popovers. The only
+       * trustworthy receipt is the panel itself, so the jump is a small state
+       * machine — ask a route, wait for the panel to paint, escalate — and
+       * everything business-specific is injected:
+       *
+       *   getShortcuts  the `shortcuts` service (`registry.invoke`, `catalog`)
+       *   getSlots      the `slots` service, read only by `probe()`
+       *   sectionTitle  the nav row to click once the panel is up
+       *   onDiag        where to record what the page looked like
+       *   onFallback    what to show when no route painted the panel
+       *
+       * Nothing below reads this plugin's state, so the same driver serves any
+       * other jump of the same shape (another settings section, another shell
+       * panel) unchanged.
        */
-      function runSettingsCommand() {
-        try {
-          const registry = ctx.get?.('shortcuts')?.registry
-          if (typeof registry?.invoke === 'function') {
+      function createSettingsJump(options) {
+        const { getShortcuts, getSlots, sectionTitle, onDiag, onFallback } = options
+
+        let timer
+        /** The routes of the current press, and the one being verified. */
+        let routes = []
+        let index = 0
+
+        /** Cancel a pending verification (dispose, or a second press of the gear). */
+        function cancel() {
+          if (timer !== undefined) {
+            clearTimeout(timer)
+            timer = undefined
+          }
+        }
+
+        /** The settings dialog, tolerating shell versions with slightly different seams. */
+        function findPanel() {
+          return (
+            document.querySelector?.(SETTINGS_PANEL_SELECTOR) ??
+            document.querySelector?.('[role="dialog"][aria-modal="true"]')
+          )
+        }
+
+        /** Click the settings nav row that owns the requested section. */
+        function selectSection(panel) {
+          if (typeof panel?.querySelectorAll !== 'function') return false
+          const target = sectionTitle()
+          const buttons = [...panel.querySelectorAll('button')]
+          const textOf = (button) => (button.textContent ?? '').replace(/\s+/g, '')
+          const labelOf = (button) => (button.getAttribute?.('aria-label') ?? '').replace(/\s+/g, '')
+          const match =
+            buttons.find((button) => textOf(button) === target) ??
+            buttons.find((button) => textOf(button).includes(target)) ??
+            buttons.find((button) => labelOf(button).includes(target))
+          if (!match || typeof match.click !== 'function') return false
+          match.click()
+          return true
+        }
+
+        /** The modal id the shortcuts adapter would report, so the command's own guard applies. */
+        function currentModalId() {
+          try {
+            const dialogs = document.querySelectorAll?.(
+              '[data-shortcut-modal], [role="dialog"][aria-modal="true"]',
+            )
+            const top = dialogs?.[dialogs.length - 1]
+            if (!top) return null
+            return top.getAttribute?.('data-shortcut-modal') ?? 'other'
+          } catch {
+            return null
+          }
+        }
+
+        /**
+         * What the running page says about the shell's settings seams: whether
+         * the sidebar launcher exists, what `settings.open` looks like from here,
+         * and (when a panel is up) which nav rows it painted. Every value is
+         * optional, because a shell build may miss any of them.
+         */
+        function probe() {
+          const facts = {}
+          try {
+            const root = document.querySelector?.(SETTINGS_ROOT_SELECTOR) ?? null
+            facts.root = root !== null
+            const scoped = root?.querySelector?.('button[aria-haspopup="dialog"]') ?? null
+            facts.scoped = scoped === null ? null : {
+              label: scoped.getAttribute?.('aria-label') ?? null,
+              keys: scoped.getAttribute?.('aria-keyshortcuts') ?? null,
+            }
+            facts.global = document.querySelectorAll?.('button[aria-haspopup="dialog"]')?.length ?? -1
+            facts.comma = document.querySelectorAll?.('button[aria-keyshortcuts*="omma"]')?.length ?? -1
+            facts.slots = document.querySelectorAll?.('[data-slot]')?.length ?? -1
+            facts.modal = currentModalId()
+            const shortcuts = getShortcuts()
+            facts.shortcuts = shortcuts === undefined ? null : Object.keys(shortcuts)
+            facts.invoke = typeof shortcuts?.registry?.invoke
+            facts.catalog = shortcuts?.catalog?.getSnapshot?.()?.length ?? -1
+            const slots = getSlots()
+            facts.slotNames = typeof slots?.entries === 'function'
+              ? (slots.entries() ?? [])
+                .map((entry) => entry.name)
+                .filter((name) => typeof name === 'string' && name.includes('settings'))
+              : null
+            const seat = typeof slots?.entries === 'function' ? slots.entries('sidebar.settings') : undefined
+            facts.seat = Array.isArray(seat) && seat.length > 0 ? Object.keys(seat[0]?.options ?? {}) : null
+            const panel = findPanel()
+            facts.panel = Boolean(panel)
+            if (panel) {
+              facts.nav = [...panel.querySelectorAll('button')]
+                .map((button) => (button.textContent ?? '').replace(/\s+/g, ''))
+                .slice(0, 16)
+            }
+          } catch (error) {
+            facts.error = String(error?.message ?? error)
+          }
+          return facts
+        }
+
+        /**
+         * Ask the shell's registered `settings.open` command. This is the shell's
+         * own entry point and works for either launcher seat and for both
+         * runtimes; it reports nothing back, so the panel is the receipt.
+         */
+        function invokeCommand() {
+          try {
+            const registry = getShortcuts()?.registry
+            if (typeof registry?.invoke !== 'function') return false
             registry.invoke('settings.open', { region: 'page', modal: currentModalId() })
             return true
+          } catch (error) {
+            console.warn('[dsh-nudge] settings command failed', error)
+            return false
           }
-        } catch (error) {
-          console.warn('[dsh-nudge] settings command failed', error)
         }
-        return pressSettingsShortcut()
-      }
 
-      /** Synthesize the registered `settings.open` keystroke; Web shells only. */
-      function pressSettingsShortcut() {
-        try {
-          if (typeof KeyboardEvent === 'undefined') return false
-          const shortcuts = ctx.get?.('shortcuts')
-          const row = shortcuts?.catalog
-            ?.getSnapshot?.()
-            ?.find((entry) => entry.id === 'settings.open')
-          const binding = row?.binding
-          if (!binding) return false
-          const modifiers = new Set(binding.modifiers ?? [])
-          const event = new KeyboardEvent('keydown', {
-            code: binding.code,
-            bubbles: true,
-            cancelable: true,
-            ctrlKey: modifiers.has('control'),
-            altKey: modifiers.has('alt'),
-            shiftKey: modifiers.has('shift'),
-            metaKey: modifiers.has('meta'),
-          })
-          const target = document.activeElement ?? document.body ?? window
-          target.dispatchEvent(event)
-          return true
-        } catch (error) {
-          console.warn('[dsh-nudge] settings shortcut failed', error)
+        /** Synthesize the registered `settings.open` keystroke; Web shells only. */
+        function pressShortcut() {
+          try {
+            if (typeof KeyboardEvent === 'undefined') return false
+            const row = getShortcuts()?.catalog
+              ?.getSnapshot?.()
+              ?.find((entry) => entry.id === 'settings.open')
+            const binding = row?.binding
+            if (!binding) return false
+            const modifiers = new Set(binding.modifiers ?? [])
+            const event = new KeyboardEvent('keydown', {
+              code: binding.code,
+              bubbles: true,
+              cancelable: true,
+              ctrlKey: modifiers.has('control'),
+              altKey: modifiers.has('alt'),
+              shiftKey: modifiers.has('shift'),
+              metaKey: modifiers.has('meta'),
+            })
+            const target = document.activeElement ?? document.body ?? window
+            target.dispatchEvent(event)
+            return true
+          } catch (error) {
+            console.warn('[dsh-nudge] settings shortcut failed', error)
+            return false
+          }
+        }
+
+        /**
+         * Text that names the shell's Settings trigger. The shell labels it with
+         * its own locale ("设置" / "Settings"), so match loosely.
+         */
+        const TRIGGER_TEXT = /设置|設定|偏好|settings?|preferences?/i
+
+        /** Whether `button` carries a mark that identifies it as the Settings trigger. */
+        function looksLikeTrigger(button) {
+          const shortcut = button.getAttribute?.('aria-keyshortcuts') ?? ''
+          if (/comma/i.test(shortcut)) return true
+          const label = [button.getAttribute?.('aria-label'), button.getAttribute?.('title')]
+            .filter((value) => typeof value === 'string')
+            .join(' ')
+          return TRIGGER_TEXT.test(label)
+        }
+
+        /**
+         * The plain Settings trigger, wherever the shell renders it. A button is
+         * only ever clicked here when it is *positively* identified as that
+         * trigger — the sidebar seat holds other dialog buttons too (a usage
+         * popover, an account menu), and clicking one of those is a visible side
+         * effect for a jump that then has to escalate anyway.
+         */
+        function findTrigger() {
+          const root = document.querySelector?.(SETTINGS_ROOT_SELECTOR)
+          const scoped = root?.querySelector?.('button[aria-haspopup="dialog"]')
+          if (scoped) return scoped
+          // The launcher seat is shared: when the account menu owns it the plain
+          // trigger is not rendered in the sidebar at all, so fall back to any
+          // dialog button whose own marks name Settings. Prefer the closed one, so
+          // the click opens instead of closes.
+          const candidates = [
+            ...(document.querySelectorAll?.('button[aria-haspopup="dialog"]') ?? []),
+          ].filter((button) => looksLikeTrigger(button))
+          const closed = candidates.find(
+            (button) => button.getAttribute?.('aria-expanded') !== 'true',
+          )
+          return closed ?? candidates[0] ?? null
+        }
+
+        /**
+         * The ways the shell can open Settings, in the order they are tried: the
+         * registered command first (it carries no side effect when it is refused),
+         * then the trigger button (it drives the shell's own chrome, but clicking
+         * it is a real click), then a synthesized keystroke for Web shells.
+         *
+         * Every one of these fails silently on some shell build — a modal guard
+         * refuses the command, the launcher seat belongs to the account menu, an
+         * older shell has no command at all — so a route only reports that it
+         * *asked*. The panel is the receipt, and the next route runs only when the
+         * previous one painted nothing.
+         */
+        function routesOf() {
+          return [
+            { id: 'command', run: () => invokeCommand() },
+            {
+              id: 'trigger',
+              run() {
+                const trigger = findTrigger()
+                if (trigger === null || typeof trigger.click !== 'function') return false
+                trigger.click()
+                return true
+              },
+            },
+            { id: 'keystroke', run: () => pressShortcut() },
+          ]
+        }
+
+        /** Run the next route; false once they are exhausted and the fallback ran. */
+        function advance() {
+          for (;;) {
+            // A route may open the panel just after its budget expired; checking
+            // before every route also stops the next one from closing a panel
+            // that is already up (`settings.open` toggles when Settings owns the
+            // modal).
+            const open = findPanel()
+            if (open !== null && open !== undefined) {
+              awaitSection(open, Date.now() + SETTINGS_SECTION_MS)
+              return true
+            }
+            if (index >= routes.length) break
+            const route = routes[index]
+            let acted = false
+            try {
+              acted = route.run() === true
+            } catch (error) {
+              console.warn('[dsh-nudge] settings route failed', route.id, error)
+            }
+            onDiag({ event: 'route', id: route.id, acted, ...probe() })
+            if (acted) {
+              awaitPanel(Date.now() + SETTINGS_ROUTE_MS)
+              return true
+            }
+            index += 1
+          }
+          // No seam answered: hand over to the host's fallback so the gear is
+          // never dead.
+          console.warn('[dsh-nudge] no settings seam answered; showing the form in the window')
+          onDiag({ event: 'fallback', ...probe() })
+          onFallback()
           return false
         }
-      }
 
-      /** The freshly opened panel renders on the next frame(s); retry briefly. */
-      function waitForSettingsSection(attempt) {
-        try {
-          const panel = findSettingsPanel()
-          if (panel) {
-            // Some shell versions render the panel before its nav rows. If the
-            // rows never expose our label, keep Settings open rather than
-            // reporting a false failure — the user can still pick the section.
-            if (selectSettingsSection(panel) || attempt >= 20) return
-          } else if (attempt >= 40) {
-            console.warn('[dsh-nudge] settings panel did not appear')
-            setState({ note: text('settingsUnavailable') })
+        /** Wait for the panel a route asked for; hand over to the next route if it never comes. */
+        function awaitPanel(deadline) {
+          cancel()
+          const panel = findPanel()
+          if (panel !== null && panel !== undefined) {
+            awaitSection(panel, Date.now() + SETTINGS_SECTION_MS)
             return
           }
-          settingsTimer = setTimeout(() => {
-            settingsTimer = undefined
-            waitForSettingsSection(attempt + 1)
-          }, 50)
-        } catch (error) {
-          console.warn('[dsh-nudge] settings navigation failed', error)
-          setState({ note: text('settingsUnavailable') })
+          if (Date.now() >= deadline) {
+            index += 1
+            advance()
+            return
+          }
+          timer = setTimeout(() => {
+            timer = undefined
+            awaitPanel(deadline)
+          }, SETTINGS_POLL_MS)
         }
+
+        /** Land on the requested section once the panel painted its nav rows. */
+        function awaitSection(panel, deadline) {
+          if (selectSection(panel)) {
+            onDiag({ event: 'landed' })
+            return
+          }
+          if (Date.now() >= deadline) {
+            // Some shells paint the panel before its rows. Keeping Settings open
+            // beats closing it: the user can still pick the row by hand.
+            console.warn('[dsh-nudge] settings panel painted no row for this plugin')
+            onDiag({ event: 'no-row', ...probe() })
+            return
+          }
+          timer = setTimeout(() => {
+            timer = undefined
+            awaitSection(findPanel() ?? panel, deadline)
+          }, SETTINGS_POLL_MS)
+        }
+
+        /**
+         * Open Settings, landing on the requested section.
+         *
+         * The shell exposes no public "open settings and navigate" service, so
+         * the routes in `routesOf` are tried until one of them actually paints
+         * the panel, and only then is the section row clicked. When no route
+         * paints it — an older shell, or a launcher seat and shortcuts service
+         * that are both unavailable — `onFallback` runs instead. Returns whether
+         * a shell route acted.
+         */
+        function open() {
+          cancel()
+          routes = routesOf()
+          index = 0
+          try {
+            return advance()
+          } catch (error) {
+            console.warn('[dsh-nudge] open settings failed', error)
+            onDiag({ event: 'error', error: String(error?.message ?? error) })
+            onFallback()
+            return false
+          }
+        }
+
+        return { open, cancel, probe }
       }
 
       /**
-       * Open the shell-owned Settings panel and land on this plugin's section.
-       * The shell exposes no public open/navigate service, so this clicks the
-       * plain Settings trigger when the sidebar still renders it, and otherwise
-       * runs the registered `settings.open` command. It never falls back to a
-       * document-wide `aria-haspopup="dialog"` match: other plugins (for example
-       * the Agent Team panel) render dialog triggers earlier in the DOM and the
-       * gear used to open those instead of Settings.
+       * The settings jump this plugin uses, wired to its own diagnostics record
+       * and its own in-window form as the fallback.
        */
+      const settingsJump = createSettingsJump({
+        getShortcuts: () => ctx.get?.('shortcuts'),
+        getSlots: () => ctx.slots,
+        sectionTitle: () => text('settingsTitle'),
+        onDiag: (entry) => recordSettingsDiag(entry),
+        onFallback: () => setState({ settingsOpen: true }),
+      })
+
+      /** Open this plugin's settings, landing on its own section. */
       function openSettings() {
-        try {
-          const panel = findSettingsPanel()
-          if (panel) {
-            if (!selectSettingsSection(panel)) waitForSettingsSection(0)
-            return true
-          }
-          // Only the plain Settings trigger has `aria-haspopup="dialog"` and it
-          // is scoped to the sidebar seat. When the account menu owns that seat
-          // (`aria-haspopup="menu"`), the command below opens the same panel.
-          const root = document.querySelector?.(SETTINGS_ROOT_SELECTOR)
-          const trigger = root?.querySelector?.('button[aria-haspopup="dialog"]')
-          if (trigger && typeof trigger.click === 'function') {
-            trigger.click()
-          } else if (!runSettingsCommand()) {
-            setState({ note: text('settingsUnavailable') })
-            return false
-          }
-          waitForSettingsSection(0)
-          return true
-        } catch (error) {
-          console.warn('[dsh-nudge] open settings failed', error)
-          setState({ note: text('settingsUnavailable') })
-          return false
-        }
+        return settingsJump.open()
+      }
+
+      /** Drop a pending verification (dispose, or a second press of the gear). */
+      function stopSettingsWait() {
+        settingsJump.cancel()
+      }
+
+      /** What the running page says about the shell's settings seams (diagnostics). */
+      function probeSettings() {
+        return settingsJump.probe()
+      }
+
+      /** Leave the in-window settings form and return to the normal body. */
+      function closeSettings() {
+        if (state.settingsOpen) setState({ settingsOpen: false })
       }
 
       /** Keep the window inside the viewport after a resize; the card closes. */
@@ -2331,8 +3156,13 @@ window.__ModuleLoader__.load({
           document.addEventListener('focusin', syncComposerFocus, true)
           document.addEventListener('focusout', syncComposerFocus, true)
           // Selection capture and painted-passage clicks.
+          document.addEventListener('pointerdown', onPointerGestureDown, true)
+          document.addEventListener('pointerup', onPointerGestureUp, true)
+          document.addEventListener('pointercancel', onPointerGestureUp, true)
+          window.addEventListener('blur', onPointerGestureUp)
           document.addEventListener('mouseup', captureSelectionLater, true)
           document.addEventListener('keyup', onSelectionKeyup, true)
+          document.addEventListener('selectionchange', onSelectionChange, true)
           document.addEventListener('click', onTranscriptClick, true)
           // A press outside the window or card dismisses it.
           document.addEventListener('pointerdown', onOuterPointerDown, true)
@@ -2356,9 +3186,20 @@ window.__ModuleLoader__.load({
         /* no observer */
       }
       refreshWorld()
+      // The Host half holds the durable copy of every preference; adopting it
+      // is what makes the settings survive an app restart (the GUI's loopback
+      // port changes, so `localStorage` is a different origin after a restart).
+      try {
+        Promise.resolve(hydrateFromHost()).catch(() => {})
+      } catch {
+        /* no Host half (preview page, check harness) */
+      }
 
       /** Release every subscription and in-flight request. */
       function dispose() {
+        cancelStoreSync()
+        cancelPendingCapture()
+        pointerHeld = false
         endWaiting()
         for (const off of offs) {
           try {
@@ -2368,14 +3209,19 @@ window.__ModuleLoader__.load({
           }
         }
         offs.length = 0
-        if (settingsTimer !== undefined) clearTimeout(settingsTimer)
+        stopSettingsWait()
         window.removeEventListener('resize', onResize)
         try {
           if (typeof document !== 'undefined' && typeof document.removeEventListener === 'function') {
             document.removeEventListener('focusin', syncComposerFocus, true)
             document.removeEventListener('focusout', syncComposerFocus, true)
+            document.removeEventListener('pointerdown', onPointerGestureDown, true)
+            document.removeEventListener('pointerup', onPointerGestureUp, true)
+            document.removeEventListener('pointercancel', onPointerGestureUp, true)
+            window.removeEventListener('blur', onPointerGestureUp)
             document.removeEventListener('mouseup', captureSelectionLater, true)
             document.removeEventListener('keyup', onSelectionKeyup, true)
+            document.removeEventListener('selectionchange', onSelectionChange, true)
             document.removeEventListener('click', onTranscriptClick, true)
             document.removeEventListener('pointerdown', onOuterPointerDown, true)
             document.removeEventListener('keydown', onPopupKeydown, true)
@@ -2415,11 +3261,17 @@ window.__ModuleLoader__.load({
         addPreset,
         updatePreset,
         removePreset,
+        movePreset,
         resetPresets,
         setCollapsed,
         moveTo,
         saveUi,
         openSettings,
+        closeSettings,
+        /** One sample of the shell's settings seams, kept in the durable record. */
+        probeSettingsSeams: () => recordSettingsDiag({ event: 'mount', ...probeSettings() }),
+        /** Note that the gear itself was reached, before any shell seam runs. */
+        noteSettingsPress: () => recordSettingsDiag({ event: 'gear', ...probeSettings() }),
         /** Composer bridge hooks (session input overlay). */
         attachComposer,
         detachComposer,
@@ -2427,6 +3279,14 @@ window.__ModuleLoader__.load({
         captureSelection,
         popupPosition,
         setQuick,
+        setAutoPaste,
+        addTip,
+        addTips,
+        updateTip,
+        removeTip,
+        moveTip,
+        resetTips,
+        advanceTip,
         setAnnotationExpanded,
         setNudgeExpanded,
         setAnnotationNote,
@@ -2442,7 +3302,15 @@ window.__ModuleLoader__.load({
         sendAnnotations,
         dispose,
         /** @internal exposed for scripts/check-client.mjs */
-        _debug: { maxPresets: MAX_PRESETS, state: () => state, syncComposerFocus },
+        _debug: {
+          maxPresets: MAX_PRESETS,
+          state: () => state,
+          syncComposerFocus,
+          settingsSnapshot,
+          applySettingsStore,
+          commitSettingsToHost,
+          hydrateFromHost,
+        },
       }
     }
 
@@ -2456,7 +3324,9 @@ window.__ModuleLoader__.load({
 @keyframes dsh-nudge-in{from{opacity:0;transform:translateY(-5px) scale(.985)}to{opacity:1;transform:none}}
 .dsh-nudge-title{display:flex;align-items:center;gap:8px;padding:12px 12px 10px 14px;cursor:grab;user-select:none;touch-action:none;border-bottom:1px solid var(--dn-line)}
 .dsh-nudge-title:active{cursor:grabbing}
-.dsh-nudge-name{font-size:12.5px;font-weight:600;letter-spacing:.2px}
+.dsh-nudge-name{font-size:12.5px;font-weight:600;letter-spacing:.2px;cursor:pointer;border-radius:5px;padding:2px 4px;margin:-2px -4px;transition:background .15s ease,color .15s ease}
+.dsh-nudge-name:hover{background:var(--dn-hover);color:var(--dsw-alias-label-primary,#1a1a1a)}
+.dsh-nudge-name:focus-visible{outline:2px solid var(--dn-accent-line);outline-offset:1px}
 .dsh-nudge-spacer{flex:1 1 auto}
 .dsh-nudge-mark{display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;width:16px;height:16px;color:var(--dsw-alias-state-idle-primary,#9a9aa4);transition:color .2s ease}
 .dsh-nudge-mark svg{display:block;overflow:visible}
@@ -2475,7 +3345,8 @@ window.__ModuleLoader__.load({
 .dsh-nudge-alert{margin:10px 14px 0;padding:8px 10px;border-radius:10px;font-size:12px;line-height:1.5;word-break:break-word}
 .dsh-nudge-alert.error{background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#c8433c) 10%,transparent);color:var(--dsw-alias-state-error-primary,#c8433c)}
 .dsh-nudge-alert.note{background:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#d99b1e) 12%,transparent);color:var(--dsw-alias-state-warn-primary,#a06a00)}
-.dsh-nudge-flash{margin:8px 14px 0;font-size:11.5px;line-height:1.4;color:var(--dn-accent);animation:dsh-nudge-flash-in .16s ease-out}
+.dsh-nudge-flash{margin:8px 14px 0;font-size:11.5px;line-height:1.4;min-height:16px;color:var(--dn-accent);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dsh-nudge-flash.active{animation:dsh-nudge-flash-in .16s ease-out}
 @keyframes dsh-nudge-flash-in{from{opacity:0;transform:translateY(-2px)}to{opacity:1;transform:none}}
 .dsh-nudge-content{display:flex;flex-direction:column;gap:12px;padding:12px 14px 14px}
 .dsh-nudge-field{display:flex;flex-direction:column;gap:7px;min-width:0}
@@ -2502,6 +3373,9 @@ window.__ModuleLoader__.load({
 @media (prefers-reduced-motion:reduce){.dsh-nudge-popup{animation:none;transition:none}}
 .dsh-nudge-popup-close{position:absolute;top:6px;right:6px;width:22px;height:22px;padding:0;border:0;border-radius:6px;background:transparent;color:var(--dsw-alias-label-secondary,#5a5a66);font:inherit;font-size:16px;line-height:20px;cursor:pointer}
 .dsh-nudge-popup-close:hover{background:var(--dn-hover);color:var(--dsw-alias-label-primary,#1a1a1a)}
+.dsh-nudge-settings-panel{display:flex;flex-direction:column;gap:10px;padding:12px;flex:1 1 auto;min-height:0;max-height:min(520px,72vh);overflow:auto}
+.dsh-nudge-settings-head{display:flex;align-items:center;gap:8px}
+.dsh-nudge-settings-name{font:inherit;font-size:12px;font-weight:600;color:var(--dsw-alias-label-primary,#1a1a1a)}
 .dsh-nudge-popup-row{display:flex;align-items:center;gap:6px}
 .dsh-nudge-popup-row button{height:32px;padding:0 9px;border:1px solid var(--dn-line);border-radius:8px;background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);font:inherit;font-size:13px;line-height:1;white-space:nowrap;cursor:pointer;transition:background-color .12s ease,border-color .12s ease,transform .12s ease}
 .dsh-nudge-popup-row button:active{transform:scale(.97)}
@@ -2548,10 +3422,6 @@ window.__ModuleLoader__.load({
 .dsh-nudge-head-btn:focus-visible,.dsh-nudge-head-icon:focus-visible{outline:2px solid var(--dn-accent-line);outline-offset:1px}
 .dsh-nudge-head-btn.active,.dsh-nudge-head-icon.active{background:var(--dn-accent-soft);color:var(--dn-accent)}
 .dsh-nudge-head-btn.inactive,.dsh-nudge-head-btn:disabled{opacity:.45;cursor:default;background:transparent;color:var(--dsw-alias-label-secondary,#5a5a66)}
-.dsh-nudge-module-chevron-btn{display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;width:20px;height:20px;padding:0;border:0;border-radius:6px;background:transparent;color:var(--dsw-alias-label-secondary,#5a5a66);cursor:pointer;transition:background .15s ease,color .15s ease}
-.dsh-nudge-module-chevron-btn:hover{background:var(--dn-hover);color:var(--dsw-alias-label-primary,#1a1a1a)}
-.dsh-nudge-module-chevron-btn:focus-visible{outline:2px solid var(--dn-accent-line);outline-offset:1px}
-.dsh-nudge-module-chevron{font-size:11px;line-height:1;opacity:.75}
 .dsh-nudge-module-body{display:flex;flex-direction:column;gap:10px;padding-top:2px}
 .dsh-nudge-icon.active{background:var(--dn-accent-soft);color:var(--dn-accent)}
 @keyframes dsh-nudge-attention{0%{box-shadow:inset 0 0 0 0 var(--dn-accent-line);opacity:0}20%{box-shadow:inset 0 0 0 3px var(--dn-accent-soft);opacity:1}100%{box-shadow:inset 0 0 0 0 transparent;opacity:0}}
@@ -2574,6 +3444,7 @@ window.__ModuleLoader__.load({
    :has() scope is what keeps the override from affecting other sections. */
 body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-height:min(800px,calc(100vh - 2 * max(24px,var(--dsh-frame-overlay-top,24px))));max-height:calc(100vh - 2 * max(24px,var(--dsh-frame-overlay-top,24px)))}
 .dsh-nudge-settings-hint{font-size:12px;line-height:1.6;color:var(--dsw-alias-label-secondary,#5a5a66)}
+.dsh-nudge-settings-note{font-size:12px;line-height:1.6;color:var(--dn-accent-line,var(--dsw-alias-label-secondary,#5a5a66))}
 .dsh-nudge-toggle{display:flex;align-items:flex-start;gap:10px;padding:12px;border-radius:12px;border:1px solid var(--dn-line);background:color-mix(in srgb,var(--dsw-alias-label-primary,#1a1a1a) 3%,transparent);cursor:pointer}
 .dsh-nudge-toggle input{accent-color:var(--dn-accent);margin:2px 0 0;flex:0 0 auto;width:14px;height:14px}
 .dsh-nudge-toggle-text{display:flex;flex-direction:column;gap:3px;min-width:0}
@@ -2585,12 +3456,20 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
 .dsh-nudge-preset-row textarea{width:100%;box-sizing:border-box;min-height:56px;field-sizing:content;max-height:min(320px,40vh);overflow-y:auto;border:1px solid var(--dn-line);border-radius:9px;background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);font:inherit;font-size:12px;line-height:1.55;padding:8px 10px;transition:border-color .15s ease,box-shadow .15s ease}
 .dsh-nudge-preset-row input:focus,.dsh-nudge-preset-row textarea:focus{outline:none;border-color:var(--dn-accent-line);box-shadow:0 0 0 3px var(--dn-accent-soft)}
 .dsh-nudge-preset-actions{display:flex;flex-wrap:wrap;gap:8px}
+.dsh-nudge-tip-draft{display:flex;flex-direction:column;gap:8px}
+.dsh-nudge-tip-draft textarea{width:100%;box-sizing:border-box;min-height:64px;max-height:min(240px,32vh);overflow-y:auto;border:1px solid var(--dn-line);border-radius:9px;background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);font:inherit;font-size:12px;line-height:1.55;padding:8px 10px;transition:border-color .15s ease,box-shadow .15s ease}
+.dsh-nudge-tip-draft textarea:focus{outline:none;border-color:var(--dn-accent-line);box-shadow:0 0 0 3px var(--dn-accent-soft)}
+.dsh-nudge-tip-draft .dsh-nudge-btn{align-self:flex-start}
 .dsh-nudge-btn{height:30px;padding:0 12px;border:1px solid var(--dn-line);border-radius:9px;background:transparent;color:var(--dsw-alias-label-primary,#1a1a1a);font:inherit;font-size:12px;cursor:pointer;transition:background .15s ease,border-color .15s ease,color .15s ease}
 .dsh-nudge-btn:hover{background:var(--dn-hover)}
 .dsh-nudge-btn.primary{background:var(--dn-accent);border-color:transparent;color:var(--dsw-alias-label-primary-inverted,#fff);font-weight:600}
 .dsh-nudge-btn.primary:hover{filter:brightness(1.05);background:var(--dn-accent)}
 .dsh-nudge-btn.danger{color:var(--dsw-alias-state-error-primary,#c8433c);border-color:color-mix(in srgb,var(--dsw-alias-state-error-primary,#c8433c) 28%,transparent)}
 .dsh-nudge-btn.danger:hover{background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#c8433c) 10%,transparent)}
+.dsh-nudge-btn.icon{width:30px;padding:0;font-size:13px;line-height:1}
+.dsh-nudge-btn:disabled{opacity:.4;cursor:default}
+.dsh-nudge-btn:disabled:hover{background:transparent}
+.dsh-nudge-settings-group{display:flex;flex-direction:column;gap:7px;padding:12px;border-radius:12px;border:1px solid var(--dn-line);background:color-mix(in srgb,var(--dsw-alias-label-primary,#1a1a1a) 3%,transparent)}
 .dsh-nudge-settings-error{color:var(--dsw-alias-state-error-primary,#c8433c);font-size:12px;line-height:1.5}
 `.trim()
 
@@ -2600,6 +3479,8 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
      * @returns the slot component.
      */
     function makeView(runtime) {
+      /** The same form the shell section renders, reused by the in-window panel. */
+      const SettingsForm = makeSettingsView(runtime)
       const useSyncExternalStore =
         React.useSyncExternalStore ??
         function useSyncExternalStoreFallback(subscribe, getSnapshot) {
@@ -2616,6 +3497,8 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
         const drag = React.useRef(null)
         /** A drag that moved must not also toggle the pill. */
         const suppressPillClick = React.useRef(false)
+        /** A drag that moved must not also collapse the window from its title. */
+        const suppressTitleClick = React.useRef(false)
         const noteInputRef = React.useRef(null)
         const popupInputRef = React.useRef(null)
         // Only the repository edit box takes the caret. The selection card never
@@ -2644,6 +3527,14 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
             }
           }
         }, [state.annotationDraft])
+        // The status row is never empty: a change message wins while its timer
+        // runs, otherwise the idle lines take turns.
+        React.useEffect(() => {
+          const count = Array.isArray(state.tips) ? state.tips.length : 0
+          if (count < 2 || typeof runtime.advanceTip !== 'function') return undefined
+          const timer = window.setInterval(() => runtime.advanceTip(), TIP_ROTATE_MS)
+          return () => window.clearInterval(timer)
+        }, [state.tips.length])
         const t = runtime.text
         const delivery = runtime.effectiveDelivery()
         const draft = state.annotationDraft
@@ -2774,7 +3665,9 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
                     h('kbd', null, 'Enter'),
                     ` ${t('addAnnotation')} · `,
                     h('kbd', null, 'Esc'),
-                    ` ${t('dismissAnnotation')}`,
+                    ` ${t('dismissAnnotation')} · `,
+                    h('kbd', null, 'Ctrl+C'),
+                    ` ${t('copyHint')}`,
                   ),
                 ),
               )
@@ -2803,17 +3696,31 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
         const askTitle = insertMode ? t('insertHint') : t('askHint')
         /** Keep the caret where it is: clicks on the window must not steal focus. */
         const keepFocus = (event) => event.preventDefault()
-        const chevron = h(
-          'svg',
-          { width: 14, height: 14, viewBox: '0 0 16 16', fill: 'none', 'aria-hidden': true },
-          h('path', {
-            d: 'M4 6.5l4 3.5 4-3.5',
-            stroke: 'currentColor',
-            strokeWidth: 1.7,
-            strokeLinecap: 'round',
-            strokeLinejoin: 'round',
-          }),
-        )
+        /** Clicking the window title folds the window into the pill. */
+        function onNameClick() {
+          if (suppressTitleClick.current) {
+            suppressTitleClick.current = false
+            return
+          }
+          runtime.setCollapsed(true)
+        }
+        /**
+         * The title bar captures the pointer for dragging, which retargets the
+         * click to the bar itself: fold on the bar, but let its own buttons win.
+         */
+        function onTitleClick(event) {
+          const origin = event?.target
+          if (origin && origin !== event.currentTarget && typeof origin.closest === 'function' && origin.closest('button')) {
+            return
+          }
+          onNameClick()
+        }
+        /** Keyboard equivalent of clicking the title. */
+        function onNameKeyDown(event) {
+          if (event.key !== 'Enter' && event.key !== ' ') return
+          event.preventDefault()
+          onNameClick()
+        }
         const gear = h(
           'svg',
           { width: 14, height: 14, viewBox: '0 0 16 16', fill: 'none', 'aria-hidden': true },
@@ -2836,6 +3743,26 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
           }),
           h('path', {
             d: 'M12.8 7.4v5h-3.2',
+            stroke: 'currentColor',
+            strokeWidth: 1.2,
+            strokeLinecap: 'round',
+          }),
+        )
+        /** Auto-paste: a note card flowing into the draft, on focus. */
+        const pasteIcon = h(
+          'svg',
+          { width: 14, height: 14, viewBox: '0 0 16 16', fill: 'none', 'aria-hidden': true },
+          h('rect', {
+            x: 3.2,
+            y: 2.4,
+            width: 9.6,
+            height: 11.2,
+            rx: 1.7,
+            stroke: 'currentColor',
+            strokeWidth: 1.2,
+          }),
+          h('path', {
+            d: 'M6 5.6h4M6 8.4h4M6 11.2h2.2',
             stroke: 'currentColor',
             strokeWidth: 1.2,
             strokeLinecap: 'round',
@@ -2934,6 +3861,10 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
         /** Start one pointer drag from the current anchor. */
         function beginDrag(event) {
           if (event.button !== 0) return
+          // Capturing the pointer on the bar retargets the click away from a
+          // button inside it, so buttons keep their own pointer handling.
+          const origin = event.target
+          if (origin && typeof origin.closest === 'function' && origin.closest('button')) return
           // A previous drag may have ended outside the pill without a click;
           // never let that stale suppression swallow the next real click.
           suppressPillClick.current = false
@@ -2976,8 +3907,10 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
           moveDrag(event)
         }
 
-        /** Finish a title-bar drag; a plain click does nothing. */
+        /** Finish a title-bar drag; a plain click on the title folds the window. */
         function onPointerUp() {
+          const current = drag.current
+          if (current && current.moved) suppressTitleClick.current = true
           endDrag()
         }
 
@@ -3030,13 +3963,26 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
               key: 'title',
               className: 'dsh-nudge-title',
               title: t('collapseHint'),
+              onClick: onTitleClick,
               onPointerDown,
               onPointerMove,
               onPointerUp,
               onPointerCancel,
             },
             markIcon,
-            h('span', { className: 'dsh-nudge-name' }, t('title')),
+            h(
+              'span',
+              {
+                className: 'dsh-nudge-name',
+                role: 'button',
+                tabIndex: 0,
+                title: t('foldHint'),
+                'aria-label': `${t('title')}：${t('foldHint')}`,
+                onClick: onNameClick,
+                onKeyDown: onNameKeyDown,
+              },
+              t('title'),
+            ),
             h('span', { className: 'dsh-nudge-spacer' }),
             h(
               'button',
@@ -3046,21 +3992,18 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
                 title: t('openSettings'),
                 'aria-label': t('openSettings'),
                 onClick: () => {
-                  runtime.openSettings()
+                  // A second press leaves the in-window form, like any toggle.
+                  if (state.settingsOpen) runtime.closeSettings()
+                  else runtime.openSettings()
+                },
+                onPointerDown: (event) => {
+                  // The bar starts a drag on pointerdown; a press here must not
+                  // be swallowed by it (and must not move the window).
+                  event.stopPropagation()
+                  runtime.noteSettingsPress()
                 },
               },
               gear,
-            ),
-            h(
-              'button',
-              {
-                type: 'button',
-                className: 'dsh-nudge-icon',
-                title: t('collapse'),
-                'aria-label': t('collapse'),
-                onClick: () => runtime.setCollapsed(true),
-              },
-              chevron,
             ),
           ),
           state.error.length > 0
@@ -3069,10 +4012,53 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
           state.note.length > 0
             ? h('div', { key: 'note', className: 'dsh-nudge-alert note' }, state.note)
             : null,
-          state.flash.length > 0
-            ? h('div', { key: 'flash', className: 'dsh-nudge-flash', role: 'status' }, state.flash)
-            : null,
+          // Always mounted: this row is the window's status bar now, and a row
+          // that appeared only while a message was up would resize the whole
+          // floating window every time a switch is toggled. An empty string
+          // keeps the line box (see `.dsh-nudge-flash`) so the height is fixed.
           h(
+            'div',
+            {
+              key: 'flash',
+              className: `dsh-nudge-flash${state.flash.length > 0 ? ' active' : ''}`,
+              role: 'status',
+              'aria-live': 'polite',
+            },
+            state.flash.length > 0
+              ? state.flash
+              : state.tips.length > 0
+                ? state.tips[state.tipIndex % state.tips.length]
+                : '',
+          ),
+          state.settingsOpen
+            ? h(
+                'div',
+                {
+                  key: 'settings-panel',
+                  className: 'dsh-nudge-settings-panel',
+                  role: 'region',
+                  'aria-label': t('settingsTitle'),
+                },
+                h(
+                  'div',
+                  { key: 'settings-head', className: 'dsh-nudge-settings-head' },
+                  h('span', { className: 'dsh-nudge-settings-name' }, t('settingsHead')),
+                  h('span', { className: 'dsh-nudge-spacer' }),
+                  h(
+                    'button',
+                    {
+                      type: 'button',
+                      className: 'dsh-nudge-icon',
+                      title: t('back'),
+                      'aria-label': t('back'),
+                      onClick: () => runtime.closeSettings(),
+                    },
+                    '×',
+                  ),
+                ),
+                h(SettingsForm, { key: 'settings-form' }),
+              )
+            : h(
             'div',
             { key: 'content', className: 'dsh-nudge-content' },
             h(
@@ -3112,12 +4098,13 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
                   'button',
                   {
                     type: 'button',
-                    className: 'dsh-nudge-module-chevron-btn',
-                    title: state.annotationExpanded ? t('collapseAnnotations') : t('expandAnnotations'),
-                    'aria-label': state.annotationExpanded ? t('collapseAnnotations') : t('expandAnnotations'),
-                    onClick: () => runtime.setAnnotationExpanded(!state.annotationExpanded),
+                    className: `dsh-nudge-head-icon dsh-nudge-annotation-autopaste${state.autoPaste ? ' active' : ''}`,
+                    title: state.autoPaste ? t('autoPasteOn') : t('autoPasteOff'),
+                    'aria-label': state.autoPaste ? t('autoPasteOn') : t('autoPasteOff'),
+                    'aria-pressed': state.autoPaste ? 'true' : 'false',
+                    onClick: () => runtime.setAutoPaste(!state.autoPaste),
                   },
-                  h('span', { className: 'dsh-nudge-module-chevron' }, state.annotationExpanded ? '⌃' : '⌄'),
+                  pasteIcon,
                 ),
               ),
               state.annotationExpanded
@@ -3285,17 +4272,6 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
                     boltIcon,
                   ),
                 ),
-                h(
-                  'button',
-                  {
-                    type: 'button',
-                    className: 'dsh-nudge-module-chevron-btn',
-                    title: state.nudgeExpanded ? t('collapseNudge') : t('expandNudge'),
-                    'aria-label': state.nudgeExpanded ? t('collapseNudge') : t('expandNudge'),
-                    onClick: () => runtime.setNudgeExpanded(!state.nudgeExpanded),
-                  },
-                  h('span', { className: 'dsh-nudge-module-chevron' }, state.nudgeExpanded ? '⌃' : '⌄'),
-                ),
               ),
               state.nudgeExpanded
                 ? h(
@@ -3382,8 +4358,32 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
           return value
         }
 
+      /**
+       * One labelled checkbox row, shared by every boolean setting.
+       * Built eagerly (a plain element, not a component) so the settings tree
+       * stays directly inspectable by the checks.
+       */
+      function toggleRow(props) {
+        const { title, desc, checked, onChange } = props
+        return h(
+          'label',
+          { className: 'dsh-nudge-toggle', title: desc },
+          h('input', {
+            type: 'checkbox',
+            checked: checked === true,
+            onChange: (event) => onChange(event.target.checked),
+          }),
+          h(
+            'span',
+            { className: 'dsh-nudge-toggle-text' },
+            h('span', { className: 'dsh-nudge-toggle-title' }, title),
+            h('span', { className: 'dsh-nudge-toggle-desc' }, desc),
+          ),
+        )
+      }
+
       function PresetRow(props) {
-        const { preset, t, onError } = props
+        const { preset, t, onError, index, total } = props
         const [label, setLabel] = React.useState(preset.label)
         const [text, setText] = React.useState(preset.text)
         React.useEffect(() => {
@@ -3409,7 +4409,34 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
               'aria-label': t('presetLabel'),
               onChange: (event) => setLabel(event.target.value),
               onBlur: commit,
+              onKeyDown: (event) => {
+                if (event.key === 'Enter') commit()
+              },
             }),
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'dsh-nudge-btn icon',
+                title: t('sortUp'),
+                'aria-label': t('sortUp'),
+                disabled: index <= 0,
+                onClick: () => runtime.movePreset(preset.id, -1),
+              },
+              '↑',
+            ),
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'dsh-nudge-btn icon',
+                title: t('sortDown'),
+                'aria-label': t('sortDown'),
+                disabled: index >= total - 1,
+                onClick: () => runtime.movePreset(preset.id, 1),
+              },
+              '↓',
+            ),
             h(
               'button',
               {
@@ -3429,16 +4456,97 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
             'aria-label': t('presetText'),
             onChange: (event) => setText(event.target.value),
             onBlur: commit,
+            onKeyDown: (event) => {
+              if (event.key === 'Enter' && event.shiftKey !== true) commit()
+            },
           }),
+        )
+      }
+
+      /** One idle line: a text field plus reorder and delete buttons. */
+      function TipRow(props) {
+        const { value, t, onError, index, total } = props
+        const [line, setLine] = React.useState(value)
+        React.useEffect(() => {
+          setLine(value)
+        }, [value])
+
+        function commit() {
+          if (!runtime.updateTip(index, line)) {
+            setLine(value)
+            onError(t('tipTextRequired'))
+            return
+          }
+          onError('')
+        }
+
+        return h(
+          'div',
+          { className: 'dsh-nudge-preset-line' },
+          h('input', {
+            type: 'text',
+            value: line,
+            placeholder: t('tipsPlaceholder'),
+            'aria-label': t('tipsPlaceholder'),
+            onChange: (event) => setLine(event.target.value),
+            onBlur: commit,
+            onKeyDown: (event) => {
+              if (event.key === 'Enter') commit()
+            },
+          }),
+          h(
+            'button',
+            {
+              type: 'button',
+              className: 'dsh-nudge-btn icon',
+              title: t('sortUp'),
+              'aria-label': t('sortUp'),
+              disabled: index <= 0,
+              onClick: () => runtime.moveTip(index, -1),
+            },
+            '↑',
+          ),
+          h(
+            'button',
+            {
+              type: 'button',
+              className: 'dsh-nudge-btn icon',
+              title: t('sortDown'),
+              'aria-label': t('sortDown'),
+              disabled: index >= total - 1,
+              onClick: () => runtime.moveTip(index, 1),
+            },
+            '↓',
+          ),
+          h(
+            'button',
+            {
+              type: 'button',
+              className: 'dsh-nudge-btn danger',
+              onClick: () => {
+                if (runtime.removeTip(index)) onError('')
+                else onError(t('tipLast'))
+              },
+            },
+            t('deleteTip'),
+          ),
         )
       }
 
       return function NudgeSettings() {
         const state = useSyncExternalStore(runtime.subscribe, runtime.getSnapshot, runtime.getSnapshot)
         const [error, setError] = React.useState('')
+        const [note, setNote] = React.useState('')
         const [draftLabel, setDraftLabel] = React.useState('')
         const [draftText, setDraftText] = React.useState('')
+        const [draftTip, setDraftTip] = React.useState('')
         const t = runtime.text
+        const delivery = runtime.effectiveDelivery()
+
+        /** Fill `{n}` in a message template. */
+        function fill(template, count) {
+          return template.replace('{n}', String(count))
+        }
 
         function add() {
           const result = runtime.addPreset(draftLabel, draftText)
@@ -3451,28 +4559,101 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
           setError('')
         }
 
+        /** Take one paste (or one typed block) and report what landed. */
+        function addTipLines(raw) {
+          const result = runtime.addTips(raw)
+          if (!result.ok) {
+            setError(result.error)
+            setNote('')
+            return false
+          }
+          const parts = [fill(t('tipsAdded'), result.added)]
+          if (result.skipped > 0) parts.push(fill(t('tipsSkipped'), result.skipped))
+          setError('')
+          setNote(parts.join('，'))
+          setDraftTip('')
+          return true
+        }
+
+        function addTipLine() {
+          addTipLines(draftTip)
+        }
+
+        /** A pasted list is split right away: no extra click needed. */
+        function onTipPaste(event) {
+          const text = event?.clipboardData?.getData?.('text')
+          if (typeof text !== 'string' || text.trim() === '') return
+          event.preventDefault?.()
+          addTipLines(text)
+        }
+
         return h(
           'div',
           { className: 'dsh-nudge-settings' },
           h('style', { key: 'dsh-nudge-css' }, CSS),
+          // Every switch on the floating window has a row here, so the window
+          // can stay icon-only without hiding how it is configured.
+          toggleRow({
+            key: 'turbo',
+            title: t('turboTitle'),
+            desc: t('turboDesc'),
+            checked: state.turbo === true,
+            onChange: (value) => runtime.setTurbo(value),
+          }),
+          toggleRow({
+            key: 'quick',
+            title: t('quickTitle'),
+            desc: t('quickHint'),
+            checked: state.quick === true,
+            onChange: (value) => runtime.setQuick(value),
+          }),
+          toggleRow({
+            key: 'autopaste',
+            title: t('autoPasteTitle'),
+            desc: t('autoPasteDesc'),
+            checked: state.autoPaste === true,
+            onChange: (value) => runtime.setAutoPaste(value),
+          }),
           h(
-            'label',
-            { className: 'dsh-nudge-toggle', title: t('turboDesc') },
-            h('input', {
-              type: 'checkbox',
-              checked: state.turbo === true,
-              onChange: (event) => runtime.setTurbo(event.target.checked),
-            }),
+            'div',
+            { key: 'delivery', className: 'dsh-nudge-settings-group' },
+            h('span', { className: 'dsh-nudge-toggle-title' }, t('deliveryTitle')),
+            h('span', { className: 'dsh-nudge-toggle-desc' }, t('deliveryDesc')),
             h(
-              'span',
-              { className: 'dsh-nudge-toggle-text' },
-              h('span', { className: 'dsh-nudge-toggle-title' }, t('turboTitle')),
-              h('span', { className: 'dsh-nudge-toggle-desc' }, t('turboDesc')),
+              'div',
+              { className: 'dsh-nudge-presets', role: 'group', 'aria-label': t('deliveryTitle') },
+              h(
+                'button',
+                {
+                  type: 'button',
+                  className: `dsh-nudge-chip${delivery === 'steer' ? ' active' : ''}`,
+                  'aria-pressed': delivery === 'steer' ? 'true' : 'false',
+                  onClick: () => runtime.setDelivery('steer'),
+                },
+                t('steer'),
+              ),
+              h(
+                'button',
+                {
+                  type: 'button',
+                  className: `dsh-nudge-chip${delivery === 'steer' ? '' : ' active'}`,
+                  'aria-pressed': delivery === 'steer' ? 'false' : 'true',
+                  onClick: () => runtime.setDelivery('followup'),
+                },
+                t('queue'),
+              ),
             ),
           ),
           h('div', { className: 'dsh-nudge-settings-hint' }, t('presetsHint')),
-          ...state.presets.map((preset) =>
-            h(PresetRow, { key: preset.id, preset, t, onError: setError }),
+          ...state.presets.map((preset, index) =>
+            h(PresetRow, {
+              key: preset.id,
+              preset,
+              t,
+              onError: setError,
+              index,
+              total: state.presets.length,
+            }),
           ),
           h(
             'div',
@@ -3514,6 +4695,55 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
                 },
               },
               t('resetPresets'),
+            ),
+          ),
+          h('div', { key: 'tips-title', className: 'dsh-nudge-settings-hint' }, t('tipsTitle')),
+          h('div', { key: 'tips-hint', className: 'dsh-nudge-settings-hint' }, t('tipsHint')),
+          // The paste box sits above the list: it is the way in, so it must not
+          // hide under a dozen existing lines.
+          h(
+            'div',
+            { key: 'tip-draft', className: 'dsh-nudge-tip-draft' },
+            h('textarea', {
+              value: draftTip,
+              placeholder: t('tipsPastePlaceholder'),
+              'aria-label': t('tipsPastePlaceholder'),
+              onChange: (event) => setDraftTip(event.target.value),
+              onPaste: onTipPaste,
+              onKeyDown: (event) => {
+                if (event.key === 'Enter' && (event.ctrlKey === true || event.metaKey === true)) {
+                  addTipLine()
+                }
+              },
+            }),
+            h('button', { type: 'button', className: 'dsh-nudge-btn primary', onClick: addTipLine }, t('addTip')),
+          ),
+          note.length > 0 ? h('div', { key: 'tips-note', className: 'dsh-nudge-settings-note' }, note) : null,
+          ...state.tips.map((line, index) =>
+            h(TipRow, {
+              key: `tip-${index}`,
+              value: line,
+              t,
+              onError: setError,
+              index,
+              total: state.tips.length,
+            }),
+          ),
+          h(
+            'div',
+            { key: 'tips-reset', className: 'dsh-nudge-preset-actions' },
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'dsh-nudge-btn',
+                onClick: () => {
+                  runtime.resetTips()
+                  setError('')
+                  setNote('')
+                },
+              },
+              t('resetTips'),
             ),
           ),
           error.length > 0 ? h('div', { className: 'dsh-nudge-settings-error' }, error) : null,
@@ -3631,6 +4861,22 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
 
       // Debug/test handle: scripts/check-client.mjs drives this without a renderer.
       window.__dshNudge = runtime
+
+      // The shell's settings seams fail silently, so read them once after the
+      // sidebar painted: the sample lands in the durable record next to the
+      // other settings, where a page that cannot be inspected can still report
+      // which seam is missing on that build.
+      ctx.effect(() => {
+        const timer = setTimeout(() => {
+          try {
+            runtime.probeSettingsSeams()
+          } catch {
+            /* diagnostics never break the plugin */
+          }
+        }, 3000)
+        timer?.unref?.()
+        return () => clearTimeout(timer)
+      }, 'dsh-nudge: settings seams')
       ctx.effect(
         () => () => {
           runtime.dispose()
