@@ -31,7 +31,10 @@
     "check:client": "node scripts/check-client.mjs",
     "check:host": "node scripts/check-host.mjs",
     "preview": "node scripts/preview.mjs",
-    "preview:all": "node scripts/preview.mjs --all"
+    "preview:all": "node scripts/preview.mjs --all",
+    "changelog": "node scripts/changelog.mjs",
+    "changelog:all": "node scripts/changelog.mjs --all",
+    "changelog:write": "node scripts/changelog.mjs --write"
   },
   "dsh": {
     "bundle": {
