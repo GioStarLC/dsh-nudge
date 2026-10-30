@@ -93,8 +93,6 @@ window.__ModuleLoader__.load({
       },
     ]
     const DEFAULT_PRESET = 'brief'
-    /** Cap on presets so the flat row in the window stays usable. */
-    const MAX_PRESETS = 8
     /**
      * Lines the status row shows while nothing is happening. It is a plain
      * list of strings; one is shown at a time and the list rotates.
@@ -180,6 +178,9 @@ window.__ModuleLoader__.load({
       sortUp: '上移',
       sortDown: '下移',
       nudgeModule: '快捷输入',
+      quickAdd: '新增',
+      quickAddTitle: '标题',
+      quickAddBody: '正文',
       collapseAnnotations: '收起批注',
       expandAnnotations: '展开批注',
       collapseNudge: '收起快捷输入',
@@ -224,14 +225,34 @@ window.__ModuleLoader__.load({
       settings: '方式',
       presetsHint: '口径保存在这个浏览器里，只影响当前客户端。窗口里点一下就能切换。',
       presetsEmpty: '还没有口径，点「新增口径」加一条。',
+      presetsAllDisabled: '口径都已停用，可在设置里重新启用。',
       presetLabel: '名称',
       presetText: '发给 agent 的话',
       addPreset: '新增口径',
       resetPresets: '恢复默认',
       deletePreset: '删除',
-      presetLimit: '最多 8 条口径，先删一条再新增。',
+      presetCount: '共 {n} 条',
+      presetEnabled: '已启用',
+      presetDisabled: '已停用',
+      presetEnabledHint: '已启用：显示在窗口的快捷输入里',
+      presetDisabledHint: '已停用：保留在设置里，不在窗口显示',
       presetTextRequired: '内容不能为空。',
-      presetLast: '至少保留一条口径。',
+      expandAllPresets: '全部展开',
+      collapseAllPresets: '全部折叠',
+      editPreset: '编辑',
+      savePreset: '保存',
+      cancelPreset: '取消',
+      dragPreset: '拖动排序；聚焦后按 ↑ ↓ 也能移动',
+      editTip: '编辑这行文案',
+      expandPreset: '展开正文',
+      collapsePreset: '收起正文',
+      importPresets: '批量导入',
+      importHint: '每段之间空三行及以上；每段第 1 行是标题，其余是正文；只有一行时，这一行同时作标题和内容。',
+      importPlaceholder: '标题\n正文\n\n\n\n标题\n正文',
+      importSubmit: '导入',
+      importAdded: '已导入 {n} 条',
+      importSkipped: '跳过 {n} 条（重复内容）',
+      importEmpty: '没有识别出可导入的内容。',
       tipsTitle: '状态行文案',
       tipsHint: '空闲时这行轮换显示下面的文案；切换开关的提示会停 5 秒，再继续轮换。',
       tipsEmpty: '还没有文案。',
@@ -286,6 +307,9 @@ window.__ModuleLoader__.load({
       sortUp: 'Move up',
       sortDown: 'Move down',
       nudgeModule: 'Quick input',
+      quickAdd: 'Add',
+      quickAddTitle: 'Title',
+      quickAddBody: 'Body',
       collapseAnnotations: 'Collapse notes',
       expandAnnotations: 'Expand notes',
       collapseNudge: 'Collapse quick input',
@@ -330,14 +354,34 @@ window.__ModuleLoader__.load({
       settings: 'Mode',
       presetsHint: 'Prompts are stored in this browser and only affect this client. Click one in the window to switch.',
       presetsEmpty: 'No prompts yet; add one.',
+      presetsAllDisabled: 'Every prompt is disabled. Re-enable one in settings.',
       presetLabel: 'Name',
       presetText: 'What the agent receives',
       addPreset: 'Add prompt',
       resetPresets: 'Reset defaults',
       deletePreset: 'Delete',
-      presetLimit: 'At most 8 prompts; delete one first.',
+      presetCount: '{n} total',
+      presetEnabled: 'Enabled',
+      presetDisabled: 'Disabled',
+      presetEnabledHint: 'Enabled: shown in the window quick input',
+      presetDisabledHint: 'Disabled: kept in settings, hidden from the window',
       presetTextRequired: 'The text cannot be empty.',
-      presetLast: 'Keep at least one prompt.',
+      expandAllPresets: 'Expand all',
+      collapseAllPresets: 'Collapse all',
+      editPreset: 'Edit',
+      savePreset: 'Save',
+      cancelPreset: 'Cancel',
+      dragPreset: 'Drag to reorder; focus and press ↑ / ↓ to move',
+      editTip: 'Edit this line',
+      expandPreset: 'Show the text',
+      collapsePreset: 'Hide the text',
+      importPresets: 'Import',
+      importHint: 'Separate entries with three or more blank lines; the first line of each block is the name, the rest is the text. A one-line block uses that line for both.',
+      importPlaceholder: 'Name\nText\n\n\n\nName\nText',
+      importSubmit: 'Import',
+      importAdded: 'Imported {n}',
+      importSkipped: 'skipped {n} (duplicate text)',
+      importEmpty: 'Nothing to import was found.',
       tipsTitle: 'Status lines',
       tipsHint: 'While idle this row rotates the lines below; a switch message holds here for 5 seconds, then the rotation resumes.',
       tipsEmpty: 'No lines yet.',
@@ -740,6 +784,7 @@ window.__ModuleLoader__.load({
         id: preset.id,
         label: lang === 'zh' ? preset.labelZh : preset.labelEn,
         text: preset.text,
+        enabled: true,
       }))
     }
 
@@ -752,7 +797,11 @@ window.__ModuleLoader__.load({
       return ''
     }
 
-    /** Normalize one stored/edited preset list; invalid entries are dropped. */
+    /**
+     * Normalize one stored/edited preset list; invalid entries are dropped.
+     * An empty array stays empty: the user may delete every prompt, and the
+     * settings page then shows its empty state.
+     */
     function normalizePresetList(value, lang) {
       if (!Array.isArray(value)) return builtinPresets(lang)
       const list = []
@@ -774,12 +823,12 @@ window.__ModuleLoader__.load({
               : typeof item.title === 'string'
                 ? item.title.trim()
                 : ''
-        list.push({ id, label: rawLabel.length > 0 ? rawLabel : text.slice(0, 8), text })
-        if (list.length >= MAX_PRESETS) break
-      }
-      if (list.length === 0) {
-        console.warn('[dsh-nudge] 口径列表为空或全部非法，回退内置口径')
-        return builtinPresets(lang)
+        list.push({
+          id,
+          label: rawLabel.length > 0 ? rawLabel : text.slice(0, 8),
+          text,
+          enabled: item.enabled !== false,
+        })
       }
       return list
     }
@@ -809,18 +858,23 @@ window.__ModuleLoader__.load({
       return list
     }
 
-    /** Read the chosen preset id, falling back to the first available preset. */
+    /** Read the chosen preset id, falling back to the first enabled preset. */
     function readPresetId(presets) {
+      const firstEnabled = presets.find((preset) => preset.enabled !== false)
       try {
         const raw = storage()?.getItem(PRESET_KEY)
         if (raw !== null && raw !== undefined) {
-          if (presetOf(presets, raw) !== undefined) return raw
+          const chosen = presetOf(presets, raw)
+          if (chosen !== undefined) {
+            if (chosen.enabled === false) return firstEnabled?.id ?? chosen.id
+            return raw
+          }
           console.warn(`[dsh-nudge] 忽略非法口径 ${JSON.stringify(raw)}，改用第一条`)
         }
       } catch {
         /* storage unavailable */
       }
-      return presets[0]?.id ?? DEFAULT_PRESET
+      return firstEnabled?.id ?? presets[0]?.id ?? DEFAULT_PRESET
     }
 
     /** Persist one preset list; a storage failure keeps the in-memory list usable. */
@@ -1164,6 +1218,10 @@ window.__ModuleLoader__.load({
         turbo: readTurbo(),
         presets,
         presetId: readPresetId(presets),
+        /** Ids whose body is expanded in the settings list. */
+        presetOpen: [],
+        /** The preset opened in the settings editor, or null. */
+        presetEditingId: null,
         target: initialTarget,
         pendingQuestion: false,
         /** True while the conversation composer is mounted and holds the caret. */
@@ -1175,6 +1233,8 @@ window.__ModuleLoader__.load({
         /** Idle lines for the status row, and which one is showing. */
         tips: readTips(language),
         tipIndex: 0,
+        /** The idle line opened in its editor, or null. */
+        tipEditingIndex: null,
         /** Collected quote + note blocks waiting to be delivered. */
         annotations: notesOfSession(initialTarget?.sessionId),
         /** The selection currently being annotated, or null. */
@@ -1187,6 +1247,11 @@ window.__ModuleLoader__.load({
         annotationExpanded: false,
         /** Whether the nudge module (prompts / mode / primary) shows its body. */
         nudgeExpanded: true,
+        /** The in-window "new prompt" form (title + body). */
+        nudgeDraftOpen: false,
+        nudgeDraftLabel: '',
+        nudgeDraftText: '',
+        nudgeDraftError: '',
         /** Whether the window shows the settings form in place of its body. */
         settingsOpen: false,
         /** Timestamp of the last capture, used to restart the attention pulse. */
@@ -1522,7 +1587,7 @@ window.__ModuleLoader__.load({
           setState({ note: text('insertUnavailable'), error: '' })
           return false
         }
-        const preset = presetOf(state.presets, state.presetId) ?? state.presets[0]
+        const preset = activePreset()
         if (!preset) return false
         let draft = ''
         try {
@@ -2370,13 +2435,20 @@ window.__ModuleLoader__.load({
         return true
       }
 
+      /** The preset a send/write uses: the chosen one when it is enabled. */
+      function activePreset() {
+        const chosen = presetOf(state.presets, state.presetId)
+        if (chosen !== undefined && chosen.enabled !== false) return chosen
+        return state.presets.find((preset) => preset.enabled !== false)
+      }
+
       /** The primary button: write into the composer, or send the chosen preset. */
       function ask() {
         if (state.phase === 'waiting' && !canInsert()) return false
         // With the caret in the composer the same button writes the chosen
         // prompt into the draft instead of starting a turn.
         if (canInsert()) return insertPreset()
-        const preset = presetOf(state.presets, state.presetId) ?? state.presets[0]
+        const preset = activePreset()
         if (!preset) return false
         return deliver(preset.text)
       }
@@ -2426,12 +2498,15 @@ window.__ModuleLoader__.load({
         return true
       }
 
-      /** Store one preset list, keeping the selection valid. */
+      /** Store one preset list, keeping the selection on an enabled preset. */
       function commitPresets(next, preferredId) {
         const list = normalizePresetList(next, state.lang)
         writePresets(list)
         let presetId = preferredId ?? state.presetId
-        if (presetOf(list, presetId) === undefined) presetId = list[0]?.id ?? DEFAULT_PRESET
+        const chosen = presetOf(list, presetId)
+        if (chosen === undefined || chosen.enabled === false) {
+          presetId = list.find((preset) => preset.enabled !== false)?.id ?? list[0]?.id ?? DEFAULT_PRESET
+        }
         try {
           storage()?.setItem(PRESET_KEY, presetId)
         } catch {
@@ -2444,11 +2519,11 @@ window.__ModuleLoader__.load({
       function addPreset(label, body) {
         const value = typeof body === 'string' ? body.trim() : ''
         if (value.length === 0) return { ok: false, error: text('presetTextRequired') }
-        if (state.presets.length >= MAX_PRESETS) return { ok: false, error: text('presetLimit') }
         const preset = {
           id: mintPresetId(),
           label: typeof label === 'string' && label.trim().length > 0 ? label.trim() : value.slice(0, 8),
           text: value,
+          enabled: true,
         }
         commitPresets([...state.presets, preset], preset.id)
         return { ok: true, id: preset.id }
@@ -2467,19 +2542,48 @@ window.__ModuleLoader__.load({
               : value.slice(0, 8)
             : current.label
         commitPresets(
-          state.presets.map((preset) => (preset.id === id ? { id, label, text: value } : preset)),
+          state.presets.map((preset) =>
+            preset.id === id ? { id, label, text: value, enabled: preset.enabled !== false } : preset,
+          ),
           state.presetId,
         )
+        if (state.presetEditingId === id) setState({ presetEditingId: null })
         return { ok: true }
       }
 
-      /** Remove one preset; the last remaining preset cannot be removed. */
+      /** Remove one preset; the list may legitimately become empty. */
       function removePreset(id) {
-        if (state.presets.length <= 1) return false
         const next = state.presets.filter((preset) => preset.id !== id)
         if (next.length === state.presets.length) return false
-        commitPresets(next, state.presetId === id ? next[0].id : state.presetId)
+        commitPresets(next, state.presetId === id ? next[0]?.id : state.presetId)
+        setState({
+          presetEditingId: state.presetEditingId === id ? null : state.presetEditingId,
+          presetOpen: state.presetOpen.filter((open) => open !== id),
+        })
         return true
+      }
+
+      /**
+       * Enable or disable one preset. Disabled presets stay in settings but
+       * leave the window's prompt row, so the row only carries live prompts.
+       */
+      function setPresetEnabled(id, value) {
+        const current = presetOf(state.presets, id)
+        if (current === undefined) return false
+        const enabled = value === true
+        if ((current.enabled !== false) === enabled) return false
+        commitPresets(
+          state.presets.map((preset) => (preset.id === id ? { ...preset, enabled } : preset)),
+          state.presetId,
+        )
+        return true
+      }
+
+      /** Flip one preset between enabled and disabled. */
+      function togglePresetEnabled(id) {
+        const current = presetOf(state.presets, id)
+        if (current === undefined) return false
+        return setPresetEnabled(id, current.enabled === false)
       }
 
       /** Move one preset one slot up (`delta` -1) or down (+1); order persists. */
@@ -2496,6 +2600,131 @@ window.__ModuleLoader__.load({
         return true
       }
 
+      /** Move one preset to an absolute slot (drag and drop); order persists. */
+      function movePresetTo(id, index) {
+        const from = state.presets.findIndex((preset) => preset.id === id)
+        if (from < 0) return false
+        const target = Math.round(Number(index))
+        if (!Number.isFinite(target)) return false
+        const to = Math.max(0, Math.min(state.presets.length - 1, target))
+        if (to === from) return false
+        const next = [...state.presets]
+        const [moved] = next.splice(from, 1)
+        next.splice(to, 0, moved)
+        commitPresets(next, state.presetId)
+        return true
+      }
+
+      /** Open or close one preset body in the settings list. */
+      function togglePresetOpen(id) {
+        if (presetOf(state.presets, id) === undefined) return false
+        const open = state.presetOpen.includes(id)
+          ? state.presetOpen.filter((item) => item !== id)
+          : [...state.presetOpen, id]
+        setState({ presetOpen: open })
+        return true
+      }
+
+      /** Open every preset body, or close them all. */
+      function setPresetsOpen(open) {
+        setState({ presetOpen: open ? state.presets.map((preset) => preset.id) : [] })
+        return true
+      }
+
+      /** Switch one preset into the editor (only one editor is open at a time). */
+      function startPresetEdit(id) {
+        if (presetOf(state.presets, id) === undefined) return false
+        setState({ presetEditingId: id })
+        return true
+      }
+
+      /** Leave the editor without saving. */
+      function cancelPresetEdit() {
+        if (state.presetEditingId === null) return false
+        setState({ presetEditingId: null })
+        return true
+      }
+
+      /** Open the in-window "new prompt" form (title + body). */
+      function startNudgeDraft() {
+        setState({
+          nudgeExpanded: true,
+          nudgeDraftOpen: true,
+          nudgeDraftLabel: '',
+          nudgeDraftText: '',
+          nudgeDraftError: '',
+        })
+        return true
+      }
+
+      /** Close the in-window form without saving. */
+      function cancelNudgeDraft() {
+        if (state.nudgeDraftOpen !== true) return false
+        setState({ nudgeDraftOpen: false, nudgeDraftLabel: '', nudgeDraftText: '', nudgeDraftError: '' })
+        return true
+      }
+
+      /** Write the draft title without saving it. */
+      function setNudgeDraftLabel(value) {
+        setState({ nudgeDraftLabel: typeof value === 'string' ? value : '' })
+      }
+
+      /** Write the draft body without saving it. */
+      function setNudgeDraftText(value) {
+        setState({ nudgeDraftText: typeof value === 'string' ? value : '' })
+      }
+
+      /** Save the in-window form through the same preset store the settings use. */
+      function saveNudgeDraft() {
+        const result = addPreset(state.nudgeDraftLabel, state.nudgeDraftText)
+        if (result.ok !== true) {
+          setState({ nudgeDraftError: result.error })
+          return result
+        }
+        setState({ nudgeDraftOpen: false, nudgeDraftLabel: '', nudgeDraftText: '', nudgeDraftError: '' })
+        return result
+      }
+
+      /** One pasted block: the first line is the label, the rest is the body. */
+      function presetFromBlock(block) {
+        const lines = block.split('\n')
+        const label = lines[0].trim()
+        const text = lines.slice(1).join('\n').trim()
+        return { label, text: text.length > 0 ? text : label }
+      }
+
+      /**
+       * Bulk-add pasted presets: blocks are separated by three or more blank
+       * lines. Mirrors `addTips` — dedupe by body and report what was skipped.
+       */
+      function importPresets(raw) {
+        const blocks = String(raw ?? '')
+          .replace(/\r\n/g, '\n')
+          .split(/\n(?:[ \t]*\n){3,}/)
+          .map((block) => block.trim())
+          .filter((block) => block.length > 0)
+        if (blocks.length === 0) return { ok: false, added: 0, skipped: 0, error: text('importEmpty') }
+        const seen = new Set(state.presets.map((preset) => preset.text))
+        const next = [...state.presets]
+        let added = 0
+        let skipped = 0
+        for (const block of blocks) {
+          const preset = presetFromBlock(block)
+          if (preset.text.length === 0 || seen.has(preset.text)) {
+            skipped += 1
+            continue
+          }
+          seen.add(preset.text)
+          next.push({ id: mintPresetId(), label: preset.label, text: preset.text, enabled: true })
+          added += 1
+        }
+        if (added === 0) {
+          return { ok: false, added, skipped, error: text('importEmpty') }
+        }
+        commitPresets(next, state.presetId)
+        return { ok: true, added, skipped }
+      }
+
       /** Restore the built-in presets (and forget the settings storage). */
       function resetPresets() {
         try {
@@ -2504,6 +2733,7 @@ window.__ModuleLoader__.load({
           /* best effort */
         }
         commitPresets(builtinPresets(state.lang), DEFAULT_PRESET)
+        setState({ presetOpen: [], presetEditingId: null })
       }
 
       // --- idle lines ------------------------------------------------------
@@ -2525,6 +2755,21 @@ window.__ModuleLoader__.load({
         const next = [...state.tips]
         next[index] = line
         commitTips(next)
+        if (state.tipEditingIndex === index) setState({ tipEditingIndex: null })
+        return true
+      }
+
+      /** Switch one idle line into its editor. */
+      function startTipEdit(index) {
+        if (index < 0 || index >= state.tips.length) return false
+        setState({ tipEditingIndex: index })
+        return true
+      }
+
+      /** Leave the idle-line editor without saving. */
+      function cancelTipEdit() {
+        if (state.tipEditingIndex === null) return false
+        setState({ tipEditingIndex: null })
         return true
       }
 
@@ -2577,6 +2822,9 @@ window.__ModuleLoader__.load({
         const next = [...state.tips]
         next.splice(index, 1)
         commitTips(next)
+        const editing = state.tipEditingIndex
+        if (editing === index) setState({ tipEditingIndex: null })
+        else if (editing !== null && editing > index) setState({ tipEditingIndex: editing - 1 })
         return true
       }
 
@@ -2590,6 +2838,24 @@ window.__ModuleLoader__.load({
         const [line] = next.splice(from, 1)
         next.splice(to, 0, line)
         commitTips(next)
+        return true
+      }
+
+      /** Move one idle line to an absolute slot (drag and drop). */
+      function moveTipTo(from, index) {
+        const count = state.tips.length
+        const target = Math.round(Number(index))
+        if (!Number.isFinite(target) || from < 0 || from >= count) return false
+        const to = Math.max(0, Math.min(count - 1, target))
+        if (to === from) return false
+        const next = [...state.tips]
+        const [line] = next.splice(from, 1)
+        next.splice(to, 0, line)
+        commitTips(next)
+        const editing = state.tipEditingIndex
+        if (editing !== null) {
+          setState({ tipEditingIndex: editing === from ? to : editing === to ? (to > from ? editing - 1 : editing + 1) : editing })
+        }
         return true
       }
 
@@ -2974,7 +3240,22 @@ window.__ModuleLoader__.load({
         updatePreset,
         removePreset,
         movePreset,
+        movePresetTo,
         resetPresets,
+        togglePresetOpen,
+        setPresetsOpen,
+        startPresetEdit,
+        cancelPresetEdit,
+        /** Enable / disable one prompt without deleting it. */
+        setPresetEnabled,
+        togglePresetEnabled,
+        /** In-window "new prompt" form (title + body). */
+        startNudgeDraft,
+        cancelNudgeDraft,
+        setNudgeDraftLabel,
+        setNudgeDraftText,
+        saveNudgeDraft,
+        importPresets,
         setCollapsed,
         moveTo,
         saveUi,
@@ -2997,6 +3278,9 @@ window.__ModuleLoader__.load({
         updateTip,
         removeTip,
         moveTip,
+        moveTipTo,
+        startTipEdit,
+        cancelTipEdit,
         resetTips,
         advanceTip,
         setAnnotationExpanded,
@@ -3015,7 +3299,6 @@ window.__ModuleLoader__.load({
         dispose,
         /** @internal exposed for scripts/check-client.mjs */
         _debug: {
-          maxPresets: MAX_PRESETS,
           state: () => state,
           syncComposerFocus,
           settingsSnapshot,
@@ -3066,10 +3349,18 @@ window.__ModuleLoader__.load({
 .dsh-nudge-field-inline .dsh-nudge-field-label{flex:0 0 auto}
 .dsh-nudge-field-label{font-size:11px;font-weight:600;letter-spacing:.4px;color:var(--dsw-alias-label-secondary,#6a6a76)}
 .dsh-nudge-presets{display:flex;flex-wrap:wrap;gap:6px}
+.dsh-nudge-presets-empty{font-size:12px;line-height:1.6;color:var(--dsw-alias-label-secondary,#8a8a8a)}
 .dsh-nudge-chip{height:28px;padding:0 12px;border-radius:999px;border:1px solid var(--dn-line);background:transparent;color:var(--dsw-alias-label-secondary,#5a5a66);font:inherit;font-size:12px;line-height:1;cursor:pointer;transition:background .15s ease,color .15s ease,border-color .15s ease;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dsh-nudge-chip:hover{border-color:var(--dn-accent-line);color:var(--dsw-alias-label-primary,#1a1a1a);background:var(--dn-accent-soft)}
 .dsh-nudge-chip:focus-visible{outline:2px solid var(--dn-accent-line);outline-offset:2px}
 .dsh-nudge-chip.active{background:var(--dn-accent-soft);border-color:var(--dn-accent-line);color:var(--dn-accent);font-weight:600}
+.dsh-nudge-chip.dsh-nudge-chip-add{border-style:dashed;color:var(--dn-accent)}
+.dsh-nudge-quick-add{display:flex;flex-direction:column;gap:8px;padding:10px;border:1px solid var(--dn-accent-line);border-radius:12px;background:var(--dn-accent-soft)}
+.dsh-nudge-quick-add-field{display:flex;flex-direction:column;gap:4px}
+.dsh-nudge-quick-add input,.dsh-nudge-quick-add textarea{width:100%;box-sizing:border-box;border:1px solid var(--dn-line);border-radius:8px;background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);font:inherit;font-size:12px;padding:6px 9px;outline:none}
+.dsh-nudge-quick-add input{height:30px}
+.dsh-nudge-quick-add textarea{min-height:64px;max-height:132px;line-height:1.5;resize:none;overflow-y:auto}
+.dsh-nudge-quick-add input:focus,.dsh-nudge-quick-add textarea:focus{border-color:var(--dn-accent-line);box-shadow:0 0 0 3px var(--dn-accent-soft)}
 .dsh-nudge-ask{height:38px;border:0;border-radius:11px;cursor:pointer;font:inherit;font-size:13px;font-weight:600;letter-spacing:.2px;color:var(--dsw-alias-label-primary-inverted,#fff);background:var(--dn-accent);box-shadow:0 8px 20px -10px color-mix(in srgb,var(--dsw-static-deepseek-450,#5686fe) 55%,transparent);transition:filter .15s ease,transform .1s ease,box-shadow .15s ease}
 .dsh-nudge-ask:hover{filter:brightness(1.05);box-shadow:0 10px 24px -10px color-mix(in srgb,var(--dsw-static-deepseek-450,#5686fe) 65%,transparent)}
 .dsh-nudge-ask:active{transform:translateY(1px)}
@@ -3168,6 +3459,38 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
 .dsh-nudge-preset-row textarea{width:100%;box-sizing:border-box;min-height:56px;field-sizing:content;max-height:min(320px,40vh);overflow-y:auto;border:1px solid var(--dn-line);border-radius:9px;background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);font:inherit;font-size:12px;line-height:1.55;padding:8px 10px;transition:border-color .15s ease,box-shadow .15s ease}
 .dsh-nudge-preset-row input:focus,.dsh-nudge-preset-row textarea:focus{outline:none;border-color:var(--dn-accent-line);box-shadow:0 0 0 3px var(--dn-accent-soft)}
 .dsh-nudge-preset-actions{display:flex;flex-wrap:wrap;gap:8px}
+/* Preset rows are a table of contents: one name per line, bodies on demand. */
+.dsh-nudge-preset-row:has(> .dsh-nudge-preset-summary){gap:4px;padding:6px 8px}
+.dsh-nudge-preset-toolbar{display:flex;align-items:center;flex-wrap:wrap;gap:8px}
+.dsh-nudge-preset-count{margin-right:auto;font-size:11px;color:var(--dsw-alias-label-secondary,#8a8a8a);font-variant-numeric:tabular-nums}
+.dsh-nudge-preset-summary{display:flex;align-items:center;gap:6px;min-width:0}
+.dsh-nudge-preset-grip{cursor:grab;padding:2px;border-radius:6px;color:var(--dsw-alias-label-secondary,#8a8a8a);font-size:13px;line-height:1;user-select:none}
+.dsh-nudge-preset-grip:active{cursor:grabbing}
+.dsh-nudge-preset-grip:focus-visible{outline:2px solid var(--dn-accent-line);outline-offset:1px}
+.dsh-nudge-preset-toggle{flex:1 1 auto;min-width:0;display:flex;align-items:center;gap:6px;padding:4px 6px;border:0;border-radius:8px;background:transparent;color:inherit;font:inherit;font-size:12px;text-align:left;cursor:pointer}
+.dsh-nudge-preset-toggle:hover{background:var(--dn-hover)}
+.dsh-nudge-preset-toggle:focus-visible{outline:2px solid var(--dn-accent-line);outline-offset:1px}
+.dsh-nudge-preset-toggle svg{flex:0 0 auto;color:var(--dsw-alias-label-secondary,#8a8a8a)}
+.dsh-nudge-preset-name{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dsw-alias-label-primary,#1a1a1a);font-weight:600}
+.dsh-nudge-tip-name{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dsw-alias-label-primary,#1a1a1a);font-size:12px;line-height:1.6}
+.dsh-nudge-preset-tools{display:flex;align-items:center;gap:4px;flex:0 0 auto}
+/* Drag: the summary is the handle, and the row follows the pointer live. */
+.dsh-nudge-preset-summary{cursor:grab}
+.dsh-nudge-preset-summary:active{cursor:grabbing}
+.dsh-nudge-preset-row.dragging{opacity:.65;border-color:var(--dn-accent-line);box-shadow:0 6px 18px rgba(0,0,0,.08)}
+.dsh-nudge-preset-row.disabled{opacity:.72}
+.dsh-nudge-preset-row.disabled .dsh-nudge-preset-name{color:var(--dsw-alias-label-secondary,#8a8a8a);font-weight:500}
+.dsh-nudge-preset-state{flex:0 0 auto;height:22px;padding:0 8px;border-radius:999px;border:1px solid var(--dn-line);background:transparent;color:var(--dsw-alias-label-secondary,#8a8a8a);font:inherit;font-size:11px;line-height:1;cursor:pointer;white-space:nowrap;transition:background .15s ease,color .15s ease,border-color .15s ease}
+.dsh-nudge-preset-state:hover{background:var(--dn-hover)}
+.dsh-nudge-preset-state.on{background:var(--dn-accent-soft);border-color:var(--dn-accent-line);color:var(--dn-accent)}
+.dsh-nudge-preset-state:focus-visible{outline:2px solid var(--dn-accent-line);outline-offset:1px}
+.dsh-nudge-preset-body{margin:0 6px 2px 30px;padding:8px 10px;border-radius:9px;background:color-mix(in srgb,var(--dsw-alias-label-primary,#1a1a1a) 4%,transparent);color:var(--dsw-alias-label-secondary,#555);font-size:12px;line-height:1.6;white-space:pre-wrap;word-break:break-word;max-height:min(280px,36vh);overflow-y:auto}
+.dsh-nudge-preset-editor{display:flex;flex-direction:column;gap:8px;padding:2px 6px 2px 30px}
+.dsh-nudge-preset-editor input{flex:0 0 auto}
+.dsh-nudge-preset-empty{padding:14px;border:1px dashed var(--dn-line);border-radius:12px;color:var(--dsw-alias-label-secondary,#8a8a8a);font-size:12px;line-height:1.6;text-align:center}
+.dsh-nudge-preset-import{display:flex;flex-direction:column;gap:8px;padding:10px;border:1px dashed var(--dn-accent-line);border-radius:12px}
+.dsh-nudge-preset-import textarea{width:100%;box-sizing:border-box;min-height:96px;max-height:min(320px,40vh);overflow-y:auto;border:1px solid var(--dn-line);border-radius:9px;background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);font:inherit;font-size:12px;line-height:1.55;padding:8px 10px;transition:border-color .15s ease,box-shadow .15s ease}
+.dsh-nudge-preset-import textarea:focus{outline:none;border-color:var(--dn-accent-line);box-shadow:0 0 0 3px var(--dn-accent-soft)}
 .dsh-nudge-tip-draft{display:flex;flex-direction:column;gap:8px}
 .dsh-nudge-tip-draft textarea{width:100%;box-sizing:border-box;min-height:64px;max-height:min(240px,32vh);overflow-y:auto;border:1px solid var(--dn-line);border-radius:9px;background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);font:inherit;font-size:12px;line-height:1.55;padding:8px 10px;transition:border-color .15s ease,box-shadow .15s ease}
 .dsh-nudge-tip-draft textarea:focus{outline:none;border-color:var(--dn-accent-line);box-shadow:0 0 0 3px var(--dn-accent-soft)}
@@ -3213,6 +3536,7 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
         const suppressTitleClick = React.useRef(false)
         const noteInputRef = React.useRef(null)
         const popupInputRef = React.useRef(null)
+        const quickAddInputRef = React.useRef(null)
         // Only the repository edit box takes the caret. The selection card never
         // steals focus from the transcript: the native selection stays intact.
         React.useEffect(() => {
@@ -3239,6 +3563,18 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
             }
           }
         }, [state.annotationDraft])
+        // Opening the in-window prompt form puts the caret in the title field.
+        React.useEffect(() => {
+          if (state.nudgeDraftOpen !== true) return
+          const node = quickAddInputRef.current
+          if (node && typeof node.focus === 'function') {
+            try {
+              node.focus({ preventScroll: true })
+            } catch {
+              /* unfocusable */
+            }
+          }
+        }, [state.nudgeDraftOpen])
         // The status row is never empty: a change message wins while its timer
         // runs, otherwise the idle lines take turns.
         React.useEffect(() => {
@@ -3389,6 +3725,8 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
           state.phase === 'waiting' ? 'waiting' : state.phase === 'error' ? 'error' : state.phase === 'done' ? 'done' : ''
         const insertMode = state.composerFocused === true
         const turbo = state.turbo === true
+        /** Disabled prompts stay in settings but leave the window row. */
+        const livePresets = state.presets.filter((preset) => preset.enabled !== false)
         const attention = state.attentionAt > 0
         const statusLabel =
           state.phase === 'waiting'
@@ -3995,7 +4333,7 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
               h(
                 'div',
                 { className: 'dsh-nudge-presets', role: 'group', 'aria-label': t('preset') },
-                ...state.presets.map((preset) =>
+                ...livePresets.map((preset) =>
                   h(
                     'button',
                     {
@@ -4016,7 +4354,112 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
                     preset.label,
                   ),
                 ),
+                livePresets.length === 0
+                  ? h(
+                      'span',
+                      { key: 'no-presets', className: 'dsh-nudge-presets-empty' },
+                      t(state.presets.length === 0 ? 'presetsEmpty' : 'presetsAllDisabled'),
+                    )
+                  : null,
+                h(
+                  'button',
+                  {
+                    key: 'add-preset',
+                    type: 'button',
+                    className: 'dsh-nudge-chip dsh-nudge-chip-add',
+                    title: t('addPreset'),
+                    'aria-label': t('addPreset'),
+                    'aria-expanded': state.nudgeDraftOpen === true,
+                    onMouseDown: keepFocus,
+                    onPointerDown: keepFocus,
+                    onClick: () => runtime.startNudgeDraft(),
+                  },
+                  `＋ ${t('quickAdd')}`,
+                ),
               ),
+              state.nudgeDraftOpen === true
+                ? h(
+                    'div',
+                    { key: 'quick-add', className: 'dsh-nudge-quick-add' },
+                    h(
+                      'div',
+                      { className: 'dsh-nudge-quick-add-head' },
+                      h('span', { className: 'dsh-nudge-field-label' }, t('addPreset')),
+                    ),
+                    h(
+                      'label',
+                      { className: 'dsh-nudge-quick-add-field' },
+                      h('span', { className: 'dsh-nudge-field-label' }, t('quickAddTitle')),
+                      h('input', {
+                        ref: quickAddInputRef,
+                        type: 'text',
+                        value: state.nudgeDraftLabel,
+                        placeholder: t('quickAddTitle'),
+                        onChange: (event) => runtime.setNudgeDraftLabel(event.target.value),
+                        onKeyDown: (event) => {
+                          if (event.isComposing) return
+                          if (event.key === 'Enter') {
+                            event.preventDefault()
+                            runtime.saveNudgeDraft()
+                          } else if (event.key === 'Escape') {
+                            event.preventDefault()
+                            runtime.cancelNudgeDraft()
+                          }
+                        },
+                      }),
+                    ),
+                    h(
+                      'label',
+                      { className: 'dsh-nudge-quick-add-field' },
+                      h('span', { className: 'dsh-nudge-field-label' }, t('quickAddBody')),
+                      h('textarea', {
+                        rows: 3,
+                        value: state.nudgeDraftText,
+                        placeholder: t('quickAddBody'),
+                        onChange: (event) => runtime.setNudgeDraftText(event.target.value),
+                        onKeyDown: (event) => {
+                          if (event.isComposing) return
+                          if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+                            event.preventDefault()
+                            runtime.saveNudgeDraft()
+                          } else if (event.key === 'Escape') {
+                            event.preventDefault()
+                            runtime.cancelNudgeDraft()
+                          }
+                        },
+                      }),
+                    ),
+                    state.nudgeDraftError
+                      ? h('div', { className: 'dsh-nudge-settings-error', role: 'alert' }, state.nudgeDraftError)
+                      : null,
+                    h(
+                      'div',
+                      { className: 'dsh-nudge-annotation-actions' },
+                      h(
+                        'button',
+                        {
+                          type: 'button',
+                          className: 'dsh-nudge-btn',
+                          onMouseDown: keepFocus,
+                          onPointerDown: keepFocus,
+                          onClick: () => runtime.cancelNudgeDraft(),
+                        },
+                        t('cancelPreset'),
+                      ),
+                      h(
+                        'button',
+                        {
+                          type: 'button',
+                          className: 'dsh-nudge-btn primary',
+                          onMouseDown: keepFocus,
+                          onPointerDown: keepFocus,
+                          onClick: () => runtime.saveNudgeDraft(),
+                        },
+                        t('savePreset'),
+                      ),
+                    ),
+                  )
+                : null,
             ),
             turbo
               ? null
@@ -4028,7 +4471,7 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
                     className: `dsh-nudge-ask${insertMode ? ' insert' : ''}`,
                     title: askTitle,
                     'aria-label': askTitle,
-                    disabled: !insertMode && state.phase === 'waiting',
+                    disabled: livePresets.length === 0 || (!insertMode && state.phase === 'waiting'),
                     onMouseDown: keepFocus,
                     onPointerDown: keepFocus,
                     onClick: () => {
@@ -4094,8 +4537,44 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
         )
       }
 
+      /** A small 16px stroke icon, matching the window's own icons. */
+      function presetIcon(pathData) {
+        return h(
+          'svg',
+          {
+            width: 16,
+            height: 16,
+            viewBox: '0 0 16 16',
+            fill: 'none',
+            stroke: 'currentColor',
+            'stroke-width': 1.4,
+            'stroke-linecap': 'round',
+            'stroke-linejoin': 'round',
+            'aria-hidden': 'true',
+          },
+          h('path', { d: pathData }),
+        )
+      }
+
+      const PENCIL_PATH = 'M10.6 2.4l3 3-8.2 8.2-3.4.6.6-3.4 8-8.4z'
+      const CHEVRON_RIGHT = 'M6 4l4 4-4 4'
+      const CHEVRON_DOWN = 'M4 6.5l4 4 4-4'
+      const TRASH_PATH = 'M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.6 8h5.8l.6-8'
+
+      /** The preset being dragged, shared by the drag handlers of one list. */
+      let draggingId = null
+      /** Index of the idle line being dragged, or null. */
+      let draggingTip = null
+
+      /**
+       * One preset row: a summary line (name, expander, edit, delete, drag),
+       * an optional read-only body, and an editor that only writes on save.
+       */
       function PresetRow(props) {
         const { preset, t, onError, index, total } = props
+        const snapshot = runtime.getSnapshot()
+        const open = snapshot.presetOpen.includes(preset.id)
+        const editing = snapshot.presetEditingId === preset.id
         const [label, setLabel] = React.useState(preset.label)
         const [text, setText] = React.useState(preset.text)
         React.useEffect(() => {
@@ -4103,87 +4582,244 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
           setText(preset.text)
         }, [preset.id, preset.label, preset.text])
 
-        function commit() {
+        function save() {
           const result = runtime.updatePreset(preset.id, { label, text })
           onError(result.ok ? '' : result.error)
         }
 
-        return h(
+        function cancel() {
+          setLabel(preset.label)
+          setText(preset.text)
+          runtime.cancelPresetEdit()
+          onError('')
+        }
+
+        const enabled = preset.enabled !== false
+
+        /**
+         * Live reorder while the pointer travels: the dragged row trades slots
+         * with the row under the cursor as soon as the midpoint is crossed, so
+         * the list follows the pointer instead of waiting for the drop.
+         */
+        function dragOverRow(event) {
+          if (draggingId === null || draggingId === preset.id) return
+          if (event !== undefined && typeof event.preventDefault === 'function') event.preventDefault()
+          if (event?.dataTransfer) {
+            try {
+              event.dataTransfer.dropEffect = 'move'
+            } catch {
+              /* best effort */
+            }
+          }
+          const target = event?.currentTarget
+          const rect = target && typeof target.getBoundingClientRect === 'function' ? target.getBoundingClientRect() : undefined
+          if (rect === undefined) return
+          const after = Number(event.clientY) > rect.top + rect.height / 2
+          const list = runtime.getSnapshot().presets
+          const from = list.findIndex((item) => item.id === draggingId)
+          if (from < 0) return
+          const to = after ? (from < index ? index : index + 1) : from < index ? index - 1 : index
+          if (to === from || to < 0 || to >= list.length) return
+          if (runtime.movePresetTo(draggingId, to)) onError('')
+        }
+
+        function dropOn(event) {
+          if (event !== undefined && typeof event.preventDefault === 'function') event.preventDefault()
+          draggingId = null
+        }
+
+        function nudge(delta) {
+          if (runtime.movePresetTo(preset.id, index + delta)) onError('')
+        }
+
+        const summary = h(
           'div',
-          { className: 'dsh-nudge-preset-row' },
+          {
+            className: 'dsh-nudge-preset-summary',
+            draggable: true,
+            onDragStart: (event) => {
+              draggingId = preset.id
+              const row =
+                event?.currentTarget && typeof event.currentTarget.closest === 'function'
+                  ? event.currentTarget.closest('.dsh-nudge-preset-row')
+                  : null
+              if (row) row.classList.add('dragging')
+              if (event?.dataTransfer) {
+                try {
+                  event.dataTransfer.effectAllowed = 'move'
+                  event.dataTransfer.setData('text/plain', preset.id)
+                } catch {
+                  /* best effort */
+                }
+              }
+            },
+            onDragEnd: (event) => {
+              draggingId = null
+              const row =
+                event?.currentTarget && typeof event.currentTarget.closest === 'function'
+                  ? event.currentTarget.closest('.dsh-nudge-preset-row')
+                  : null
+              if (row) row.classList.remove('dragging')
+            },
+          },
+          h(
+            'span',
+            {
+              className: 'dsh-nudge-preset-grip',
+              title: t('dragPreset'),
+              role: 'button',
+              tabIndex: 0,
+              'aria-label': t('dragPreset'),
+              onKeyDown: (event) => {
+                if (event.key === 'ArrowUp') nudge(-1)
+                if (event.key === 'ArrowDown') nudge(1)
+              },
+            },
+            '⠿',
+          ),
+          h(
+            'button',
+            {
+              type: 'button',
+              className: 'dsh-nudge-preset-toggle',
+              title: open ? t('collapsePreset') : t('expandPreset'),
+              'aria-label': open ? t('collapsePreset') : t('expandPreset'),
+              'aria-expanded': open ? 'true' : 'false',
+              onClick: () => runtime.togglePresetOpen(preset.id),
+            },
+            h('span', { className: 'dsh-nudge-preset-name' }, preset.label),
+            presetIcon(open ? CHEVRON_DOWN : CHEVRON_RIGHT),
+          ),
           h(
             'div',
-            { className: 'dsh-nudge-preset-line' },
-            h('input', {
-              type: 'text',
-              value: label,
-              placeholder: t('presetLabel'),
-              'aria-label': t('presetLabel'),
-              onChange: (event) => setLabel(event.target.value),
-              onBlur: commit,
-              onKeyDown: (event) => {
-                if (event.key === 'Enter') commit()
-              },
-            }),
+            { className: 'dsh-nudge-preset-tools' },
             h(
               'button',
               {
                 type: 'button',
-                className: 'dsh-nudge-btn icon',
-                title: t('sortUp'),
-                'aria-label': t('sortUp'),
-                disabled: index <= 0,
-                onClick: () => runtime.movePreset(preset.id, -1),
-              },
-              '↑',
-            ),
-            h(
-              'button',
-              {
-                type: 'button',
-                className: 'dsh-nudge-btn icon',
-                title: t('sortDown'),
-                'aria-label': t('sortDown'),
-                disabled: index >= total - 1,
-                onClick: () => runtime.movePreset(preset.id, 1),
-              },
-              '↓',
-            ),
-            h(
-              'button',
-              {
-                type: 'button',
-                className: 'dsh-nudge-btn danger',
+                className: `dsh-nudge-preset-state${enabled ? ' on' : ''}`,
+                title: enabled ? t('presetEnabledHint') : t('presetDisabledHint'),
+                role: 'switch',
+                'aria-checked': enabled ? 'true' : 'false',
+                'aria-label': enabled ? t('presetEnabledHint') : t('presetDisabledHint'),
                 onClick: () => {
-                  if (runtime.removePreset(preset.id)) onError('')
-                  else onError(t('presetLast'))
+                  runtime.togglePresetEnabled(preset.id)
+                  onError('')
                 },
               },
-              t('deletePreset'),
+              enabled ? t('presetEnabled') : t('presetDisabled'),
+            ),
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'dsh-nudge-btn icon',
+                title: t('editPreset'),
+                'aria-label': t('editPreset'),
+                'aria-pressed': editing ? 'true' : 'false',
+                onClick: () => {
+                  if (editing) cancel()
+                  else {
+                    onError('')
+                    runtime.startPresetEdit(preset.id)
+                  }
+                },
+              },
+              presetIcon(PENCIL_PATH),
+            ),
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'dsh-nudge-btn icon danger',
+                title: t('deletePreset'),
+                'aria-label': t('deletePreset'),
+                onClick: () => {
+                  onError(runtime.removePreset(preset.id) ? '' : t('presetTextRequired'))
+                },
+              },
+              presetIcon(TRASH_PATH),
             ),
           ),
-          h('textarea', {
-            value: text,
-            placeholder: t('presetText'),
-            'aria-label': t('presetText'),
-            onChange: (event) => setText(event.target.value),
-            onBlur: commit,
-            onKeyDown: (event) => {
-              if (event.key === 'Enter' && event.shiftKey !== true) commit()
-            },
-          }),
+        )
+
+        const body =
+          open && !editing
+            ? h('div', { className: 'dsh-nudge-preset-body' }, preset.text)
+            : null
+
+        const editor = editing
+          ? h(
+              'div',
+              { className: 'dsh-nudge-preset-editor' },
+              h('input', {
+                type: 'text',
+                value: label,
+                placeholder: t('presetLabel'),
+                'aria-label': t('presetLabel'),
+                onChange: (event) => setLabel(event.target.value),
+                onKeyDown: (event) => {
+                  if (event.key === 'Enter') save()
+                  if (event.key === 'Escape') cancel()
+                },
+              }),
+              h('textarea', {
+                value: text,
+                placeholder: t('presetText'),
+                'aria-label': t('presetText'),
+                onChange: (event) => setText(event.target.value),
+                onKeyDown: (event) => {
+                  if (event.key === 'Enter' && event.shiftKey !== true) save()
+                  if (event.key === 'Escape') cancel()
+                },
+              }),
+              h(
+                'div',
+                { className: 'dsh-nudge-preset-actions' },
+                h(
+                  'button',
+                  { type: 'button', className: 'dsh-nudge-btn primary', onClick: save },
+                  t('savePreset'),
+                ),
+                h(
+                  'button',
+                  { type: 'button', className: 'dsh-nudge-btn', onClick: cancel },
+                  t('cancelPreset'),
+                ),
+              ),
+            )
+          : null
+
+        return h(
+          'div',
+          {
+            className: `dsh-nudge-preset-row${editing ? ' editing' : ''}${enabled ? '' : ' disabled'}`,
+            'data-preset-id': preset.id,
+            'data-open': open ? 'true' : 'false',
+            onDragOver: dragOverRow,
+            onDragEnter: dragOverRow,
+            onDrop: dropOn,
+          },
+          summary,
+          body,
+          editor,
         )
       }
 
-      /** One idle line: a text field plus reorder and delete buttons. */
+      /**
+       * One idle line: the text as a row, an editor behind the pencil icon,
+       * and drag (or ↑ ↓ on the handle) for order. No body of its own.
+       */
       function TipRow(props) {
-        const { value, t, onError, index, total } = props
+        const { value, t, onError, index } = props
+        const snapshot = runtime.getSnapshot()
+        const editing = snapshot.tipEditingIndex === index
         const [line, setLine] = React.useState(value)
         React.useEffect(() => {
           setLine(value)
         }, [value])
 
-        function commit() {
+        function save() {
           if (!runtime.updateTip(index, line)) {
             setLine(value)
             onError(t('tipTextRequired'))
@@ -4192,56 +4828,131 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
           onError('')
         }
 
-        return h(
+        function cancel() {
+          setLine(value)
+          runtime.cancelTipEdit()
+          onError('')
+        }
+
+        function nudge(delta) {
+          if (runtime.moveTipTo(index, index + delta)) onError('')
+        }
+
+        function dropOn(event) {
+          if (event !== undefined && typeof event.preventDefault === 'function') event.preventDefault()
+          const from = draggingTip
+          draggingTip = null
+          if (from === null || from === index) return
+          if (runtime.moveTipTo(from, index)) onError('')
+        }
+
+        const summary = h(
           'div',
-          { className: 'dsh-nudge-preset-line' },
-          h('input', {
-            type: 'text',
-            value: line,
-            placeholder: t('tipsPlaceholder'),
-            'aria-label': t('tipsPlaceholder'),
-            onChange: (event) => setLine(event.target.value),
-            onBlur: commit,
-            onKeyDown: (event) => {
-              if (event.key === 'Enter') commit()
+          {
+            className: 'dsh-nudge-preset-summary',
+            draggable: true,
+            onDragStart: () => {
+              draggingTip = index
             },
-          }),
-          h(
-            'button',
-            {
-              type: 'button',
-              className: 'dsh-nudge-btn icon',
-              title: t('sortUp'),
-              'aria-label': t('sortUp'),
-              disabled: index <= 0,
-              onClick: () => runtime.moveTip(index, -1),
+            onDragEnd: () => {
+              draggingTip = null
             },
-            '↑',
-          ),
-          h(
-            'button',
-            {
-              type: 'button',
-              className: 'dsh-nudge-btn icon',
-              title: t('sortDown'),
-              'aria-label': t('sortDown'),
-              disabled: index >= total - 1,
-              onClick: () => runtime.moveTip(index, 1),
+            onDragOver: (event) => {
+              if (draggingTip === null) return
+              if (typeof event.preventDefault === 'function') event.preventDefault()
             },
-            '↓',
-          ),
+            onDrop: dropOn,
+          },
           h(
-            'button',
+            'span',
             {
-              type: 'button',
-              className: 'dsh-nudge-btn danger',
-              onClick: () => {
-                if (runtime.removeTip(index)) onError('')
-                else onError(t('tipLast'))
+              className: 'dsh-nudge-preset-grip',
+              title: t('dragPreset'),
+              role: 'button',
+              tabIndex: 0,
+              'aria-label': t('dragPreset'),
+              onKeyDown: (event) => {
+                if (event.key === 'ArrowUp') nudge(-1)
+                if (event.key === 'ArrowDown') nudge(1)
               },
             },
-            t('deleteTip'),
+            '⠿',
           ),
+          h('span', { className: 'dsh-nudge-tip-name' }, value),
+          h(
+            'div',
+            { className: 'dsh-nudge-preset-tools' },
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'dsh-nudge-btn icon',
+                title: t('editTip'),
+                'aria-label': t('editTip'),
+                'aria-pressed': editing ? 'true' : 'false',
+                onClick: () => {
+                  if (editing) cancel()
+                  else {
+                    onError('')
+                    runtime.startTipEdit(index)
+                  }
+                },
+              },
+              presetIcon(PENCIL_PATH),
+            ),
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'dsh-nudge-btn icon danger',
+                title: t('deleteTip'),
+                'aria-label': t('deleteTip'),
+                onClick: () => {
+                  onError(runtime.removeTip(index) ? '' : t('tipLast'))
+                },
+              },
+              presetIcon(TRASH_PATH),
+            ),
+          ),
+        )
+
+        const editor = editing
+          ? h(
+              'div',
+              { className: 'dsh-nudge-preset-editor' },
+              h('input', {
+                type: 'text',
+                value: line,
+                placeholder: t('tipsPlaceholder'),
+                'aria-label': t('tipsPlaceholder'),
+                onChange: (event) => setLine(event.target.value),
+                onKeyDown: (event) => {
+                  if (event.key === 'Enter') save()
+                  if (event.key === 'Escape') cancel()
+                },
+              }),
+              h(
+                'div',
+                { className: 'dsh-nudge-preset-actions' },
+                h(
+                  'button',
+                  { type: 'button', className: 'dsh-nudge-btn primary', onClick: save },
+                  t('savePreset'),
+                ),
+                h(
+                  'button',
+                  { type: 'button', className: 'dsh-nudge-btn', onClick: cancel },
+                  t('cancelPreset'),
+                ),
+              ),
+            )
+          : null
+
+        return h(
+          'div',
+          { className: 'dsh-nudge-preset-row dsh-nudge-tip-row', 'data-tip-index': index },
+          summary,
+          editor,
         )
       }
 
@@ -4252,6 +4963,8 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
         const [draftLabel, setDraftLabel] = React.useState('')
         const [draftText, setDraftText] = React.useState('')
         const [draftTip, setDraftTip] = React.useState('')
+        const [importOpen, setImportOpen] = React.useState(false)
+        const [draftImport, setDraftImport] = React.useState('')
         const t = runtime.text
         const delivery = runtime.effectiveDelivery()
 
@@ -4289,6 +5002,22 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
 
         function addTipLine() {
           addTipLines(draftTip)
+        }
+
+        /** Take one pasted block list and report what landed. */
+        function importLines(raw) {
+          const result = runtime.importPresets(raw)
+          if (!result.ok) {
+            setError(result.error)
+            setNote('')
+            return false
+          }
+          const parts = [fill(t('importAdded'), result.added)]
+          if (result.skipped > 0) parts.push(fill(t('importSkipped'), result.skipped))
+          setError('')
+          setNote(parts.join('，'))
+          setDraftImport('')
+          return true
         }
 
         /** A pasted list is split right away: no extra click needed. */
@@ -4357,6 +5086,45 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
             ),
           ),
           h('div', { className: 'dsh-nudge-settings-hint' }, t('presetsHint')),
+          // The list is a table of contents: names only, bodies on demand.
+          h(
+            'div',
+            { className: 'dsh-nudge-preset-toolbar' },
+            h('span', { className: 'dsh-nudge-preset-count' }, t('presetCount').replace('{n}', String(state.presets.length))),
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'dsh-nudge-btn',
+                disabled: state.presets.length === 0,
+                onClick: () => runtime.setPresetsOpen(true),
+              },
+              t('expandAllPresets'),
+            ),
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'dsh-nudge-btn',
+                disabled: state.presetOpen.length === 0,
+                onClick: () => runtime.setPresetsOpen(false),
+              },
+              t('collapseAllPresets'),
+            ),
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'dsh-nudge-btn',
+                'aria-expanded': importOpen ? 'true' : 'false',
+                onClick: () => setImportOpen(importOpen !== true),
+              },
+              t('importPresets'),
+            ),
+          ),
+          state.presets.length === 0
+            ? h('div', { className: 'dsh-nudge-preset-empty' }, t('presetsEmpty'))
+            : null,
           ...state.presets.map((preset, index) =>
             h(PresetRow, {
               key: preset.id,
@@ -4369,7 +5137,7 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
           ),
           h(
             'div',
-            { className: 'dsh-nudge-preset-row' },
+            { className: 'dsh-nudge-preset-row dsh-nudge-preset-add' },
             h(
               'div',
               { className: 'dsh-nudge-preset-line' },
@@ -4393,6 +5161,41 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
               h('button', { type: 'button', className: 'dsh-nudge-btn primary', onClick: add }, t('addPreset')),
             ),
           ),
+          importOpen
+            ? h(
+                'div',
+                { className: 'dsh-nudge-preset-import' },
+                h('div', { className: 'dsh-nudge-settings-hint' }, t('importHint')),
+                h('textarea', {
+                  value: draftImport,
+                  placeholder: t('importPlaceholder'),
+                  'aria-label': t('importPresets'),
+                  onChange: (event) => setDraftImport(event.target.value),
+                }),
+                h(
+                  'div',
+                  { className: 'dsh-nudge-preset-actions' },
+                  h(
+                    'button',
+                    { type: 'button', className: 'dsh-nudge-btn primary', onClick: () => importLines(draftImport) },
+                    t('importSubmit'),
+                  ),
+                  h(
+                    'button',
+                    {
+                      type: 'button',
+                      className: 'dsh-nudge-btn',
+                      onClick: () => {
+                        setImportOpen(false)
+                        setDraftImport('')
+                        setError('')
+                      },
+                    },
+                    t('cancelPreset'),
+                  ),
+                ),
+              )
+            : null,
           h(
             'div',
             { className: 'dsh-nudge-preset-actions' },
@@ -4438,7 +5241,6 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
               t,
               onError: setError,
               index,
-              total: state.tips.length,
             }),
           ),
           h(

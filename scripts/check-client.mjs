@@ -35,6 +35,20 @@ function includes(label, haystack, needle) {
   if (!ok) failures += 1
   console.log(`${ok ? 'ok  ' : 'FAIL'}  ${label}: ${JSON.stringify(haystack)}${ok ? '' : ` (expected to include ${JSON.stringify(needle)})`}`)
 }
+/** Collect every rendered element with the given tag (`input`, `textarea`, ...). */
+function findAllByTag(node, tag, out = []) {
+  if (!node || typeof node !== 'object') return out
+  if (node.type === tag) out.push(node)
+  for (const child of node.children ?? []) findAllByTag(child, tag, out)
+  return out
+}
+/** Expand nested function components (the React stub renders only what it is given). */
+function expandTree(node) {
+  if (!node || typeof node !== 'object') return node
+  if (Array.isArray(node)) return node.map(expandTree)
+  if (typeof node.type === 'function') return expandTree(node.type(node.props ?? {}))
+  return { ...node, children: (node.children ?? []).map(expandTree) }
+}
 // --- activation ---------------------------------------------------------
 
 {
@@ -198,10 +212,167 @@ function includes(label, haystack, needle) {
   check('reset presets', booted.runtime.resetPresets(), undefined)
   check('reset restores builtin ids', JSON.stringify(booted.runtime.getSnapshot().presets.map((preset) => preset.id)), '["brief","fast","four-line"]')
 
-  // Removing the last preset is refused.
+  // Every preset can go: an empty list is a real, reachable state now.
   booted.runtime.removePreset('fast')
   booted.runtime.removePreset('four-line')
-  check('last preset cannot be removed', booted.runtime.removePreset('brief'), false)
+  check('the second-to-last preset can be removed', booted.runtime.removePreset('brief'), true)
+  check('an empty list is allowed', booted.runtime.getSnapshot().presets.length, 0)
+  check('the empty list is persisted', JSON.parse(booted.localStorage.getItem('dsh-nudge:presets')).length, 0)
+  check('adding works again from empty', booted.runtime.addPreset('重来', '再来一条').ok, true)
+  check('the count comes back after re-adding', booted.runtime.getSnapshot().presets.length, 1)
+}
+
+// --- in-window quick add: chip opens a title + body form ----------------
+
+{
+  const booted = await boot({})
+  const { runtime } = booted
+  const View = booted.registrations.find((item) => item.entry.name === 'shell.overlay').Component
+  check('quick add: button rendered', Boolean(findByClass(View(), 'dsh-nudge-chip-add')), true)
+  check('quick add: presets come first', findAllByClass(View(), 'dsh-nudge-chip')[0]?.props?.className.includes('dsh-nudge-chip-add'), false)
+  check('quick add: form closed at rest', findByClass(View(), 'dsh-nudge-quick-add'), null)
+  check('quick add: opening accepted', runtime.startNudgeDraft(), true)
+  check('quick add: form rendered', Boolean(findByClass(View(), 'dsh-nudge-quick-add')), true)
+  check('quick add: title field rendered', Boolean(findByProp(View(), 'placeholder', '标题')), true)
+  check('quick add: body field rendered', Boolean(findByProp(View(), 'placeholder', '正文')), true)
+  runtime.setNudgeDraftLabel('日报')
+  runtime.setNudgeDraftText('今天做了什么')
+  check('quick add: saved', runtime.saveNudgeDraft().ok, true)
+  check('quick add: form closed after save', findByClass(View(), 'dsh-nudge-quick-add'), null)
+  const added = runtime.getSnapshot().presets.find((preset) => preset.label === '日报')
+  check('quick add: preset stored', added?.text, '今天做了什么')
+  check('quick add: count grows', runtime.getSnapshot().presets.length, 4)
+  runtime.startNudgeDraft()
+  runtime.setNudgeDraftLabel('空')
+  runtime.setNudgeDraftText('  ')
+  check('quick add: empty body refused', runtime.saveNudgeDraft().ok, false)
+  check('quick add: error surfaced', Boolean(findByClass(View(), 'dsh-nudge-settings-error')), true)
+  check('quick add: failed draft stays open', runtime.getSnapshot().nudgeDraftOpen, true)
+  check('quick add: cancel closes', runtime.cancelNudgeDraft(), true)
+  check('quick add: cancel discards', runtime.getSnapshot().presets.length, 4)
+}
+
+// --- preset on/off: disabled prompts stay in settings, leave the window --
+
+{
+  const booted = await boot({})
+  const { runtime } = booted
+  const View = booted.registrations.find((item) => item.entry.name === 'shell.overlay').Component
+  const settings = booted.registrations.find((item) => item.entry.name === 'settings.section').Component
+  const tree = () => expandTree(settings())
+  check('every preset starts enabled', runtime.getSnapshot().presets.every((preset) => preset.enabled !== false), true)
+  check('the settings row offers a state switch', (findAllByClass(tree(), 'dsh-nudge-preset-state') ?? []).length, 3)
+
+  const target = runtime.getSnapshot().presets[1].id
+  runtime.setPreset(target)
+  check('toggle accepted', runtime.togglePresetEnabled(target), true)
+  check('the preset is disabled', runtime.getSnapshot().presets.find((preset) => preset.id === target).enabled, false)
+  check(
+    'the disabled state is persisted',
+    JSON.parse(booted.localStorage.getItem('dsh-nudge:presets')).find((preset) => preset.id === target).enabled,
+    false,
+  )
+  check('selection falls back off the disabled preset', runtime.getSnapshot().presetId === target, false)
+  check(
+    'the selection lands on an enabled preset',
+    runtime.getSnapshot().presets.find((preset) => preset.id === runtime.getSnapshot().presetId).enabled !== false,
+    true,
+  )
+  check('the row shows the disabled state', Boolean(findByClass(tree(), 'dsh-nudge-preset-row disabled')), false)
+  check(
+    'a disabled row is marked',
+    (findAllByClass(tree(), 'dsh-nudge-preset-row') ?? []).filter((node) => node.props.className.includes('disabled')).length,
+    1,
+  )
+  const chips = () => findAllByClass(View(), 'dsh-nudge-chip')
+  check('the window hides the disabled chip', chips().length, 3)
+  check('the add chip stays', Boolean(findByClass(View(), 'dsh-nudge-chip-add')), true)
+
+  check('re-enable accepted', runtime.togglePresetEnabled(target), true)
+  check('the preset is enabled again', runtime.getSnapshot().presets.find((preset) => preset.id === target).enabled, true)
+  check('the window shows all chips again', chips().length, 4)
+
+  for (const preset of runtime.getSnapshot().presets) runtime.setPresetEnabled(preset.id, false)
+  check('every preset can be off', runtime.getSnapshot().presets.every((preset) => preset.enabled === false), true)
+  check('the window explains the empty row', Boolean(findByClass(View(), 'dsh-nudge-presets-empty')), true)
+  check('ask is refused with no enabled preset', runtime.ask(), false)
+  runtime.setPresetEnabled(target, true)
+  check('one enabled preset is enough', runtime.getSnapshot().presetId, target)
+}
+
+// --- settings presets: collapsed list, one editor, drag, bulk import ----
+
+{
+  const booted = await boot({})
+  const { runtime } = booted
+  const first = runtime.getSnapshot().presets[0].id
+  check('presets start collapsed', runtime.getSnapshot().presetOpen.length, 0)
+  check('one preset opens', runtime.togglePresetOpen(first), true)
+  check('the open id is remembered', runtime.getSnapshot().presetOpen.join(','), first)
+  check('the same preset closes again', runtime.togglePresetOpen(first), true)
+  check('closing leaves nothing open', runtime.getSnapshot().presetOpen.length, 0)
+  check('expand-all accepted', runtime.setPresetsOpen(true), true)
+  check('expand-all opened every preset', runtime.getSnapshot().presetOpen.length, runtime.getSnapshot().presets.length)
+  check('collapse-all accepted', runtime.setPresetsOpen(false), true)
+  check('collapse-all closed every preset', runtime.getSnapshot().presetOpen.length, 0)
+
+  runtime.startPresetEdit(first)
+  check('the editor opens for one preset', runtime.getSnapshot().presetEditingId, first)
+  const second = runtime.getSnapshot().presets[1].id
+  runtime.startPresetEdit(second)
+  check('only one editor is open at a time', runtime.getSnapshot().presetEditingId, second)
+  check('cancel closes the editor', runtime.cancelPresetEdit(), true)
+  check('cancel with no editor is refused', runtime.cancelPresetEdit(), false)
+  runtime.startPresetEdit(first)
+  runtime.updatePreset(first, { label: '改名', text: '改过的话' })
+  check('saving closes the editor', runtime.getSnapshot().presetEditingId, null)
+
+  // Drag and drop moves a row to an absolute slot.
+  const ids = runtime.getSnapshot().presets.map((preset) => preset.id)
+  check('drag to the top accepted', runtime.movePresetTo(ids[2], 0), true)
+  check('drag moved the row', runtime.getSnapshot().presets[0].id, ids[2])
+  check('drag to the same slot is refused', runtime.movePresetTo(ids[2], 0), false)
+  check('drag past the end lands last', runtime.movePresetTo(ids[2], 99), true)
+  check('the moved row is last', runtime.getSnapshot().presets.at(-1).id, ids[2])
+  check('drag order is written to storage', JSON.parse(booted.localStorage.getItem('dsh-nudge:presets')).at(-1).id, ids[2])
+}
+
+{
+  const booted = await boot({})
+  const { runtime } = booted
+  // Blocks are separated by three or more blank lines; line one names the block.
+  const raw = ['甲\n甲正文第一行\n甲正文第二行', '乙\n乙正文', '丙'].join('\n\n\n\n')
+  const result = runtime.importPresets(raw)
+  check('bulk import accepted', result.ok, true)
+  check('bulk import added three', result.added, 3)
+  check('bulk import appended to the list', runtime.getSnapshot().presets.length, 6)
+  const added = runtime.getSnapshot().presets.slice(3)
+  check('the first line becomes the name', added[0].label, '甲')
+  check('the remaining lines become the body', added[0].text, '甲正文第一行\n甲正文第二行')
+  check('a one-line block names and fills itself', `${added[2].label}|${added[2].text}`, '丙|丙')
+  check('bulk import is persisted', JSON.parse(booted.localStorage.getItem('dsh-nudge:presets')).length, 6)
+  check('the same paste again is all duplicates', runtime.importPresets(raw).added, 0)
+  check('an empty paste is refused', runtime.importPresets('   \n\n').ok, false)
+  check('two blank lines are still one block', runtime.importPresets('丁\n正文\n\n\n戊\n正文二').added, 1)
+  const before = runtime.getSnapshot().presets.length
+  const big = Array.from({ length: 12 }, (_, index) => `批量${index}\n批量正文${index}`).join('\n\n\n\n')
+  const unbounded = runtime.importPresets(big)
+  check('bulk import has no cap', unbounded.added, 12)
+  check('bulk import keeps everything', runtime.getSnapshot().presets.length, before + 12)
+  check('nothing is reported as skipped', unbounded.skipped, 0)
+  check('the list may exceed eight', runtime.getSnapshot().presets.length > 8, true)
+}
+
+{
+  // An empty list reads back empty: the built-ins are not resurrected.
+  const seeded = storageStub()
+  seeded.setItem('dsh-nudge:presets', '[]')
+  const booted = await boot({ storage: seeded })
+  check('an empty stored list stays empty', booted.runtime.getSnapshot().presets.length, 0)
+  const settings = booted.registrations.find((item) => item.entry.name === 'settings.section').Component
+  const tree = expandTree(settings())
+  check('the empty state is reachable', (findAllByClass(tree, 'dsh-nudge-preset-empty') ?? []).length, 1)
+  check('the add form is still offered from empty', (findAllByClass(tree, 'dsh-nudge-preset-add') ?? []).length, 1)
 }
 
 // --- settings view edits through the same store ------------------------
@@ -1215,25 +1386,127 @@ const durable = (type, seq, data) => ({ type: 'event', event: { type, seq, time:
 {
   const booted = await boot({})
   const Settings = booted.registrations.find((item) => item.entry.name === 'settings.section').Component
-  /** Expand one render level of nested function components (the React stub stops there). */
-  function expand(node) {
-    if (!node || typeof node !== 'object') return node
-    if (Array.isArray(node)) return node.map(expand)
-    if (typeof node.type === 'function') return expand(node.type(node.props ?? {}))
-    return { ...node, children: (node.children ?? []).map(expand) }
-  }
-  const tree = expand(Settings())
+  const tree = expandTree(Settings())
   check('settings: one row per window switch', (findAllByClass(tree, 'dsh-nudge-toggle') ?? []).length, 3)
   const arrowNodes = (node) =>
     (findAllByClass(node, 'dsh-nudge-btn') ?? []).filter(
       (item) => item.children?.[0] === '↑' || item.children?.[0] === '↓',
     )
+  check('settings: reorder buttons are gone', arrowNodes(tree).length, 0)
+  const tipRows = findAllByClass(tree, 'dsh-nudge-tip-row') ?? []
+  check('settings: one row per idle line', tipRows.length, booted.runtime.getSnapshot().tips.length)
+  check(
+    'settings: idle rows show the line as text',
+    tipRows.every((row) => (findAllByClass(row, 'dsh-nudge-tip-name') ?? []).length === 1),
+    true,
+  )
+  check(
+    'settings: idle rows carry no field until asked',
+    tipRows.reduce((sum, row) => sum + findAllByTag(row, 'input').length, 0),
+    0,
+  )
+  check(
+    'settings: idle rows keep a handle and tools',
+    tipRows.every(
+      (row) =>
+        (findAllByClass(row, 'dsh-nudge-preset-grip') ?? []).length === 1 &&
+        (findAllByClass(row, 'dsh-nudge-preset-tools') ?? []).length === 1,
+    ),
+    true,
+  )
   const presetRows = findAllByClass(tree, 'dsh-nudge-preset-row') ?? []
-  const presetArrows = presetRows.reduce((sum, row) => sum + arrowNodes(row).length, 0)
-  check('settings: every preset row carries both arrows', presetArrows, 6)
-  check('settings: every idle line can be reordered too', arrowNodes(tree).length, 6 + 6)
+  const rows = presetRows.filter((row) => row.props['data-preset-id'] !== undefined)
+  check('settings: one collapsed row per preset', rows.length, 3)
+  check('settings: rows start collapsed', rows.every((row) => row.props['data-open'] === 'false'), true)
+  check('settings: no body while collapsed', (findAllByClass(tree, 'dsh-nudge-preset-body') ?? []).length, 0)
+  check('settings: no editor until asked', (findAllByClass(tree, 'dsh-nudge-preset-editor') ?? []).length, 0)
+  check(
+    'settings: collapsed rows carry no field',
+    rows.reduce((sum, row) => sum + findAllByTag(row, 'input').length + findAllByTag(row, 'textarea').length, 0),
+    0,
+  )
+  check('settings: only the add form keeps fields', (findAllByClass(tree, 'dsh-nudge-preset-add') ?? []).length, 1)
+  check(
+    'settings: every row offers edit and delete',
+    rows.reduce((sum, row) => sum + (findAllByClass(row, 'dsh-nudge-preset-tools') ?? []).length, 0),
+    3,
+  )
+  const toolbar = findAllByClass(tree, 'dsh-nudge-preset-toolbar')[0]
+  check('settings: the toolbar carries expand, collapse and import', (findAllByClass(toolbar, 'dsh-nudge-btn') ?? []).length, 3)
   check('settings: delivery group rendered', (findAllByClass(tree, 'dsh-nudge-settings-group') ?? []).length, 1)
   check('settings: delivery offers both modes', (findAllByClass(tree, 'dsh-nudge-chip') ?? []).length, 2)
+
+  // Opening a row paints its read-only body; editing swaps in two fields.
+  const openedId = booted.runtime.getSnapshot().presets[0].id
+  booted.runtime.togglePresetOpen(openedId)
+  const opened = expandTree(Settings())
+  const bodies = findAllByClass(opened, 'dsh-nudge-preset-body') ?? []
+  check('settings: an open row paints its body', bodies.length, 1)
+  const bodyText = JSON.stringify(bodies[0]?.children ?? [])
+  includes('settings: the body is the bare preset text', bodyText, booted.runtime.getSnapshot().presets[0].text.split('\n')[0])
+  booted.runtime.startPresetEdit(openedId)
+  const editing = expandTree(Settings())
+  const editors = findAllByClass(editing, 'dsh-nudge-preset-editor') ?? []
+  check('settings: editing paints one editor', editors.length, 1)
+  check(
+    'settings: the editor is a name field and a text field',
+    findAllByTag(editors[0], 'input').length + findAllByTag(editors[0], 'textarea').length,
+    2,
+  )
+  const textBefore = booted.runtime.getSnapshot().presets[0].text
+  booted.runtime.cancelPresetEdit()
+  check('settings: cancel leaves the editor', booted.runtime.getSnapshot().presetEditingId, null)
+  check('settings: cancel leaves the preset text alone', booted.runtime.getSnapshot().presets[0].text, textBefore)
+}
+
+// --- idle lines share the preset chrome, one line at a time ---------------
+
+{
+  const booted = await boot({})
+  const Settings = booted.registrations.find((item) => item.entry.name === 'settings.section').Component
+  const before = booted.runtime.getSnapshot().tips[0]
+  check('tips: editing needs an index in range', booted.runtime.startTipEdit(-1), false)
+  check('tips: cancel without an editor is a no-op', booted.runtime.cancelTipEdit(), false)
+  check('tips: the first line opens its editor', booted.runtime.startTipEdit(0), true)
+  check('tips: the editor follows the state', booted.runtime.getSnapshot().tipEditingIndex, 0)
+  const editing = expandTree(Settings())
+  const rows = findAllByClass(editing, 'dsh-nudge-tip-row') ?? []
+  const openRow = rows.filter((row) => findAllByTag(row, 'input').length > 0)
+  check('tips: only the edited row carries a field', openRow.length, 1)
+  const actions = findAllByClass(openRow[0], 'dsh-nudge-preset-actions') ?? []
+  check('tips: the editor counts one field', findAllByTag(openRow[0], 'input').length, 1)
+  check('tips: the editor offers save and cancel', (findAllByClass(actions[0], 'dsh-nudge-btn') ?? []).length, 2)
+  check('tips: saving an edit closes the editor', booted.runtime.updateTip(0, `${before}改`), true)
+  check('tips: the edit is closed after saving', booted.runtime.getSnapshot().tipEditingIndex, null)
+  check('tips: the edit is persisted', booted.runtime.getSnapshot().tips[0], `${before}改`)
+  check('tips: a blank line is still refused', booted.runtime.updateTip(0, '   '), false)
+  check('tips: cancel drops the draft edit state', booted.runtime.cancelTipEdit(), false)
+
+  // Drag and drop moves a line to an absolute slot and keeps the editor on it.
+  const tips = [...booted.runtime.getSnapshot().tips]
+  booted.runtime.startTipEdit(0)
+  check('tips: move to a later slot', booted.runtime.moveTipTo(0, 1), true)
+  check('tips: the line landed at index 1', booted.runtime.getSnapshot().tips[1], tips[0])
+  check('tips: the editor followed the line', booted.runtime.getSnapshot().tipEditingIndex, 1)
+  check('tips: a move onto itself changes nothing', booted.runtime.moveTipTo(1, 1), false)
+  check('tips: an out-of-range source is refused', booted.runtime.moveTipTo(99, 0), false)
+  check(
+    'tips: the order is persisted',
+    JSON.parse(booted.localStorage.getItem('dsh-nudge:tips'))[1],
+    tips[0],
+  )
+  check('tips: moving back restores the order', booted.runtime.moveTipTo(1, 0), true)
+  check('tips: the editor followed it back', booted.runtime.getSnapshot().tipEditingIndex, 0)
+  booted.runtime.cancelTipEdit()
+  check(
+    'tips: removing a line before the editor shifts it up',
+    (() => {
+      booted.runtime.startTipEdit(2)
+      booted.runtime.removeTip(0)
+      return booted.runtime.getSnapshot().tipEditingIndex
+    })(),
+    1,
+  )
 }
 
 // --- the whole annotation round trip, in the order a user runs it ---------
