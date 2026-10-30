@@ -20,6 +20,7 @@
   "files": [
     "index.js",
     "client.js",
+    "client.settings-jump.js",
     "cordis.patch.yml",
     "locale/*.json",
     "icon.svg",

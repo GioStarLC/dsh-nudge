@@ -102,7 +102,7 @@ export function storageStub() {
 
 /**
  * Boot one bundle instance.
- * @param options - `{ bindings, promptResult, language, innerWidth, innerHeight }`.
+ * @param options - `{ bindings, promptResult, language, innerWidth, innerHeight, chunks }`.
  * @returns the sandbox handles used by the checks and the preview renderer.
  */
 export async function boot(options = {}) {
@@ -197,12 +197,34 @@ export async function boot(options = {}) {
   // Host half and adopts the durable record on boot, exactly as in the browser.
   if (typeof options.fetch === 'function') sandbox.fetch = options.fetch
   sandbox.window = sandbox
+  /**
+   * Package-local chunks (`require.async('./client.<name>.js')`) are fetched from
+   * the repository, next to the bundle, and registered exactly as the browser
+   * loader registers them: by their own `__ModuleLoader__.load({ chunk })` call.
+   */
+  const chunks = new Map()
+  const requireStub = (id) => {
+    if (id === 'react') return ReactStub
+    throw new Error(`unexpected require: ${id}`)
+  }
+  requireStub.async = async (spec) => {
+    // `{ chunks: false }` models an install copy shipped without the chunk file.
+    if (options.chunks === false) throw new Error('chunk loader disabled')
+    if (!spec.startsWith('./')) throw new Error(`unexpected require.async: ${spec}`)
+    const fileName = spec.slice(2)
+    const loaded = chunks.get(fileName)
+    if (loaded !== undefined) return loaded
+    const chunkSource = await readFile(new URL(`../${fileName}`, import.meta.url), 'utf8')
+    vm.runInContext(chunkSource, sandbox, { filename: fileName })
+    const registered = chunks.get(fileName)
+    if (registered === undefined) throw new Error(`chunk ${fileName} registered nothing`)
+    return registered
+  }
   sandbox.__ModuleLoader__ = {
     load(definition) {
-      sandbox.__module = definition.factory((id) => {
-        if (id === 'react') return ReactStub
-        throw new Error(`unexpected require: ${id}`)
-      })
+      const exported = definition.factory(requireStub)
+      if (typeof definition.chunk === 'string') chunks.set(definition.chunk, exported)
+      else sandbox.__module = exported
     },
   }
   vm.createContext(sandbox)

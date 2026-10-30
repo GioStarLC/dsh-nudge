@@ -103,7 +103,7 @@ const SCENES = {
       // No shell settings route in the preview harness: the gear's fallback
       // paints the form inside the window, which is what gets captured.
       b.sandbox.document = { querySelector: () => null, querySelectorAll: () => [] }
-      b.runtime.openSettings()
+      await b.runtime.openSettings()
       await tick()
       return { view: 'shell.overlay', width: 720, height: 640 }
     },

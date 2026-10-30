@@ -8,6 +8,7 @@
  *
  * Run: node scripts/check-client.mjs
  */
+import { readFile } from 'node:fs/promises'
 import {
   source,
   sleep,
@@ -318,7 +319,7 @@ function includes(label, haystack, needle) {
     querySelector: (selector) =>
       selector === '[data-shortcut-modal="settings"]' ? panel : null,
   }
-  check('open settings on an already open panel', booted.runtime.openSettings(), true)
+  check('open settings on an already open panel', await booted.runtime.openSettings(), true)
   check('settings nav selects our section', JSON.stringify(clicked), '["nudge"]')
 }
 
@@ -344,7 +345,7 @@ function includes(label, haystack, needle) {
       return null
     },
   }
-  check('open settings from the sidebar trigger', booted.runtime.openSettings(), true)
+  check('open settings from the sidebar trigger', await booted.runtime.openSettings(), true)
   check('sidebar settings trigger clicked', calls[0], 'trigger')
   check('settings section selected after opening', calls[1], 'nudge')
 }
@@ -380,7 +381,7 @@ function includes(label, haystack, needle) {
       return null
     },
   }
-  check('occupied settings seat uses the settings command', booted.runtime.openSettings(), true)
+  check('occupied settings seat uses the settings command', await booted.runtime.openSettings(), true)
   check('settings command invoked', invoked[0]?.id, 'settings.open')
   check('settings command passes a modal context', invoked[0]?.context?.modal, null)
   check('stray team dialog trigger is never clicked', invoked.includes('team'), false)
@@ -429,7 +430,7 @@ function includes(label, haystack, needle) {
       return null
     },
   }
-  check('web shell falls back to the settings keystroke', booted.runtime.openSettings(), true)
+  check('web shell falls back to the settings keystroke', await booted.runtime.openSettings(), true)
   check('settings keystroke dispatched', dispatched[0]?.code, 'Comma')
   check('settings keystroke modifiers', JSON.stringify([dispatched[0]?.ctrlKey, dispatched[0]?.altKey]), '[true,true]')
   check('settings section selected after keystroke', dispatched[1], 'nudge')
@@ -447,7 +448,7 @@ function includes(label, haystack, needle) {
   const overlay = booted.registrations.find((item) => item.entry.name === 'shell.overlay')
   const tree = () => overlay.Component()
   check('settings gear still rendered', Boolean(findByProp(tree(), 'aria-label', '打开设置')), true)
-  check('no shell route reports false', booted.runtime.openSettings(), false)
+  check('no shell route reports false', await booted.runtime.openSettings(), false)
   check('no shell route opens the in-window form', booted.runtime.getSnapshot().settingsOpen, true)
   check('the window renders the settings panel', Boolean(findByClass(tree(), 'dsh-nudge-settings-panel')), true)
   // The form is a component element, so the walker sees it, not its insides;
@@ -471,7 +472,7 @@ function includes(label, haystack, needle) {
     querySelector: () => null,
     querySelectorAll: () => [],
   }
-  check('command route is accepted', booted.runtime.openSettings(), true)
+  check('command route is accepted', await booted.runtime.openSettings(), true)
   check('no panel yet, nothing shown', booted.runtime.getSnapshot().settingsOpen, false)
   await sleep(1500)
   check('a shell that never paints the panel falls back to the window', booted.runtime.getSnapshot().settingsOpen, true)
@@ -507,7 +508,7 @@ function includes(label, haystack, needle) {
     querySelectorAll: (selector) =>
       selector === 'button[aria-haspopup="dialog"]' ? [trigger] : [],
   }
-  check('a labelled trigger without aria-keyshortcuts is still found', booted.runtime.openSettings(), true)
+  check('a labelled trigger without aria-keyshortcuts is still found', await booted.runtime.openSettings(), true)
   check('that trigger is clicked', calls[0], 'trigger')
   check('the section is selected after it opens the panel', calls[1], 'nudge')
   check('the in-window form stays closed', booted.runtime.getSnapshot().settingsOpen, false)
@@ -531,7 +532,7 @@ function includes(label, haystack, needle) {
     querySelectorAll: (selector) =>
       selector === 'button[aria-haspopup="dialog"]' ? [usage] : [],
   }
-  check('an unrelated dialog button is not clicked', booted.runtime.openSettings(), false)
+  check('an unrelated dialog button is not clicked', await booted.runtime.openSettings(), false)
   check('no popup is opened on the way', calls.length, 0)
 }
 
@@ -564,12 +565,39 @@ function includes(label, haystack, needle) {
       return null
     },
   }
-  check('a silent settings command is not trusted', booted.runtime.openSettings(), true)
+  check('a silent settings command is not trusted', await booted.runtime.openSettings(), true)
   check('nothing is shown while the command is being verified', booted.runtime.getSnapshot().settingsOpen, false)
   await sleep(900)
   check('the next route clicks the settings trigger', calls[0], 'trigger')
   check('the section is selected from that panel', calls[1], 'nudge')
   check('the in-window form stays closed', booted.runtime.getSnapshot().settingsOpen, false)
+}
+
+// The jump driver is a package-local chunk, not part of the main bundle: the
+// gear must still have an outcome when that file is missing from an install.
+{
+  const booted = await boot({})
+  check('the jump driver ships as a chunk', source.includes(".async('./client.settings-jump.js')"), true)
+  check('the main bundle carries no inlined driver', source.includes('function createSettingsJump'), false)
+}
+
+{
+  // The loader only registers a chunk whose file names itself under the package
+  // id and whose name matches `client.<name>.js`.
+  const chunk = await readFile(new URL('../client.settings-jump.js', import.meta.url), 'utf8')
+  check(
+    'the chunk registers itself under the package id',
+    /__ModuleLoader__\.load\(\{\s*id: 'dsh-nudge',\s*chunk: 'client\.settings-jump\.js'/.test(chunk),
+    true,
+  )
+  check('the chunk exports the driver factory', chunk.includes('exports.createSettingsJump = createSettingsJump'), true)
+}
+
+{
+  const booted = await boot({ chunks: false })
+  booted.sandbox.document = { querySelector: () => null, querySelectorAll: () => [] }
+  check('a missing jump chunk reports failure', await booted.runtime.openSettings(), false)
+  check('a missing jump chunk still opens the form', booted.runtime.getSnapshot().settingsOpen, true)
 }
 
 // The gear button itself must reach the form, not only the runtime call.
@@ -582,6 +610,8 @@ function includes(label, haystack, needle) {
   const overlay = booted.registrations.find((item) => item.entry.name === 'shell.overlay')
   const gear = findByProp(overlay.Component(), 'aria-label', '打开设置')
   gear.props.onClick()
+  // The jump driver is a package-local chunk: the press resolves after it loads.
+  await tick()
   check('the gear opens the in-window form', booted.runtime.getSnapshot().settingsOpen, true)
   const gearAgain = findByProp(overlay.Component(), 'aria-label', '打开设置')
   gearAgain.props.onClick()
