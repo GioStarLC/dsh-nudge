@@ -40,22 +40,31 @@ npm run changelog        # 预览未发布窗口
 npm run changelog:write  # 重新生成 CHANGELOG.md（生成物，不手改）
 npm run hooks:install    # 启用 .githooks/pre-commit
 
-# 重建代码图（仅在 graphify_status 报 STALE 时需要；纯本地、秒级、不花 token）
+# 更新代码图（本会话改过代码后、或 graphify_status 报 STALE 时；纯本地、秒级、不花 token）
 uv run --with "graphifyy[mcp]==0.9.57" graphify update .
 ```
 
 `check` 是本项目的"单测"，不是构建：不编译、不下载、不装 `node_modules`。可以直接跑，不受全局「构建约束」限制。`test` 脚本不存在，也不要新增。
 
+## graphify
+
+项目根有 `graphify-out/`，但它是 gitignored——新 clone 或换机器时不存在，先按上面「命令」建图，别默默退回归 grep。
+
+- **回答架构或代码库问题前，先读 `graphify-out/GRAPH_REPORT.md`**（约 130 行：枢纽节点、17 个社区的成员清单）。比一次 `query_graph` 便宜，也基本就是本仓库缺的那张模块地图。
+- **存在 `graphify-out/wiki/index.md` 时先看它**，但结论仍回源码确认（本仓库当前没有 wiki）。
+- **本会话改过代码后，跑一次** `uv run --with "graphifyy[mcp]==0.9.57" graphify update .`（AST-only，不花 API）；`graphify` 本身不在 PATH 上，别直接敲 `graphify update`。
+- **报告会落后于图。** `update` 只重写 `graph.json`，不重画 `GRAPH_REPORT.md`；要新的社区结构就补一次 `graphify cluster-only`。行号与边以 `graph.json` 为准。
+
 ## 查代码：grep 定位符号，graphify 看结构
 
 `client.js` 是一个 5,300 行的单文件，grep 能定位符号，但答不出"这块功能散在哪、改这里会波及谁"。这类问题用图（`graphify_*`），逐符号定位用 grep。
 
-- **什么时候上图。** "某功能散在哪些函数/模块""谁调用 X、X 又调了谁""改这里波及谁""两条链路怎么串起来"→ `query_graph`（BFS 铺面、DFS 追线）、`god_nodes`、`get_neighbors`、`shortest_path`。只找定义、精确字符串、改文案、单点符号 → `grep`/读源码，一次就中，别绕路。
-- **调用一律带 `project_path`**（仓库根绝对路径）。不传时用的是 MCP 启动时缓存的 project root，曾因 `.graphify_root` 被解析成 `graphify-out/` 而让所有查询报 `graphify-out/graphify-out/graph.json`；`npm run check:graph` 守的就是这个不变量。
+- **什么时候上图。** "某功能散在哪些函数/模块""谁调用 X、X 又调了谁""改这里波及谁""两条链路怎么串起来"→ 先读 `GRAPH_REPORT.md`（见上），要精确边和行号再 `query_graph`（BFS 铺面、DFS 追线）、`god_nodes`、`get_neighbors`、`shortest_path`。只找定义、精确字符串、改文案、单点符号 → `grep`/读源码，一次就中，别绕路。**别用仓库级宽 grep 开场**（`"批注|annotation"` 一把梭）；查询词用代码里的词，不是界面的中文词。
+- **调用一律带 `project_path`**（仓库根绝对路径）。不传时用的是 MCP 启动时缓存的 project root；`npm run check:graph` 守的就是这个不变量。
 - **`HEALTHY` 不等于查得动。** `graphify_status` 报绿只说明 graph.json 在、不新，它不做真实查询。查询报错先补 `project_path` 重试一次；仍失败再说明图不可用，别默默退回归 grep。
-- **过期图不算证据。** `graphify_status` 报 `STALE` 就先重建（命令见上），`MISSING` 就先建图。拿着过期图写下"这个函数不存在"式的判断，比不查图更糟。工作区本来就脏时，"Working tree changed" 是常态；跑一次 `/graphify update` 让插件记下索引元数据后不再误报。
+- **过期图不算证据。** 报 `STALE` 就先重建（命令见「命令」）；拿着过期图写下"这个函数不存在"式的判断，比不查图更糟。工作区本来就脏时，"Working tree changed" 是常态。
 - **INFERRED 边是推测。** 图里约 13% 的边是推断出来的（例如 `createRuntime()` → `syncComposerFocus` 的 `indirect_call`，实际是 `addEventListener` 的参数）。把它当线索，不当结论；写进汇报前用 `get_neighbors` 加读源码确认。
-- **导航靠 god nodes 与邻居，不靠社区。** 社区只有 `Community 0..15` 编号、没有语义名，`get_community` 的收益低。真正常用的入口是 `createRuntime()`、`factory()`、`setState()`、`makeView()`、`makeSettingsView()` 这些 hub 节点及其邻居。
+- **社区有名字，导航仍靠枢纽。** 社区按枢纽节点命名（`Community 4 — createRuntime`，94 个节点带文件标签），`get_community` 可用；常用入口还是 `createRuntime()`、`factory()`、`setState()`、`makeView()`、`makeSettingsView()` 这些 hub 节点及其邻居。
 - **图与源码冲突，以源码为准**，并在结论里注明引用了哪个节点，方便别人复核。
 
 ## 约定
