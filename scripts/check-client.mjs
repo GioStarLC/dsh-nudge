@@ -364,6 +364,29 @@ function expandTree(node) {
 }
 
 {
+  const booted = await boot({})
+  const copied = []
+  booted.sandbox.navigator.clipboard = { writeText: (value) => (copied.push(value), Promise.resolve()) }
+  const result = await booted.runtime.exportPresets()
+  check('bulk export accepted', result.ok, true)
+  check('bulk export counts every entry', result.count, 3)
+  check('bulk export copies once', copied.length, 1)
+  const blocks = String(copied[0]).split('\n\n\n\n')
+  check('bulk export writes one block per entry', blocks.length, 3)
+  check('a block starts with the name', blocks[0].split('\n')[0], '简述')
+  check('the remaining lines stay the body', blocks[0].split('\n').slice(1).join('\n'), '简述一下：目标、已完成、下一步、是否需要我。')
+  check('the export is import-ready', booted.runtime.importPresets(copied[0]).added, 0)
+
+  booted.runtime.addPreset('', '单行条目')
+  copied.length = 0
+  await booted.runtime.exportPresets()
+  check('a name-only entry exports as one line', String(copied[0]).split('\n\n\n\n').at(-1), '单行条目')
+
+  delete booted.sandbox.navigator.clipboard
+  check('a missing clipboard reports a failure', (await booted.runtime.exportPresets()).ok, false)
+}
+
+{
   // An empty list reads back empty: the built-ins are not resurrected.
   const seeded = storageStub()
   seeded.setItem('dsh-nudge:presets', '[]')
@@ -373,6 +396,11 @@ function expandTree(node) {
   const tree = expandTree(settings())
   check('the empty state is reachable', (findAllByClass(tree, 'dsh-nudge-preset-empty') ?? []).length, 1)
   check('the add form is still offered from empty', (findAllByClass(tree, 'dsh-nudge-preset-add') ?? []).length, 1)
+  const exportButton = (findAllByClass(tree, 'dsh-nudge-btn') ?? []).find(
+    (node) => node.children?.[0] === '批量导出',
+  )
+  check('bulk export sits beside bulk import', exportButton !== undefined, true)
+  check('bulk export is disabled while empty', exportButton?.props?.disabled, true)
 }
 
 // --- settings view edits through the same store ------------------------
@@ -1432,7 +1460,7 @@ const durable = (type, seq, data) => ({ type: 'event', event: { type, seq, time:
     3,
   )
   const toolbar = findAllByClass(tree, 'dsh-nudge-preset-toolbar')[0]
-  check('settings: the toolbar carries expand, collapse and import', (findAllByClass(toolbar, 'dsh-nudge-btn') ?? []).length, 3)
+  check('settings: the toolbar carries expand, collapse, import and export', (findAllByClass(toolbar, 'dsh-nudge-btn') ?? []).length, 4)
   check('settings: delivery group rendered', (findAllByClass(tree, 'dsh-nudge-settings-group') ?? []).length, 1)
   check('settings: delivery offers both modes', (findAllByClass(tree, 'dsh-nudge-chip') ?? []).length, 2)
 

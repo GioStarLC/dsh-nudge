@@ -253,6 +253,11 @@ window.__ModuleLoader__.load({
       importAdded: '已导入 {n} 条',
       importSkipped: '跳过 {n} 条（重复内容）',
       importEmpty: '没有识别出可导入的内容。',
+      exportPresets: '批量导出',
+      exportHint: '把全部条目按「批量导入」的格式复制到剪贴板，停用的条目也会导出。',
+      exportDone: '已复制 {n} 条到剪贴板',
+      exportFailed: '复制失败，请检查浏览器的剪贴板权限。',
+      exportEmpty: '还没有可导出的条目。',
       tipsTitle: '状态行文案',
       tipsHint: '空闲时这行轮换显示下面的文案；切换开关的提示会停 5 秒，再继续轮换。',
       tipsEmpty: '还没有文案。',
@@ -382,6 +387,11 @@ window.__ModuleLoader__.load({
       importAdded: 'Imported {n}',
       importSkipped: 'skipped {n} (duplicate text)',
       importEmpty: 'Nothing to import was found.',
+      exportPresets: 'Export',
+      exportHint: 'Copy every entry to the clipboard in the import format; disabled entries are included.',
+      exportDone: 'Copied {n} to the clipboard',
+      exportFailed: 'Copy failed; check the browser clipboard permission.',
+      exportEmpty: 'There is nothing to export yet.',
       tipsTitle: 'Status lines',
       tipsHint: 'While idle this row rotates the lines below; a switch message holds here for 5 seconds, then the rotation resumes.',
       tipsEmpty: 'No lines yet.',
@@ -2725,6 +2735,34 @@ window.__ModuleLoader__.load({
         return { ok: true, added, skipped }
       }
 
+      /**
+       * Copy every configured preset to the clipboard in the same block format
+       * `importPresets` reads, so an export can be pasted back. Disabled
+       * presets are included: they are configured, just not shown in the
+       * window. The clipboard is async, so the outcome resolves.
+       */
+      function exportPresets() {
+        const count = state.presets.length
+        if (count === 0) return Promise.resolve({ ok: false, count, error: text('exportEmpty') })
+        const value = state.presets
+          .map((preset) =>
+            preset.label === preset.text ? preset.label : `${preset.label}\n${preset.text}`,
+          )
+          .join('\n\n\n\n')
+        try {
+          const clipboard = navigator.clipboard
+          if (typeof clipboard?.writeText !== 'function') {
+            return Promise.resolve({ ok: false, count, error: text('exportFailed') })
+          }
+          return Promise.resolve(clipboard.writeText(value)).then(
+            () => ({ ok: true, count }),
+            () => ({ ok: false, count, error: text('exportFailed') }),
+          )
+        } catch {
+          return Promise.resolve({ ok: false, count, error: text('exportFailed') })
+        }
+      }
+
       /** Restore the built-in presets (and forget the settings storage). */
       function resetPresets() {
         try {
@@ -3256,6 +3294,7 @@ window.__ModuleLoader__.load({
         setNudgeDraftText,
         saveNudgeDraft,
         importPresets,
+        exportPresets,
         setCollapsed,
         moveTo,
         saveUi,
@@ -4965,6 +5004,7 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
         const [draftTip, setDraftTip] = React.useState('')
         const [importOpen, setImportOpen] = React.useState(false)
         const [draftImport, setDraftImport] = React.useState('')
+        const [copyNote, setCopyNote] = React.useState('')
         const t = runtime.text
         const delivery = runtime.effectiveDelivery()
 
@@ -5018,6 +5058,19 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
           setNote(parts.join('，'))
           setDraftImport('')
           return true
+        }
+
+        /** Copy every configured prompt and report the outcome in place. */
+        function exportLines() {
+          Promise.resolve(runtime.exportPresets()).then((result) => {
+            if (result?.ok !== true) {
+              setError(result?.error ?? t('exportFailed'))
+              setCopyNote('')
+              return
+            }
+            setError('')
+            setCopyNote(fill(t('exportDone'), result.count))
+          })
         }
 
         /** A pasted list is split right away: no extra click needed. */
@@ -5121,7 +5174,21 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
               },
               t('importPresets'),
             ),
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'dsh-nudge-btn',
+                title: t('exportHint'),
+                disabled: state.presets.length === 0,
+                onClick: exportLines,
+              },
+              t('exportPresets'),
+            ),
           ),
+          copyNote.length > 0
+            ? h('div', { key: 'preset-copy-note', className: 'dsh-nudge-settings-note' }, copyNote)
+            : null,
           state.presets.length === 0
             ? h('div', { className: 'dsh-nudge-preset-empty' }, t('presetsEmpty'))
             : null,
