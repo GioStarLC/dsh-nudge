@@ -98,6 +98,10 @@ window.__ModuleLoader__.load({
      * list of strings; one is shown at a time and the list rotates.
      */
     const TIPS_KEY = 'dsh-nudge:tips'
+    /** Per-day usage counters; local dates, most recent days only. */
+    const STATS_KEY = 'dsh-nudge:stats'
+    /** How many local days the counters keep before the oldest are dropped. */
+    const STATS_DAYS = 60
     /** Upper bound on those lines, so the settings section stays scrollable. */
     const MAX_TIPS = 20
     /** Built-in idle lines; the settings section can edit, add and reset them. */
@@ -271,6 +275,17 @@ window.__ModuleLoader__.load({
       tipLimit: '最多 20 句，先删一句再新增。',
       tipTextRequired: '文案不能为空。',
       tipLast: '至少保留一句。',
+      statsTitle: '使用统计',
+      statsHint: '按本机日期记录每天发送、写入输入框和新增批注的次数；只保存在本地。',
+      statsToday: '今天',
+      statsSend: '发送',
+      statsInsert: '写入输入框',
+      statsAnnotation: '批注',
+      statsEmpty: '今天还没有使用记录。',
+      statsRecent: '近 15 天',
+      statsDate: '日期',
+      statsInsertShort: '写入',
+      statsTotal: '合计',
       settingsTitle: '状态询问',
       settingsHead: '设置',
       back: '返回',
@@ -405,6 +420,17 @@ window.__ModuleLoader__.load({
       tipLimit: 'At most 20 lines; delete one first.',
       tipTextRequired: 'The line cannot be empty.',
       tipLast: 'Keep at least one line.',
+      statsTitle: 'Usage',
+      statsHint: 'Counts sends, composer writes and new notes per local day; kept on this machine only.',
+      statsToday: 'Today',
+      statsSend: 'Sent',
+      statsInsert: 'Written',
+      statsAnnotation: 'Notes',
+      statsEmpty: 'No usage recorded today.',
+      statsRecent: 'Last 15 days',
+      statsDate: 'Date',
+      statsInsertShort: 'Written',
+      statsTotal: 'Total',
       settingsTitle: 'Status Nudge',
       settingsHead: 'Settings',
       back: 'Back',
@@ -656,6 +682,8 @@ window.__ModuleLoader__.load({
       if (presets !== undefined) snapshot.presets = presets
       const tips = readJson(TIPS_KEY)
       if (Array.isArray(tips)) snapshot.tips = tips
+      const stats = readJson(STATS_KEY)
+      if (stats !== undefined) snapshot.stats = stats
       const notes = readJson(NOTES_KEY)
       if (notes !== undefined) snapshot.notes = notes
       return snapshot
@@ -688,6 +716,9 @@ window.__ModuleLoader__.load({
         if (typeof value.preset === 'string' && value.preset !== '') store.setItem(PRESET_KEY, value.preset)
         if (Array.isArray(value.presets)) store.setItem(PRESETS_KEY, JSON.stringify(value.presets))
         if (Array.isArray(value.tips)) store.setItem(TIPS_KEY, JSON.stringify(value.tips))
+        if (value.stats !== null && typeof value.stats === 'object' && !Array.isArray(value.stats)) {
+          store.setItem(STATS_KEY, JSON.stringify(value.stats))
+        }
         if (value.notes !== null && typeof value.notes === 'object' && !Array.isArray(value.notes)) {
           store.setItem(NOTES_KEY, JSON.stringify(value.notes))
         }
@@ -961,6 +992,59 @@ window.__ModuleLoader__.load({
     /** Persist the idle lines. */
     function writeTips(tips) {
       writeJson(TIPS_KEY, tips)
+    }
+
+    /** Local calendar day, the bucket the counters roll over on. */
+    function dayKey(date = new Date()) {
+      const month = String(date.getMonth() + 1).padStart(2, '0')
+      const day = String(date.getDate()).padStart(2, '0')
+      return `${date.getFullYear()}-${month}-${day}`
+    }
+
+    /** Local date keys for the newest `count` days, oldest first. */
+    function recentDayKeys(count, now = new Date()) {
+      const keys = []
+      for (let offset = count - 1; offset >= 0; offset -= 1) {
+        keys.push(dayKey(new Date(now.getFullYear(), now.getMonth(), now.getDate() - offset)))
+      }
+      return keys
+    }
+
+    /** The counters this build owns; anything else is dropped. */
+    const STAT_FIELDS = ['send', 'insert', 'annotation']
+
+    /**
+     * Normalize a stored counter record: `{ days: { 'YYYY-MM-DD': { send, insert,
+     * annotation } } }`. Unknown fields, malformed rows and days outside the
+     * local-date shape are dropped, and only the newest days are kept.
+     */
+    function normalizeStats(value) {
+      const days = {}
+      const source = value !== null && typeof value === 'object' ? value.days : undefined
+      if (source === null || typeof source !== 'object' || Array.isArray(source)) return { days }
+      let keys = Object.keys(source).filter((key) => /^\d{4}-\d{2}-\d{2}$/.test(key))
+      keys = keys.sort().slice(-STATS_DAYS)
+      for (const key of keys) {
+        const raw = source[key]
+        if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) continue
+        const entry = {}
+        for (const field of STAT_FIELDS) {
+          const count = raw[field]
+          if (Number.isInteger(count) && count > 0) entry[field] = count
+        }
+        if (Object.keys(entry).length > 0) days[key] = entry
+      }
+      return { days }
+    }
+
+    /** Read the daily counters; an absent or malformed record reads as empty. */
+    function readStats() {
+      return normalizeStats(readJson(STATS_KEY))
+    }
+
+    /** Persist the daily counters. */
+    function writeStats(stats) {
+      writeJson(STATS_KEY, stats)
     }
 
     /** Every stored annotation set, keyed by Session id. */
@@ -1243,6 +1327,8 @@ window.__ModuleLoader__.load({
         /** Idle lines for the status row, and which one is showing. */
         tips: readTips(language),
         tipIndex: 0,
+        /** Per-day usage counters for the settings summary. */
+        stats: readStats(),
         /** The idle line opened in its editor, or null. */
         tipEditingIndex: null,
         /** Collected quote + note blocks waiting to be delivered. */
@@ -1618,6 +1704,7 @@ window.__ModuleLoader__.load({
           return false
         }
         setState({ note: '', error: '' })
+        countStat('insert')
         return true
       }
 
@@ -1930,6 +2017,7 @@ window.__ModuleLoader__.load({
           annotationExpanded: true,
         })
         repaintHighlights()
+        countStat('annotation')
         return true
       }
 
@@ -2494,7 +2582,9 @@ window.__ModuleLoader__.load({
         if (canInsert()) return insertPreset()
         const preset = activePreset()
         if (!preset) return false
-        return deliver(preset.text)
+        const delivered = deliver(preset.text)
+        if (delivered) countStat('send')
+        return delivered
       }
 
       /** Switch the delivery mode for this browser and remember it. */
@@ -3024,10 +3114,29 @@ window.__ModuleLoader__.load({
           autoPaste: readAutoPaste(),
           tips: readTips(state.lang),
           tipIndex: 0,
+          stats: readStats(),
           annotations: notesOfSession(state.target?.sessionId),
           collapsed,
           pos: isPoint(saved.pos) ? clampPoint(saved.pos, collapsed) : dockPosition(collapsed),
         })
+      }
+
+      /**
+       * Bump one of today's counters. The local calendar day is the bucket:
+       * a click after midnight starts a fresh row, and the store keeps the
+       * newest `STATS_DAYS` rows only.
+       */
+      function countStat(field) {
+        if (!STAT_FIELDS.includes(field)) return false
+        const key = dayKey()
+        const days = { ...state.stats.days }
+        const today = { ...(days[key] ?? {}) }
+        today[field] = (today[field] ?? 0) + 1
+        days[key] = today
+        const next = normalizeStats({ days })
+        writeStats(next)
+        setState({ stats: next })
+        return true
       }
 
       // --- settings navigation --------------------------------------------
@@ -3535,6 +3644,19 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
 /* Preset rows are a table of contents: one name per line, bodies on demand. */
 .dsh-nudge-preset-row:has(> .dsh-nudge-preset-summary){gap:4px;padding:6px 8px}
 .dsh-nudge-preset-toolbar{display:flex;align-items:center;flex-wrap:wrap;gap:8px}
+.dsh-nudge-stats{display:flex;gap:8px}
+.dsh-nudge-stats-head{display:flex;align-items:center;gap:8px}
+.dsh-nudge-stats-today{margin-left:auto;font-size:11px;line-height:1.4;color:var(--dsw-alias-label-secondary,#8a8a8a)}
+.dsh-nudge-stat{flex:1 1 0;min-width:0;display:flex;flex-direction:column;gap:2px;padding:9px 12px;border:1px solid var(--dn-line);border-radius:12px;background:color-mix(in srgb,var(--dsw-alias-label-primary,#1a1a1a) 3%,transparent)}
+.dsh-nudge-stat-value{font-size:20px;line-height:1.25;font-weight:600;font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-primary,#1a1a1a)}
+.dsh-nudge-stat-label{font-size:11px;line-height:1.4;color:var(--dsw-alias-label-secondary,#8a8a8a)}
+.dsh-nudge-stats-subhead{margin-top:2px;font-size:11px;line-height:1.4;color:var(--dsw-alias-label-secondary,#8a8a8a)}
+.dsh-nudge-stats-table{display:flex;flex-direction:column;gap:1px;font-size:12px;font-variant-numeric:tabular-nums}
+.dsh-nudge-stats-line{display:grid;grid-template-columns:minmax(0,1fr) 42px 42px 42px;align-items:center;gap:6px;min-height:22px;padding:2px 4px;border-radius:6px}
+.dsh-nudge-stats-line.head{min-height:18px;color:var(--dsw-alias-label-secondary,#8a8a8a);font-size:11px}
+.dsh-nudge-stats-line.today{background:var(--dn-accent-soft);color:var(--dn-accent)}
+.dsh-nudge-stats-line.total{margin-top:3px;padding-top:6px;border-top:1px solid var(--dn-line);font-weight:600}
+.dsh-nudge-stats-num{text-align:right}
 .dsh-nudge-preset-count{margin-right:auto;font-size:11px;color:var(--dsw-alias-label-secondary,#8a8a8a);font-variant-numeric:tabular-nums}
 .dsh-nudge-preset-summary{display:flex;align-items:center;gap:6px;min-width:0}
 .dsh-nudge-preset-grip{cursor:grab;padding:2px;border-radius:6px;color:var(--dsw-alias-label-secondary,#8a8a8a);font-size:13px;line-height:1;user-select:none}
@@ -3577,7 +3699,7 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
 .dsh-nudge-btn.icon{width:30px;padding:0;font-size:13px;line-height:1}
 .dsh-nudge-btn:disabled{opacity:.4;cursor:default}
 .dsh-nudge-btn:disabled:hover{background:transparent}
-.dsh-nudge-settings-group{display:flex;flex-direction:column;gap:7px;padding:12px;border-radius:12px;border:1px solid var(--dn-line);background:color-mix(in srgb,var(--dsw-alias-label-primary,#1a1a1a) 3%,transparent)}
+.dsh-nudge-settings-group,.dsh-nudge-stats-group{display:flex;flex-direction:column;gap:7px;padding:12px;border-radius:12px;border:1px solid var(--dn-line);background:color-mix(in srgb,var(--dsw-alias-label-primary,#1a1a1a) 3%,transparent)}
 .dsh-nudge-settings-error{color:var(--dsw-alias-state-error-primary,#c8433c);font-size:12px;line-height:1.5}
 `.trim()
 
@@ -5041,6 +5163,19 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
         const [copyNote, setCopyNote] = React.useState('')
         const t = runtime.text
         const delivery = runtime.effectiveDelivery()
+        const today = dayKey()
+        const statsDays = state.stats?.days ?? {}
+        const recentKeys = recentDayKeys(15)
+        const recentRows = [...recentKeys].reverse()
+        const recentTotals = { send: 0, insert: 0, annotation: 0 }
+        for (const key of recentKeys) {
+          for (const field of STAT_FIELDS) recentTotals[field] += statsDays[key]?.[field] ?? 0
+        }
+        const statLabels = {
+          send: t('statsSend'),
+          insert: t('statsInsertShort'),
+          annotation: t('statsAnnotation'),
+        }
 
         /** Fill `{n}` in a message template. */
         function fill(template, count) {
@@ -5169,6 +5304,71 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
                   onClick: () => runtime.setDelivery('followup'),
                 },
                 t('queue'),
+              ),
+            ),
+          ),
+          h(
+            'div',
+            { key: 'stats', className: 'dsh-nudge-stats-group' },
+            h(
+              'div',
+              { className: 'dsh-nudge-stats-head' },
+              h('span', { className: 'dsh-nudge-toggle-title' }, t('statsTitle')),
+              h('span', { className: 'dsh-nudge-stats-today' }, t('statsToday')),
+            ),
+            h('span', { className: 'dsh-nudge-toggle-desc' }, t('statsHint')),
+            h(
+              'div',
+              { className: 'dsh-nudge-stats' },
+              ...STAT_FIELDS.map((field) =>
+                h(
+                  'div',
+                  { key: field, className: 'dsh-nudge-stat' },
+                  h('span', { className: 'dsh-nudge-stat-value' }, String(statsDays[today]?.[field] ?? 0)),
+                  h('span', { className: 'dsh-nudge-stat-label' }, t(`stats${field[0].toUpperCase()}${field.slice(1)}`)),
+                ),
+              ),
+            ),
+            statsDays[today] === undefined
+              ? h('div', { className: 'dsh-nudge-settings-hint' }, t('statsEmpty'))
+              : null,
+            h('div', { className: 'dsh-nudge-stats-subhead' }, t('statsRecent')),
+            h(
+              'div',
+              { className: 'dsh-nudge-stats-table' },
+              h(
+                'div',
+                { className: 'dsh-nudge-stats-line head' },
+                h('span', null, t('statsDate')),
+                ...STAT_FIELDS.map((field) =>
+                  h('span', { key: field, className: 'dsh-nudge-stats-num' }, statLabels[field]),
+                ),
+              ),
+              ...recentRows.map((key) =>
+                h(
+                  'div',
+                  { key, className: `dsh-nudge-stats-line${key === today ? ' today' : ''}` },
+                  h('span', null, key === today ? t('statsToday') : key.slice(5)),
+                  ...STAT_FIELDS.map((field) =>
+                    h(
+                      'span',
+                      { key: field, className: 'dsh-nudge-stats-num' },
+                      String(statsDays[key]?.[field] ?? 0),
+                    ),
+                  ),
+                ),
+              ),
+              h(
+                'div',
+                { className: 'dsh-nudge-stats-line total' },
+                h('span', null, t('statsTotal')),
+                ...STAT_FIELDS.map((field) =>
+                  h(
+                    'span',
+                    { key: field, className: 'dsh-nudge-stats-num' },
+                    String(recentTotals[field]),
+                  ),
+                ),
               ),
             ),
           ),

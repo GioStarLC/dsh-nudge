@@ -161,6 +161,13 @@ const written = await call(
         presets: [{ id: 'custom-1', label: '我的口径', text: '写一份进展' }],
         tips: ['第一句', '  ', '第二句'],
         notes: { s1: [{ id: 'n1', quote: '原文' }] },
+        stats: {
+          days: {
+            '2026-01-02': { send: 2, insert: 1, bogus: 5 },
+            'not-a-day': { send: 9 },
+            '2026-01-01': { annotation: -1 },
+          },
+        },
         // Not ours, must never reach the file.
         token: 'secret',
       },
@@ -172,6 +179,10 @@ check('write: ok', written.json?.ok, true)
 check('write: unknown key dropped', 'token' in (written.json?.store ?? {}), false)
 check('write: preset text kept', written.json?.store?.presets?.[0]?.text, '写一份进展')
 check('write: tips kept', written.json?.store?.tips?.length, 2)
+check('write: stats kept', written.json?.store?.stats?.days?.['2026-01-02']?.send, 2)
+check('write: stats unknown field dropped', 'bogus' in (written.json?.store?.stats?.days?.['2026-01-02'] ?? {}), false)
+check('write: stats malformed day dropped', 'not-a-day' in (written.json?.store?.stats?.days ?? {}), false)
+check('write: stats negative count drops the day', '2026-01-01' in (written.json?.store?.stats?.days ?? {}), false)
 check('write: blank tip dropped', written.json?.store?.tips?.[0], '第一句')
 check('write: savedAt stamped', typeof written.json?.store?.savedAt, 'string')
 
@@ -185,6 +196,19 @@ const reloaded = await call(makeReq())
 check('read: record round-trips', reloaded.json?.store?.delivery, 'queue')
 check('read: presets round-trip', reloaded.json?.store?.presets?.length, 1)
 check('read: notes round-trip', reloaded.json?.store?.notes?.s1?.[0]?.id, 'n1')
+check('read: stats round-trip', reloaded.json?.store?.stats?.days?.['2026-01-02']?.insert, 1)
+
+// The counter record keeps the newest local days only.
+const manyDays = {}
+for (let index = 0; index < 70; index += 1) {
+  const date = new Date(2026, 0, 1 + index)
+  const key = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
+  manyDays[key] = { send: 1 }
+}
+const capped = await call(makeReq({ method: 'POST', body: { store: { stats: { days: manyDays } } } }))
+check('write: stats keeps 60 days', Object.keys(capped.json?.store?.stats?.days ?? {}).length, 60)
+check('write: stats keeps the newest day', '2026-03-11' in (capped.json?.store?.stats?.days ?? {}), true)
+check('write: stats drops the oldest day', '2026-01-01' in (capped.json?.store?.stats?.days ?? {}), false)
 check('read: no-store cache header', reloaded.json !== undefined, true)
 
 // A malformed payload is refused, and the previous record survives.

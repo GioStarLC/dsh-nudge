@@ -35,8 +35,21 @@ function includes(label, haystack, needle) {
   if (!ok) failures += 1
   console.log(`${ok ? 'ok  ' : 'FAIL'}  ${label}: ${JSON.stringify(haystack)}${ok ? '' : ` (expected to include ${JSON.stringify(needle)})`}`)
 }
-/** Collect every rendered element with the given tag (`input`, `textarea`, ...). */
-function findAllByTag(node, tag, out = []) {
+/** The local calendar day the client buckets its counters into. */
+function localDayKey(date) {
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${date.getFullYear()}-${month}-${day}`
+}
+function todayKey() {
+  return localDayKey(new Date())
+}
+/** A local day key `offset` days from today. */
+function dayKeyOffset(offset) {
+  const now = new Date()
+  return localDayKey(new Date(now.getFullYear(), now.getMonth(), now.getDate() + offset))
+}
+/** Collect every rendered element with the given tag (`input`, `textarea`, ...). */function findAllByTag(node, tag, out = []) {
   if (!node || typeof node !== 'object') return out
   if (node.type === tag) out.push(node)
   for (const child of node.children ?? []) findAllByTag(child, tag, out)
@@ -111,6 +124,129 @@ function expandTree(node) {
   await sleep(1400)
   check('running then idle: answered', booted.runtime.getSnapshot().phase, 'done')
   check('answered: timestamp recorded', typeof booted.runtime.getSnapshot().lastAt, 'number')
+}
+
+// --- usage counters: per local day, no estimates -----------------------
+
+{
+  const booted = await boot({})
+  booted.sessionsList.set({ ids: ['A'], byId: { A: { title: '统计会话', retainedBy: { mainView: 1 } } } })
+  await tick()
+  check('stats: nothing before use', booted.runtime.getSnapshot().stats.days[todayKey()], undefined)
+  booted.runtime.ask()
+  await tick()
+  const written = JSON.parse(booted.localStorage.getItem('dsh-nudge:stats'))
+  check('stats: a send is counted', written.days[todayKey()].send, 1)
+  check('stats: the snapshot carries it', booted.runtime.getSnapshot().stats.days[todayKey()].send, 1)
+  check('stats: a send is not a write', written.days[todayKey()].insert, undefined)
+
+  // The settings section shows today's number under the matching label.
+  const Settings = booted.registrations.find((item) => item.entry.name === 'settings.section').Component
+  const tree = expandTree(Settings())
+  const values = (findAllByClass(tree, 'dsh-nudge-stat-value') ?? []).map((node) => node.children?.[0])
+  check('stats: settings show three counters', values.length, 3)
+  check('stats: settings show the send count', values[0], '1')
+  check('stats: settings leave untouched counters at zero', `${values[1]}|${values[2]}`, '0|0')
+  check('stats: the section is not empty', (findAllByClass(tree, 'dsh-nudge-stats') ?? []).length, 1)
+}
+
+{
+  const booted = await boot({})
+  const writes = []
+  booted.sandbox.document = composerFocus()
+  booted.runtime.attachComposer({ readDraft: () => '', setDraft: (value) => writes.push(value) })
+  booted.runtime.ask()
+  const written = JSON.parse(booted.localStorage.getItem('dsh-nudge:stats'))
+  check('stats: a composer write is counted', written.days[todayKey()].insert, 1)
+  check('stats: a composer write is not a send', written.days[todayKey()].send, undefined)
+  check('stats: the write happened', writes.length, 1)
+}
+
+{
+  const booted = await boot({})
+  booted.runtime.setQuick(true)
+  booted.sandbox.getSelection = selectionStub('统计这一句', { nodeType: 1, closest: () => null })
+  booted.runtime.captureSelection()
+  booted.runtime.addAnnotation()
+  const written = JSON.parse(booted.localStorage.getItem('dsh-nudge:stats'))
+  check('stats: a new note is counted', written.days[todayKey()].annotation, 1)
+  check('stats: a note is not a send', written.days[todayKey()].send, undefined)
+  booted.runtime.captureSelection()
+  booted.runtime.quickReply('agree')
+  const after = JSON.parse(booted.localStorage.getItem('dsh-nudge:stats'))
+  check('stats: the quick answer counts as a note too', after.days[todayKey()].annotation, 2)
+}
+
+{
+  // A malformed record is normalized on read, and the counters survive a
+  // Host restore (the loopback port changes, the numbers do not).
+  const seeded = storageStub()
+  seeded.setItem(
+    'dsh-nudge:stats',
+    JSON.stringify({
+      days: {
+        invalid: { send: 9 },
+        '2026-01-02': { send: 2, insert: -1, extra: 8 },
+        '2026-01-01': { annotation: 3 },
+      },
+    }),
+  )
+  const booted = await boot({ storage: seeded })
+  const stats = booted.runtime.getSnapshot().stats
+  check('stats: an invalid day key is dropped', stats.days.invalid, undefined)
+  check('stats: a valid count is kept', stats.days['2026-01-02'].send, 2)
+  check('stats: a negative count is dropped', stats.days['2026-01-02'].insert, undefined)
+  check('stats: an unknown field is dropped', stats.days['2026-01-02'].extra, undefined)
+  check('stats: another day is kept', stats.days['2026-01-01'].annotation, 3)
+
+  booted.runtime._debug.applySettingsStore({ stats: { days: { '2026-02-03': { insert: 4 } } } })
+  check(
+    'stats: a Host record is adopted',
+    JSON.parse(booted.localStorage.getItem('dsh-nudge:stats')).days['2026-02-03'].insert,
+    4,
+  )
+}
+
+// --- the 15-day table under today's counters ---------------------------
+
+{
+  const seeded = storageStub()
+  seeded.setItem(
+    'dsh-nudge:stats',
+    JSON.stringify({
+      days: {
+        [dayKeyOffset(0)]: { send: 2, annotation: 1 },
+        [dayKeyOffset(-1)]: { insert: 3 },
+        [dayKeyOffset(-14)]: { send: 1 },
+        [dayKeyOffset(-15)]: { send: 9 },
+      },
+    }),
+  )
+  const booted = await boot({ storage: seeded })
+  const Settings = booted.registrations.find((item) => item.entry.name === 'settings.section').Component
+  const tree = expandTree(Settings())
+  const lines = findAllByClass(tree, 'dsh-nudge-stats-line') ?? []
+  check('recent: one header row', (findAllByClass(tree, 'dsh-nudge-stats-line') ?? []).filter((node) => String(node.props.className).includes('head')).length, 1)
+  check('recent: header + 15 days + total', lines.length, 17)
+  check('recent: only today is highlighted', lines.filter((node) => String(node.props.className).includes('today')).length, 1)
+  const todayLine = lines[1]
+  check(
+    'recent: today row carries today\'s counts',
+    (findAllByClass(todayLine, 'dsh-nudge-stats-num') ?? []).map((node) => node.children?.[0]).join('|'),
+    '2|0|1',
+  )
+  const oldestLine = lines[lines.length - 2]
+  check(
+    'recent: the 15th day back is the oldest row',
+    (findAllByClass(oldestLine, 'dsh-nudge-stats-num') ?? []).map((node) => node.children?.[0]).join('|'),
+    '1|0|0',
+  )
+  const totalLine = lines[lines.length - 1]
+  check(
+    'recent: the total sums the window only',
+    (findAllByClass(totalLine, 'dsh-nudge-stats-num') ?? []).map((node) => node.children?.[0]).join('|'),
+    '3|3|1',
+  )
 }
 
 // --- 2.2 explicit queue mode --------------------------------------------

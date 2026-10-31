@@ -50,10 +50,16 @@ const STORE_VERSION = 1
 const BODY_LIMIT_BYTES = 256 * 1024
 
 /** Every key the browser half may persist; anything else is dropped. */
-const STORE_KEYS = ['ui', 'delivery', 'turbo', 'quick', 'autoPaste', 'preset', 'presets', 'tips', 'notes']
+const STORE_KEYS = ['ui', 'delivery', 'turbo', 'quick', 'autoPaste', 'preset', 'presets', 'tips', 'notes', 'stats']
 
 /** Cap on the idle lines a record may carry, in entries. */
 const MAX_STORE_TIPS = 50
+
+/** Cap on the daily counter rows a record may carry, in local dates. */
+const MAX_STORE_DAYS = 60
+
+/** The counters the browser half records; anything else is dropped. */
+const STAT_FIELDS = ['send', 'insert', 'annotation']
 
 /** The harness home, honouring a `DSH_HOME` override. */
 function dshHome() {
@@ -153,6 +159,24 @@ function pickStore(value) {
   }
   const notes = plainObjectOr(source.notes, undefined)
   if (notes !== undefined) store.notes = notes
+  const stats = plainObjectOr(source.stats, undefined)
+  if (stats !== undefined) {
+    const rawDays = plainObjectOr(stats.days, {})
+    const days = {}
+    let keys = Object.keys(rawDays).filter((key) => /^\d{4}-\d{2}-\d{2}$/.test(key))
+    keys = keys.sort().slice(-MAX_STORE_DAYS)
+    for (const key of keys) {
+      const row = plainObjectOr(rawDays[key], undefined)
+      if (row === undefined) continue
+      const counts = {}
+      for (const field of STAT_FIELDS) {
+        const count = row[field]
+        if (Number.isInteger(count) && count > 0) counts[field] = count
+      }
+      if (Object.keys(counts).length > 0) days[key] = counts
+    }
+    store.stats = { days }
+  }
   return store
 }
 
