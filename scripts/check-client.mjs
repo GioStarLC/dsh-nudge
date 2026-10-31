@@ -1050,6 +1050,35 @@ function selectionStub(text, element, rect) {
   check('annotation: window keeps no compose box', findByClass(tree, 'dsh-nudge-annotation-compose'), null)
 }
 
+{
+  // A document-wide mouseup can belong to a click elsewhere (a sidebar click
+  // that does not collapse the selection). That pointer must not drag the card
+  // away from the passage the card is about.
+  const booted = await boot({})
+  booted.runtime.setQuick(true)
+  const View = booted.registrations.find((item) => item.entry.name === 'shell.overlay').Component
+  const quoteRect = { left: 100, top: 300, right: 300, bottom: 320, width: 200, height: 20 }
+  booted.sandbox.getSelection = selectionStub('选中的一段话', { nodeType: 1, closest: () => null }, quoteRect)
+  check('annotation: a far pointer still captures', booted.runtime.captureSelection({ x: 900, y: 500 }), true)
+  let popup = findByClass(View(), 'dsh-nudge-popup')
+  check('annotation: a far click does not move the card', popup?.props?.style?.left, '30px')
+  check(
+    'annotation: a far click falls back to the quote box',
+    popup?.props?.style?.transform,
+    'translateY(-100%)',
+  )
+
+  // A pointer that ended the selection itself stays the anchor.
+  const near = await boot({})
+  near.runtime.setQuick(true)
+  near.sandbox.getSelection = selectionStub('选中的一段话', { nodeType: 1, closest: () => null }, quoteRect)
+  near.runtime.captureSelection({ x: 150, y: 310 })
+  const nearView = near.registrations.find((item) => item.entry.name === 'shell.overlay').Component
+  popup = findByClass(nearView(), 'dsh-nudge-popup')
+  check('annotation: the selection pointer stays the anchor', popup?.props?.style?.left, '162px')
+  check('annotation: the card sits below the pointer', popup?.props?.style?.top, '322px')
+}
+
 // --- turbo mode: no primary button, double-click runs a prompt ----------
 
 {

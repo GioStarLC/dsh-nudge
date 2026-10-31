@@ -1794,7 +1794,14 @@ window.__ModuleLoader__.load({
             anchor: null,
             range: selection.range,
             rect: rect
-              ? { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom }
+              ? {
+                  left: rect.left,
+                  top: rect.top,
+                  right: rect.right,
+                  bottom: rect.bottom,
+                  width: rect.width,
+                  height: rect.height,
+                }
               : null,
             pointer,
           },
@@ -2134,10 +2141,30 @@ window.__ModuleLoader__.load({
       }
 
       /**
+       * Whether a pointer that ended a selection is plausibly next to it.
+       *
+       * A `mouseup` is document-wide, so it can belong to a click that has
+       * nothing to do with the live selection (a sidebar click that does not
+       * collapse it, a drag that ends outside the transcript). Anchoring the
+       * card to such a pointer puts it wherever that click happened; the quote
+       * box is the only trustworthy anchor then.
+       */
+      function pointerNearRect(pointer, rect, slack = 24) {
+        if (!pointer || !rect) return false
+        return (
+          pointer.x >= rect.left - slack &&
+          pointer.x <= rect.right + slack &&
+          pointer.y >= rect.top - slack &&
+          pointer.y <= rect.bottom + slack
+        )
+      }
+
+      /**
        * Viewport box for the selection card: pinned to the pointer that finished
        * the selection, opened below-right of it when there is room and flipped to
-       * the other side when the viewport edge is near. Without a pointer (keyboard
-       * selection) it falls back to the quote box, centred above/below it.
+       * the other side when the viewport edge is near. Without a pointer — or
+       * when the pointer belongs to a click elsewhere — it falls back to the
+       * quote box, centred above/below it.
        */
       function popupPosition() {
         const draft = state.annotationDraft
@@ -2150,7 +2177,14 @@ window.__ModuleLoader__.load({
         const vh = viewport().height
         const boxWidth = Math.min(width, vw - margin * 2)
         const rect = draft?.rect ?? null
-        const pointer = draft?.pointer ?? null
+        // A stored quote box may lack width (an older draft); NaN here would
+        // invalidate `left` and leave the card at the overlay's origin.
+        const rectWidth = rect
+          ? Number.isFinite(rect.width)
+            ? rect.width
+            : rect.right - rect.left
+          : 0
+        const pointer = pointerNearRect(draft?.pointer, rect) ? draft.pointer : null
         const clampX = (value) => Math.max(margin, Math.min(value, vw - boxWidth - margin))
         if (pointer) {
           const { x, y } = pointer
@@ -2175,7 +2209,7 @@ window.__ModuleLoader__.load({
             transform: 'none',
           }
         }
-        const left = clampX(rect.left + rect.width / 2 - boxWidth / 2)
+        const left = clampX(rect.left + rectWidth / 2 - boxWidth / 2)
         if (rect.top - gap - approxHeight >= margin) {
           return {
             left: `${Math.round(left)}px`,
