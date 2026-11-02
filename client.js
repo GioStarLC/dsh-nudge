@@ -4103,13 +4103,24 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
           )
         }
 
-        /** Start one pointer drag from the current anchor. */
-        function beginDrag(event) {
+        /**
+         * Start one pointer drag from the current anchor. The collapsed pill is
+         * itself a button, so its own press must not be filtered out by the
+         * "buttons keep their own pointer handling" rule.
+         */
+        function beginDrag(event, allowButtonRoot = false) {
           if (event.button !== 0) return
           // Capturing the pointer on the bar retargets the click away from a
           // button inside it, so buttons keep their own pointer handling.
           const origin = event.target
-          if (origin && typeof origin.closest === 'function' && origin.closest('button')) return
+          if (
+            !allowButtonRoot &&
+            origin &&
+            typeof origin.closest === 'function' &&
+            origin.closest('button')
+          ) {
+            return
+          }
           // A previous drag may have ended outside the pill without a click;
           // never let that stale suppression swallow the next real click.
           suppressPillClick.current = false
@@ -4165,7 +4176,7 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
         }
 
         function onPillPointerDown(event) {
-          beginDrag(event)
+          beginDrag(event, true)
         }
 
         function onPillPointerMove(event) {

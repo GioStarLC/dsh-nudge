@@ -600,8 +600,10 @@ function expandTree(node) {
   let tree = View()
   const pill = findByClass(tree, 'dsh-nudge-pill')
   check('pill rendered', Boolean(pill), true)
-  pill.props.onPointerDown(pointerAt(500, 300))
-  pill.props.onPointerMove(pointerAt(560, 340))
+  // A real press lands on the pill button (or its label span); both must drag.
+  const pillTarget = { closest: (selector) => (selector === 'button' ? {} : null) }
+  pill.props.onPointerDown(pointerAt(500, 300, pillTarget))
+  pill.props.onPointerMove(pointerAt(560, 340, pillTarget))
   const moved = booted.runtime.getSnapshot().pos
   check('pill drag moves x', moved.x, 460)
   check('pill drag moves y', moved.y, 240)
@@ -613,7 +615,7 @@ function expandTree(node) {
   // A click without movement expands.
   tree = View()
   const pillAgain = findByClass(tree, 'dsh-nudge-pill')
-  pillAgain.props.onPointerDown(pointerAt(0, 0))
+  pillAgain.props.onPointerDown(pointerAt(0, 0, pillTarget))
   pillAgain.props.onPointerUp()
   pillAgain.props.onClick()
   check('a plain pill click expands', booted.runtime.getSnapshot().collapsed, false)
