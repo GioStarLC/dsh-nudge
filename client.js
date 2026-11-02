@@ -2587,6 +2587,29 @@ window.__ModuleLoader__.load({
         return delivered
       }
 
+      /** Whether the mounted composer already holds text. */
+      function composerHasText() {
+        if (composer === undefined) return false
+        try {
+          const draft = composer.readDraft?.()
+          return typeof draft === 'string' && draft.trim() !== ''
+        } catch {
+          return false
+        }
+      }
+
+      /**
+       * Turbo double-click on a preset: switch to it and use it. A composer
+       * that already holds text wins over sending — the prompt is appended,
+       * even when the caret is elsewhere, so a half-written message is never
+       * dropped just because the double-click did not land in the field.
+       */
+      function runPreset(id) {
+        if (setPreset(id) !== true) return false
+        if (composerHasText()) return insertPreset()
+        return ask()
+      }
+
       /** Switch the delivery mode for this browser and remember it. */
       function setDelivery(value) {
         if (!isDelivery(value)) return false
@@ -3413,6 +3436,8 @@ window.__ModuleLoader__.load({
         getSnapshot,
         text,
         ask,
+        /** Turbo double-click: append when a draft exists, else send. */
+        runPreset,
         setDelivery,
         effectiveDelivery,
         setTurbo,
@@ -4552,8 +4577,7 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
                       onClick: () => runtime.setPreset(preset.id),
                       onDoubleClick: turbo
                         ? () => {
-                            runtime.setPreset(preset.id)
-                            runtime.ask()
+                            runtime.runPreset(preset.id)
                           }
                         : undefined,
                     },

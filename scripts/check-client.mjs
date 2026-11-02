@@ -1273,6 +1273,28 @@ function selectionStub(text, element, rect) {
   check('turbo double-click delivers nothing', booted.calls.prompt.length, 0)
 }
 
+{
+  // A draft that already has text wins even when the composer is not focused:
+  // the double-click appends instead of throwing the draft away by sending.
+  const booted = await boot({})
+  booted.sessionsList.set({ ids: ['A'], byId: { A: { title: '会话 A', retainedBy: { mainView: 1 } } } })
+  await tick()
+  const writes = []
+  booted.runtime.setTurbo(true)
+  booted.runtime.attachComposer({ readDraft: () => '已经写了一半', setDraft: (value) => writes.push(value) })
+  check('turbo: the draft composer is not focused', booted.runtime.getSnapshot().composerFocused, false)
+  const View = booted.registrations.find((item) => item.entry.name === 'shell.overlay').Component
+  const fastChip = findAllByClass(View(), 'dsh-nudge-chip').find((chip) => chip.children?.[0] === '快一点')
+  fastChip.props.onDoubleClick()
+  check(
+    'turbo double-click appends to a non-empty draft',
+    writes[0],
+    '已经写了一半\n快一点，别先急着测试，先开发完。',
+  )
+  check('turbo double-click does not send with a draft', booted.calls.prompt.length, 0)
+  check('turbo double-click still switches the preset', booted.runtime.getSnapshot().presetId, 'fast')
+}
+
 // --- 7.4.3 narrow screens default collapsed ----------------------------
 
 {
