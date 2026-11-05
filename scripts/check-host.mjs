@@ -204,7 +204,9 @@ check('read: stats round-trip', reloaded.json?.store?.stats?.days?.['2026-01-02'
 check('read: border width round-trips', reloaded.json?.store?.frame, 2)
 check('read: prompt counts round-trip', reloaded.json?.store?.stats?.days?.['2026-01-02']?.presets?.brief, 3)
 
-// The border width is one of the three the browser half offers, nothing else.
+// The border width is one of the four the browser half offers, nothing else.
+const noFrame = await call(makeReq({ method: 'POST', body: { store: { frame: 0 } } }))
+check('write: no border is kept', noFrame.json?.store?.frame, 0)
 const oddFrame = await call(makeReq({ method: 'POST', body: { store: { frame: 9 } } }))
 check('write: an out-of-range border width is dropped', 'frame' in (oddFrame.json?.store ?? {}), false)
 const textFrame = await call(makeReq({ method: 'POST', body: { store: { frame: '3' } } }))

@@ -153,7 +153,7 @@ function pickStore(value) {
     if (source[key] === true) store[key] = true
   }
   // The floating-window border width, in px; the browser half offers 1–3.
-  if (Number.isInteger(source.frame) && source.frame >= 1 && source.frame <= 3) store.frame = source.frame
+  if (Number.isInteger(source.frame) && source.frame >= 0 && source.frame <= 3) store.frame = source.frame
   if (typeof source.preset === 'string' && source.preset !== '') store.preset = source.preset
   if (Array.isArray(source.presets)) store.presets = source.presets
   if (Array.isArray(source.tips)) {

@@ -145,9 +145,11 @@ function expandTree(node) {
   const Settings = booted.registrations.find((item) => item.entry.name === 'settings.section').Component
   const tree = expandTree(Settings())
   const values = (findAllByClass(tree, 'dsh-nudge-stat-value') ?? []).map((node) => node.children?.[0])
-  check('stats: settings show three counters', values.length, 3)
-  check('stats: settings show the send count', values[0], '1')
-  check('stats: settings leave untouched counters at zero', `${values[1]}|${values[2]}`, '0|0')
+  const valueLabels = (findAllByClass(tree, 'dsh-nudge-stat-label') ?? []).map((node) => node.children?.[0])
+  check('stats: today splits two ways, not three', values.length, 2)
+  check('stats: today counts the quick input and the note', valueLabels.join('|'), '快捷输入|批注')
+  check('stats: a send counts as one quick input', values[0], '1')
+  check('stats: today leaves the untouched counter at zero', values[1], '0')
   check('stats: the section is not empty', (findAllByClass(tree, 'dsh-nudge-stats') ?? []).length, 1)
 }
 
@@ -232,14 +234,34 @@ function expandTree(node) {
   const headings = (findAllByClass(tree, 'dsh-nudge-settings-section-title') ?? []).map(
     (node) => node.children?.[0],
   )
-  check('settings: sections follow the window modules', headings.join('|'), '批注|快捷输入|外观|状态行')
+  check('settings: sections follow the window modules', headings.join('|'), '批注|快捷输入|外观')
   const sideTopTitle = (findAllByClass(tree, 'dsh-nudge-stats-side-head') ?? [])[0]?.children?.[0]?.children?.[0]
   check('settings: the ranking uses the window term', sideTopTitle, '快捷输入 Top 3')
   const help = findAllByClass(tree, 'dsh-nudge-settings-section')
-  check('settings: four grouped sections', help.length, 4)
+  check('settings: three grouped sections', help.length, 3)
   check(
     'settings: note switches lead the settings sections',
     (findAllByClass(help[0], 'dsh-nudge-toggle') ?? []).length,
+    2,
+  )
+  const autoPasteRow = (findAllByClass(help[0], 'dsh-nudge-toggle') ?? []).find(
+    (row) => row.props?.['data-setting'] === 'autopaste',
+  )
+  check(
+    'settings: auto-paste copy says when it applies',
+    String(findAllByClass(autoPasteRow, 'dsh-nudge-toggle-desc')?.[0]?.children?.[0] ?? '').startsWith('启用后'),
+    true,
+  )
+  const deliveryRow = findByClass(tree, 'dsh-nudge-settings-inline')
+  check('settings: send mode stays on one row', Boolean(deliveryRow), true)
+  check(
+    'settings: send mode drops the separate description line',
+    (findAllByClass(deliveryRow, 'dsh-nudge-toggle-desc') ?? []).length,
+    0,
+  )
+  check(
+    'settings: both send modes remain one click away',
+    (findAllByClass(deliveryRow, 'dsh-nudge-chip') ?? []).length,
     2,
   )
   check(
@@ -250,7 +272,22 @@ function expandTree(node) {
   const promptFold = (findAllByClass(help[1], 'dsh-nudge-settings-fold') ?? [])[0]
   check('settings: the prompt editor starts collapsed', promptFold?.type, 'details')
   check('settings: send behavior stays outside the fold', findByProp(promptFold, 'data-setting', 'turbo'), null)
-  check('settings: the status editor starts collapsed', help[3].type, 'details')
+  const appearanceSection = help[2]
+  const frameRow = findByClass(appearanceSection, 'dsh-nudge-settings-inline')
+  check('settings: border row drops its description line', (findAllByClass(frameRow, 'dsh-nudge-toggle-desc') ?? []).length, 0)
+  check(
+    'settings: border offers a no-outline choice',
+    (findAllByClass(frameRow, 'dsh-nudge-chip') ?? [])[0]?.children?.[0],
+    '无',
+  )
+  const tipsFold = (findAllByClass(appearanceSection, 'dsh-nudge-settings-fold') ?? [])[0]
+  check('settings: the status editor starts collapsed', tipsFold?.type, 'details')
+  check(
+    'settings: the status editor lives under appearance',
+    (findAllByClass(tipsFold, 'dsh-nudge-tip-row') ?? []).length,
+    booted.runtime.getSnapshot().tips.length,
+  )
+  check('settings: the page no longer says 口径', JSON.stringify(tree).includes('口径'), false)
   const side = (findAllByClass(tree, 'dsh-nudge-stats-side') ?? [])[0]
   const sideOrder = (side?.children ?? []).map((node) => String(node?.props?.className ?? ''))
   check(
@@ -261,12 +298,24 @@ function expandTree(node) {
   check('trend: the chart is drawn', (findAllByClass(tree, 'dsh-nudge-chart-svg') ?? []).length, 1)
   check('trend: one hover target per day', (findAllByClass(tree, 'dsh-nudge-chart-hit') ?? []).length, 15)
   check(
-    'trend: both series are drawn',
+    'trend: both series are drawn as straight lines',
     (findAllByClass(tree, 'dsh-nudge-chart-line') ?? []).map((node) => node.props.className).join('|'),
     'dsh-nudge-chart-line note|dsh-nudge-chart-line input',
   )
+  check(
+    'trend: the path has no curve command, so no value is invented between days',
+    (findAllByClass(tree, 'dsh-nudge-chart-line') ?? []).every((node) => !/[CQ]/.test(String(node.props.d))),
+    true,
+  )
+  check('trend: both series keep a soft fill', (findAllByClass(tree, 'dsh-nudge-chart-area') ?? []).length, 2)
+  check(
+    'trend: a marker for every day that carries a count',
+    (findAllByClass(tree, 'dsh-nudge-chart-point') ?? []).length,
+    4,
+  )
+  check('trend: gridlines give the scale', (findAllByClass(tree, 'dsh-nudge-chart-grid') ?? []).length, 2)
   const total = (findAllByClass(tree, 'dsh-nudge-stats-total') ?? [])[0]?.children?.[0]
-  check('trend: the total covers the window only', total, '共 7 次')
+  check('trend: the total names its window', total, '近 15 天共 7 次')
 
   const topItems = findAllByClass(tree, 'dsh-nudge-top-item') ?? []
   check('top: three prompts ranked', topItems.length, 3)
@@ -289,7 +338,12 @@ function expandTree(node) {
       .join('|'),
     '1|2|3',
   )
-  check('top: the share line explains the ranking', (findAllByClass(tree, 'dsh-nudge-stats-share') ?? [])[0]?.children?.[0], '占近 15 天快捷输入的 100%')
+  check(
+    'top: the share line is an absolute, checkable sum',
+    (findAllByClass(tree, 'dsh-nudge-stats-share') ?? [])[0]?.children?.[0],
+    '这 3 条合计 6 次',
+  )
+  check('top: the legend calls the series by its page term', (findAllByClass(tree, 'dsh-nudge-chart-legend-item') ?? []).map((node) => node.children?.[1]).join('|'), '快捷输入|批注')
 }
 
 {
@@ -311,7 +365,7 @@ function expandTree(node) {
   const Settings = booted.registrations.find((item) => item.entry.name === 'settings.section').Component
   const tree = expandTree(Settings())
   const note = (findAllByClass(tree, 'dsh-nudge-stats-side-empty') ?? [])[0]?.children?.[0]
-  check('top: an upgraded record explains the missing breakdown', note, '口径明细从本次更新后开始记录。')
+  check('top: an upgraded record explains the missing breakdown', note, '快捷输入明细从本次更新后开始记录。')
 }
 
 // --- window border width ------------------------------------------------
@@ -335,6 +389,11 @@ function expandTree(node) {
   includes('frame: the switch says so in words', booted.runtime.getSnapshot().flash, '窗口边框：粗')
   check('frame: thinner is accepted', booted.runtime.setFrame(1), true)
   check('frame: thinner is persisted', booted.localStorage.getItem('dsh-nudge:frame'), '1')
+  check('frame: no border is accepted', booted.runtime.setFrame(0), true)
+  check('frame: no border lands in the state', booted.runtime.getSnapshot().frame, 0)
+  check('frame: no border is persisted', booted.localStorage.getItem('dsh-nudge:frame'), '0')
+  check('frame: the window drops its outline', cardStyle(), '0px')
+  includes('frame: the switch says so in words', booted.runtime.getSnapshot().flash, '窗口边框：无')
   check('frame: the default drops the key', booted.runtime.setFrame(2) && booted.localStorage.getItem('dsh-nudge:frame'), null)
   check('frame: an unknown width is refused', booted.runtime.setFrame(4), false)
   check('frame: a refused width leaves the state alone', booted.runtime.getSnapshot().frame, 2)
@@ -343,10 +402,16 @@ function expandTree(node) {
   const groups = findAllByClass(expandTree(settings.Component()), 'dsh-nudge-settings-group') ?? []
   const frameGroup = groups.find((group) => group.children?.[0]?.children?.[0] === '窗口边框')
   const chips = findAllByClass(frameGroup, 'dsh-nudge-chip') ?? []
-  check('frame: the settings offer three widths', chips.length, 3)
-  check('frame: every chip names its width', chips.map((chip) => chip.children?.[0]).join('|'), '细|标准|粗')
-  check('frame: the chosen width is the pressed one', chips.map((chip) => chip.props['aria-pressed']).join('|'), 'true|false|false')
-  chips[2].props.onClick()
+  check('frame: the settings offer four widths', chips.length, 4)
+  check('frame: every chip names its width', chips.map((chip) => chip.children?.[0]).join('|'), '无|细|标准|粗')
+  check(
+    'frame: the chosen width is the pressed one',
+    chips.map((chip) => chip.props['aria-pressed']).join('|'),
+    'false|true|false|false',
+  )
+  chips[0].props.onClick()
+  check('frame: the no-border chip sets it', booted.runtime.getSnapshot().frame, 0)
+  chips[3].props.onClick()
   check('frame: a chip click sets it', booted.runtime.getSnapshot().frame, 3)
 }
 
@@ -723,8 +788,10 @@ function expandTree(node) {
 
   // The card titlebar drags through the same helpers.
   tree = View()
-  const gear = findAllByClass(tree, 'dsh-nudge-icon').find((icon) => icon.props?.title === '打开设置')
-  check('settings gear rendered', gear?.props?.title, '打开设置')
+  const gear = findAllByClass(tree, 'dsh-nudge-icon').find(
+    (icon) => icon.props?.['aria-label'] === '打开设置',
+  )
+  check('settings gear rendered', gear?.props?.['aria-label'], '打开设置')
   const title = findByClass(tree, 'dsh-nudge-title')
   const before = booted.runtime.getSnapshot().pos
   title.props.onPointerDown(pointerAt(300, 200))
@@ -1132,6 +1199,60 @@ function composerFocus() {
     'delivery switch is an icon on the quick-input row',
     deliveryToggle?.props?.className?.includes('dsh-nudge-head-icon'),
     true,
+  )
+}
+
+{
+  // The window's small controls explain themselves on hover: what they do and
+  // the state they are in right now.
+  const booted = await boot({})
+  booted.sessionsList.set({ ids: ['A'], byId: { A: { title: '会话 A', retainedBy: { mainView: 1 } } } })
+  await tick()
+  const View = booted.registrations.find((item) => item.entry.name === 'shell.overlay').Component
+  const rect = { left: 200, top: 300, right: 222, bottom: 322, width: 22, height: 22 }
+  const hover = (node) => node.props.onMouseEnter({ currentTarget: { getBoundingClientRect: () => rect } })
+  const tipText = () => {
+    const tip = findByClass(View(), 'dsh-nudge-tip')
+    if (tip === undefined) return null
+    return {
+      title: findByClass(tip, 'dsh-nudge-tip-title')?.children?.[0],
+      state: findByClass(tip, 'dsh-nudge-tip-state')?.children?.[0],
+      hint: findByClass(tip, 'dsh-nudge-tip-hint')?.children?.[0],
+    }
+  }
+
+  hover(findByClass(View(), 'dsh-nudge-annotation-quick'))
+  check('tooltip: opens on the quick-note icon', tipText()?.title, '快速批注')
+  check('tooltip: shows the current switch state', tipText()?.state, '已关闭')
+  check('tooltip: says what the switch does', tipText()?.hint, '选中文字就弹出批注卡片')
+  booted.runtime.setQuick(true)
+  check('tooltip: state follows the toggle', tipText()?.state, '已开启')
+  booted.runtime.hideTip()
+  check('tooltip: closes with the pointer', Boolean(findByClass(View(), 'dsh-nudge-tip')), false)
+
+  booted.runtime.setDelivery('followup')
+  hover(findByClass(View(), 'dsh-nudge-delivery-toggle'))
+  check('tooltip: names the current send mode', tipText()?.state, '排队')
+  check('tooltip: explains the current send mode', tipText()?.hint, '等当前这一轮结束后再处理')
+  booted.runtime.hideTip()
+
+  hover(findByClass(View(), 'dsh-nudge-turbo-toggle'))
+  check('tooltip: covers turbo mode too', tipText()?.title, '急速模式')
+  booted.runtime.hideTip()
+}
+
+{
+  // Quick notes off must not leak a raw locale key: the tray explains itself.
+  const booted = await boot({})
+  booted.sessionsList.set({ ids: ['A'], byId: { A: { title: '会话 A', retainedBy: { mainView: 1 } } } })
+  await tick()
+  booted.runtime.setAnnotationExpanded(true)
+  const View = booted.registrations.find((item) => item.entry.name === 'shell.overlay').Component
+  const hint = findByClass(View(), 'dsh-nudge-annotation-hint')
+  check(
+    'annotation: the off state explains itself',
+    hint?.children?.[0],
+    '快速批注已关闭；打开批注栏的开关才能从选中文字添加批注。',
   )
 }
 
@@ -1901,7 +2022,7 @@ const durable = (type, seq, data) => ({ type: 'event', event: { type, seq, time:
   const toolbar = findAllByClass(tree, 'dsh-nudge-preset-toolbar')[0]
   check('settings: the toolbar carries expand, collapse, import and export', (findAllByClass(toolbar, 'dsh-nudge-btn') ?? []).length, 4)
   check('settings: delivery group rendered', (findAllByClass(tree, 'dsh-nudge-settings-group') ?? []).length, 2)
-  check('settings: delivery offers both modes, the border three widths', (findAllByClass(tree, 'dsh-nudge-chip') ?? []).length, 5)
+  check('settings: delivery offers both modes, the border four widths', (findAllByClass(tree, 'dsh-nudge-chip') ?? []).length, 6)
 
   // Opening a row paints its read-only body; editing swaps in two fields.
   const openedId = booted.runtime.getSnapshot().presets[0].id

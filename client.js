@@ -40,7 +40,7 @@ window.__ModuleLoader__.load({
     const AUTOPASTE_KEY = 'dsh-nudge:autopaste'
     const FRAME_KEY = 'dsh-nudge:frame'
     /** The border widths the settings offer for the floating window, in px. */
-    const FRAME_CHOICES = [1, 2, 3]
+    const FRAME_CHOICES = [0, 1, 2, 3]
     const DEFAULT_FRAME = 2
     const NOTES_KEY = 'dsh-nudge:notes'
     /** Flow item attribute the shell uses for stable transcript anchors. */
@@ -124,7 +124,7 @@ window.__ModuleLoader__.load({
         en: 'A switch message holds here for 5 seconds, then the rotation resumes.',
       },
       {
-        zh: '急速模式下双击口径，可以直接执行。',
+        zh: '急速模式下双击快捷输入，可以直接执行。',
         en: 'In turbo mode, double-click a prompt to run it straight away.',
       },
     ]
@@ -161,17 +161,19 @@ window.__ModuleLoader__.load({
       ask: '询问状态',
       askHint: '向 agent 询问当前状态',
       insert: '写入输入框',
-      insertHint: '把选中的口径追加到输入框末尾',
+      insertHint: '把选中的快捷输入追加到输入框末尾',
       insertUnavailable: '输入框未就绪，暂时无法写入文案。',
       modeInactive: '写入输入框时不需要发送方式',
       turboTitle: '急速模式',
-      turboDesc: '窗口不显示发送按钮；双击口径直接执行。',
+      turboDesc: '窗口不显示发送按钮；双击快捷输入直接执行。',
+      turboTip: '不显示发送按钮，双击快捷输入直接执行',
       switchOn: '开',
       switchOff: '关',
       answerLabel: '我的回答：',
       annotationsTitle: '批注',
       annotationPlaceholder: '对这段内容说点什么…',
       annotationsHint: '选中对话里的文字，选区旁会弹出批注卡片；批注汇总在这里。',
+      annotationsOffHint: '快速批注已关闭；打开批注栏的开关才能从选中文字添加批注。',
       addAnnotation: '添加批注',
       dismissAnnotation: '取消',
       deleteAnnotation: '删除',
@@ -180,20 +182,28 @@ window.__ModuleLoader__.load({
       quickOn: '快速批注：开',
       quickOff: '快速批注：关',
       quickTitle: '快速批注',
-      quickHint: '选中对话文字就弹出批注卡片；关闭后改用标题栏的「+」。',
+      quickHint: '选中对话文字就弹出批注卡片；关闭后不能从选中文字添加批注。',
+      quickTip: '选中文字就弹出批注卡片',
       autoPasteTitle: '自动粘贴批注',
-      autoPasteDesc: '点输入框时，把待发送的批注写进去。',
+      autoPasteDesc: '启用后，点进输入框会把待发送的批注写进草稿，并清空待发送列表。',
+      autoPasteTip: '点进输入框时写入待发送的批注',
+      tipOn: '已开启',
+      tipOff: '已关闭',
+      settingsTip: '打开或收起窗内设置面板',
       autoPasteOn: '自动粘贴批注：开',
       autoPasteOff: '自动粘贴批注：关',
       appearanceTitle: '外观',
       frameTitle: '窗口边框',
       frameDesc: '悬浮窗描边的粗细。',
+      frameNone: '无',
       frameThin: '细',
       frameNormal: '标准',
       frameThick: '粗',
       copyHint: '复制选中的原文',
       deliveryTitle: '发送方式',
       deliveryDesc: '直接打断会中止当前回答；排队等这一轮结束。',
+      deliveryTipSteer: '点发送时立刻中止当前回答',
+      deliveryTipQueue: '等当前这一轮结束后再处理',
       sortUp: '上移',
       sortDown: '下移',
       nudgeModule: '快捷输入',
@@ -225,7 +235,7 @@ window.__ModuleLoader__.load({
       mode: '发送方式',
       queue: '排队',
       steer: '直接打断',
-      preset: '口径',
+      preset: '快捷输入',
       noSession: '没有打开的会话，无法询问。',
       waitingQuestion: 'agent 正在等待你的回答',
       transportMissing: '当前界面没有发送通道，无法发起询问。',
@@ -242,12 +252,13 @@ window.__ModuleLoader__.load({
       noAnswerNote: '本轮没有产生回答。',
       newResult: '有新结果',
       settings: '发送方式',
-      presetsHint: '点一下窗口里的口径就能切换；设置只保存在本机。',
-      presetsEmpty: '还没有口径，点「新增口径」加一条。',
-      presetsAllDisabled: '口径都已停用，可在设置里重新启用。',
+      presetsHint: '点一下窗口里的快捷输入就能切换；设置只保存在本机。',
+      presetList: '列表',
+      presetsEmpty: '还没有快捷输入，点「新增快捷输入」加一条。',
+      presetsAllDisabled: '快捷输入都已停用，可在设置里重新启用。',
       presetLabel: '名称',
       presetText: '发给 agent 的话',
-      addPreset: '新增口径',
+      addPreset: '新增快捷输入',
       resetPresets: '恢复默认',
       deletePreset: '删除',
       presetCount: '共 {n} 条',
@@ -279,6 +290,7 @@ window.__ModuleLoader__.load({
       exportEmpty: '还没有可导出的条目。',
       tipsTitle: '状态行',
       tipsHint: '窗口空闲时轮流显示；开关提示会停留 5 秒。',
+      tipsCount: '共 {n} 句',
       tipsEmpty: '还没有文案。',
       tipsPlaceholder: '一句闲时提示',
       tipsPastePlaceholder: '粘贴整段会自动拆行；也可以一行一句，Ctrl+Enter 添加',
@@ -291,19 +303,17 @@ window.__ModuleLoader__.load({
       tipTextRequired: '文案不能为空。',
       tipLast: '至少保留一句。',
       statsTitle: '使用统计',
-      statsHint: '统计发送、写入和批注的次数，只保存在本机。',
+      statsHint: '按天记录快捷输入和批注，发送或写入都算一次快捷输入。只保存在本机。',
       statsToday: '今天',
-      statsSend: '发送',
-      statsInsertShort: '写入',
       statsAnnotation: '批注',
       statsEmpty: '近 15 天还没有使用记录。',
-      statsRecent: '近 15 天',
-      statsTimes: '共 {n} 次',
+      statsTimes: '近 15 天共 {n} 次',
+      statsPeak: '单日最高 {n} 次',
       statsLegendInput: '快捷输入',
       statsTopTitle: '快捷输入 Top 3',
       statsTopEmpty: '近 15 天还没有用过快捷输入。',
-      statsTopSince: '口径明细从本次更新后开始记录。',
-      statsTopShare: '占近 15 天快捷输入的 {n}%',
+      statsTopSince: '快捷输入明细从本次更新后开始记录。',
+      statsTopShare: '这 3 条合计 {n} 次',
       statsCountUnit: '{n} 次',
       settingsTitle: '状态询问',
       settingsHead: '设置',
@@ -316,17 +326,19 @@ window.__ModuleLoader__.load({
       ask: 'Ask status',
       askHint: 'Ask the agent for a status update',
       insert: 'Insert text',
-      insertHint: 'Append the chosen prompt to the end of the input box',
+      insertHint: 'Append the chosen quick input to the end of the input box',
       insertUnavailable: 'The input box is not ready; cannot insert the text.',
       modeInactive: 'Send mode does not apply when writing into the input box',
       turboTitle: 'Turbo mode',
-      turboDesc: 'The send button is hidden; double-click a prompt to run it right away.',
+      turboDesc: 'The send button is hidden; double-click a quick input to run it right away.',
+      turboTip: 'Hides the send button; double-click a quick input to run it',
       switchOn: 'on',
       switchOff: 'off',
       answerLabel: 'My answer: ',
       annotationsTitle: 'Notes',
       annotationPlaceholder: 'Say something about this passage…',
       annotationsHint: 'Select text in the conversation and a note card opens beside it; notes are collected here.',
+      annotationsOffHint: 'Quick notes are off; turn them on in the note header to add notes from a selection.',
       addAnnotation: 'Add note',
       dismissAnnotation: 'Cancel',
       deleteAnnotation: 'Delete',
@@ -335,20 +347,28 @@ window.__ModuleLoader__.load({
       quickOn: 'Quick notes: on',
       quickOff: 'Quick notes: off',
       quickTitle: 'Quick notes',
-      quickHint: 'Selecting conversation text opens a note card; when off, use + in the title bar.',
+      quickHint: 'Selecting conversation text opens a note card; when off, a selection cannot add a note.',
+      quickTip: 'Select text and the note card opens',
       autoPasteTitle: 'Auto-paste notes',
-      autoPasteDesc: 'Clicking the input box writes pending notes into it.',
+      autoPasteDesc: 'When on, clicking into the input box writes pending notes into the draft and clears the pending list.',
+      autoPasteTip: 'Clicking into the input box writes pending notes',
+      tipOn: 'On',
+      tipOff: 'Off',
+      settingsTip: 'Open or close the settings panel in this window',
       autoPasteOn: 'Auto-paste notes: on',
       autoPasteOff: 'Auto-paste notes: off',
       appearanceTitle: 'Appearance',
       frameTitle: 'Window border',
       frameDesc: 'How thick the floating window outline is.',
+      frameNone: 'None',
       frameThin: 'Thin',
       frameNormal: 'Standard',
       frameThick: 'Thick',
       copyHint: 'copy this passage',
       deliveryTitle: 'Send mode',
       deliveryDesc: 'Interrupt stops the current answer; Queue waits for the turn to finish.',
+      deliveryTipSteer: 'Sending stops the current answer right away',
+      deliveryTipQueue: 'Sending waits for the running turn to finish',
       sortUp: 'Move up',
       sortDown: 'Move down',
       nudgeModule: 'Quick input',
@@ -380,7 +400,7 @@ window.__ModuleLoader__.load({
       mode: 'Send mode',
       queue: 'Queue',
       steer: 'Interrupt',
-      preset: 'Prompt',
+      preset: 'Quick input',
       noSession: 'No open conversation to ask.',
       waitingQuestion: 'The agent is waiting for your answer',
       transportMissing: 'This page has no send channel, so the request cannot be sent.',
@@ -397,12 +417,13 @@ window.__ModuleLoader__.load({
       noAnswerNote: 'The turn produced no answer.',
       newResult: 'New result',
       settings: 'Send mode',
-      presetsHint: 'Click a prompt in the window to switch; settings stay on this machine.',
-      presetsEmpty: 'No prompts yet; add one.',
-      presetsAllDisabled: 'Every prompt is disabled. Re-enable one in settings.',
+      presetsHint: 'Click a quick input in the window to switch; settings stay on this machine.',
+      presetList: 'List',
+      presetsEmpty: 'No quick inputs yet; add one.',
+      presetsAllDisabled: 'Every quick input is disabled. Re-enable one in settings.',
       presetLabel: 'Name',
       presetText: 'What the agent receives',
-      addPreset: 'Add prompt',
+      addPreset: 'Add quick input',
       resetPresets: 'Reset defaults',
       deletePreset: 'Delete',
       presetCount: '{n} total',
@@ -434,6 +455,7 @@ window.__ModuleLoader__.load({
       exportEmpty: 'There is nothing to export yet.',
       tipsTitle: 'Status line',
       tipsHint: 'Rotates while the window is idle; switch messages hold for 5 seconds.',
+      tipsCount: '{n} lines',
       tipsEmpty: 'No lines yet.',
       tipsPlaceholder: 'One idle line',
       tipsPastePlaceholder: 'Paste a block and it splits per line; Ctrl+Enter adds a line',
@@ -446,19 +468,17 @@ window.__ModuleLoader__.load({
       tipTextRequired: 'The line cannot be empty.',
       tipLast: 'Keep at least one line.',
       statsTitle: 'Usage',
-      statsHint: 'Counts sends, writes and notes; kept on this machine only.',
+      statsHint: 'Daily counts of quick inputs (sent or written) and notes. Kept on this machine only.',
       statsToday: 'Today',
-      statsSend: 'Sent',
-      statsInsertShort: 'Written',
       statsAnnotation: 'Notes',
       statsEmpty: 'No usage in the last 15 days.',
-      statsRecent: 'Last 15 days',
-      statsTimes: '{n} total',
+      statsTimes: '{n} in 15 days',
+      statsPeak: 'Peak {n} a day',
       statsLegendInput: 'Quick input',
       statsTopTitle: 'Top 3 quick inputs',
       statsTopEmpty: 'No quick input used in the last 15 days.',
-      statsTopSince: 'Per-prompt detail starts with this update.',
-      statsTopShare: '{n}% of quick inputs in the last 15 days',
+      statsTopSince: 'Per-item detail starts with this update.',
+      statsTopShare: '{n} uses for these 3',
       statsCountUnit: '{n} uses',
       settingsTitle: 'Status Nudge',
       settingsHead: 'Settings',
@@ -746,7 +766,8 @@ window.__ModuleLoader__.load({
       if (store.getItem(TURBO_KEY) === '1') snapshot.turbo = true
       if (store.getItem(QUICK_KEY) === '1') snapshot.quick = true
       if (store.getItem(AUTOPASTE_KEY) === '1') snapshot.autoPaste = true
-      const frame = Number(store.getItem(FRAME_KEY))
+      const frameText = store.getItem(FRAME_KEY)
+      const frame = frameText === null || frameText === undefined ? NaN : Number(frameText)
       if (isFrameWidth(frame)) snapshot.frame = frame
       const preset = store.getItem(PRESET_KEY)
       if (typeof preset === 'string' && preset !== '') snapshot.preset = preset
@@ -984,7 +1005,7 @@ window.__ModuleLoader__.load({
             if (chosen.enabled === false) return firstEnabled?.id ?? chosen.id
             return raw
           }
-          console.warn(`[dsh-nudge] 忽略非法口径 ${JSON.stringify(raw)}，改用第一条`)
+          console.warn(`[dsh-nudge] 忽略非法快捷输入 ${JSON.stringify(raw)}，改用第一条`)
         }
       } catch {
         /* storage unavailable */
@@ -1055,6 +1076,7 @@ window.__ModuleLoader__.load({
 
     /** The label key for one frame width, shared by the chips and the notice. */
     function frameLabelKey(width) {
+      if (width === 0) return 'frameNone'
       if (width === 1) return 'frameThin'
       return width === 3 ? 'frameThick' : 'frameNormal'
     }
@@ -1467,6 +1489,8 @@ window.__ModuleLoader__.load({
         settingsOpen: false,
         /** Timestamp of the last capture, used to restart the attention pulse. */
         attentionAt: 0,
+        /** The window control whose explanation bubble is showing, or null. */
+        tip: null,
         lang: language,
       }
       const listeners = new Set()
@@ -2070,6 +2094,32 @@ window.__ModuleLoader__.load({
         }
         setState({ autoPaste: next })
         notify(next ? text('autoPasteOn') : text('autoPasteOff'))
+        return true
+      }
+
+      /**
+       * Show the explanation bubble for one window control. `rect` is the
+       * control's viewport box, kept as numbers so the renderer only has to
+       * place the bubble; the text is derived from the live state, so a toggle
+       * updates the bubble without moving the pointer.
+       */
+      function showTip(key, rect) {
+        if (typeof key !== 'string' || key === '') return false
+        const box = rect && typeof rect === 'object' ? rect : null
+        const left = box === null ? NaN : Number(box.left)
+        const top = box === null ? NaN : Number(box.top)
+        const right = box === null ? NaN : Number(box.right)
+        const bottom = box === null ? NaN : Number(box.bottom)
+        if (!Number.isFinite(left) || !Number.isFinite(top) || !Number.isFinite(right) || !Number.isFinite(bottom)) {
+          return false
+        }
+        setState({ tip: { key, left, top, right, bottom } })
+        return true
+      }
+
+      /** Hide the explanation bubble. */
+      function hideTip() {
+        if (state.tip !== null) setState({ tip: null })
         return true
       }
 
@@ -3699,6 +3749,8 @@ window.__ModuleLoader__.load({
         setAnnotationExpanded,
         setNudgeExpanded,
         setAnnotationNote,
+        showTip,
+        hideTip,
         addAnnotation,
         quickReply,
         copyDraftQuote,
@@ -3874,7 +3926,7 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
 .dsh-nudge-settings-section.collapsible .dsh-nudge-settings-section-head:focus-visible,.dsh-nudge-settings-fold-head:focus-visible{outline:2px solid var(--dn-accent-line);outline-offset:2px;border-radius:6px}
 .dsh-nudge-settings-section.collapsible[open] .dsh-nudge-settings-section-desc{margin-top:2px}
 .dsh-nudge-settings-fold{display:flex;flex-direction:column;gap:8px;padding-top:2px;border-top:1px solid var(--dn-line)}
-.dsh-nudge-settings-fold-head{display:flex;align-items:center;gap:8px;padding:5px 2px;cursor:pointer;list-style:none;font-size:12px;font-weight:600;color:var(--dsw-alias-label-primary,#1a1a1a);user-select:none}
+.dsh-nudge-settings-fold-head{display:flex;align-items:center;gap:8px;padding:5px 2px;cursor:pointer;list-style:none;font-size:11.5px;font-weight:600;letter-spacing:.2px;color:var(--dsw-alias-label-secondary,#6a6a76);user-select:none}
 .dsh-nudge-settings-fold-head::-webkit-details-marker{display:none}
 .dsh-nudge-settings-fold-head::after{content:'';flex:0 0 auto;width:6px;height:6px;margin-left:6px;border-right:1.5px solid var(--dsw-alias-label-secondary,#8a8a8a);border-bottom:1.5px solid var(--dsw-alias-label-secondary,#8a8a8a);opacity:.7;transform:rotate(45deg);transition:transform .15s ease}
 .dsh-nudge-settings-fold:not([open]) .dsh-nudge-settings-fold-head::after{transform:rotate(-45deg)}
@@ -3907,11 +3959,17 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
 /* One board: trend on the left, prompt ranking on the right. Narrow panels
    (the in-window fallback) stack the two instead of squeezing the chart. */
 .dsh-nudge-stats-board{display:grid;grid-template-columns:minmax(0,1fr);gap:14px;margin-top:2px;padding-top:12px;border-top:1px solid var(--dn-line)}
-.dsh-nudge-stats-chart-pane{display:flex;flex-direction:column;gap:6px;min-width:0;height:100%}
+.dsh-nudge-stats-chart-pane{display:flex;flex-direction:column;gap:6px;min-width:0}
 .dsh-nudge-stats-trend-head{display:flex;align-items:baseline;justify-content:space-between;gap:8px;font-size:11px;line-height:1.4;color:var(--dsw-alias-label-secondary,#8a8a8a)}
 .dsh-nudge-stats-total{font-variant-numeric:tabular-nums}
-.dsh-nudge-chart-wrap{position:relative;flex:1 1 auto;min-height:84px;overflow:hidden}
+.dsh-nudge-chart-peak{color:var(--dsw-alias-label-secondary,#9a9aa4)}
+.dsh-nudge-chart-wrap{position:relative;flex:0 0 auto;width:100%;aspect-ratio:320/168;min-height:150px;overflow:visible}
 .dsh-nudge-chart-svg{display:block;width:100%;height:100%;overflow:visible}
+.dsh-nudge-chart-grid{stroke:var(--dn-line);stroke-width:1;stroke-dasharray:2 4;opacity:.7}
+.dsh-nudge-chart-axis-line{stroke:var(--dn-line);stroke-width:1}
+.dsh-nudge-chart-point{stroke:var(--dsw-alias-bg-layer-1,#fff);stroke-width:1.2}
+.dsh-nudge-chart-point.input{fill:var(--dsw-static-deepseek-450,#5686fe)}
+.dsh-nudge-chart-point.note{fill:var(--dn-note)}
 .dsh-nudge-chart-empty{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;padding:0 12px;font-size:11px;line-height:1.5;color:var(--dsw-alias-label-secondary,#8a8a8a);text-align:center}
 .dsh-nudge-chart-hits{position:absolute;inset:0;display:flex}
 .dsh-nudge-chart-hit{flex:1 1 0;position:relative;min-width:0}
@@ -3924,7 +3982,7 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
 .dsh-nudge-stats-axis{display:flex;justify-content:space-between;gap:8px;font-size:10.5px;line-height:1.4;color:var(--dsw-alias-label-secondary,#8a8a8a);font-variant-numeric:tabular-nums}
 .dsh-nudge-chart-legend{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:11px;line-height:1.5;color:var(--dsw-alias-label-secondary,#8a8a8a)}
 .dsh-nudge-chart-legend-item{display:inline-flex;align-items:center;gap:5px;white-space:nowrap}
-.dsh-nudge-chart-dot{flex:0 0 auto;width:6px;height:6px;border-radius:50%}
+.dsh-nudge-chart-dot{flex:0 0 auto;width:11px;height:3px;border-radius:2px}
 .dsh-nudge-chart-dot.input{background:var(--dsw-static-deepseek-450,#5686fe)}
 .dsh-nudge-chart-dot.note{background:var(--dn-note)}
 .dsh-nudge-stats-side{display:flex;flex-direction:column;gap:6px;min-width:0}
@@ -3995,10 +4053,22 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
 .dsh-nudge-btn:disabled{opacity:.4;cursor:default}
 .dsh-nudge-btn:disabled:hover{background:transparent}
 .dsh-nudge-settings-group,.dsh-nudge-stats-group{display:flex;flex-direction:column;gap:7px;padding:12px;border-radius:12px;border:1px solid var(--dn-line);background:color-mix(in srgb,var(--dsw-alias-label-primary,#1a1a1a) 3%,transparent)}
+/* A setting that is one control wide enough to sit on a single row: label on
+   the left, its choices on the right, no separate description line. */
+.dsh-nudge-settings-inline{flex-direction:row;align-items:center;justify-content:space-between;gap:10px;padding:8px 12px}
+.dsh-nudge-settings-inline .dsh-nudge-toggle-title{flex:0 0 auto}
+.dsh-nudge-settings-inline .dsh-nudge-presets{flex-wrap:nowrap}
 /* The stats board is the page's hero: slightly raised, and a container so the
    chart/ranking split only kicks in when the panel is actually wide enough. */
 .dsh-nudge-stats-group{container-type:inline-size;container-name:dsh-nudge-stats;background:var(--dsw-alias-bg-layer-1,#fff);box-shadow:0 1px 2px rgba(15,23,42,.04)}
 .dsh-nudge-settings-error{color:var(--dsw-alias-state-error-primary,#c8433c);font-size:12px;line-height:1.5}
+.dsh-nudge-tip{position:fixed;z-index:${Z_INDEX + 2};box-sizing:border-box;padding:7px 10px;border-radius:9px;background:color-mix(in srgb,var(--dsw-alias-label-primary,#1a1a1a) 92%,#000);color:#fff;font:12px/1.45 ui-sans-serif,system-ui,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;box-shadow:0 10px 26px -8px rgba(15,23,42,.45);pointer-events:none;animation:dsh-nudge-tip-in .12s ease-out}
+@keyframes dsh-nudge-tip-in{from{opacity:0;transform:translateY(-2px)}to{opacity:1;transform:none}}
+.dsh-nudge-tip-head{display:flex;align-items:baseline;gap:6px;white-space:nowrap}
+.dsh-nudge-tip-title{font-weight:600}
+.dsh-nudge-tip-state{color:color-mix(in srgb,var(--dn-accent) 55%,#fff);font-weight:600}
+.dsh-nudge-tip-hint{margin-top:2px;font-size:11px;line-height:1.5;opacity:.78}
+@media (prefers-reduced-motion:reduce){.dsh-nudge-tip{animation:none}}
 `.trim()
 
     /**
@@ -4239,6 +4309,13 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
         const askTitle = insertMode ? t('insertHint') : t('askHint')
         /** Keep the caret where it is: clicks on the window must not steal focus. */
         const keepFocus = (event) => event.preventDefault()
+        /** Hover/focus handlers for the explanation bubble of one control. */
+        const tipProps = (key) => ({
+          onMouseEnter: (event) => runtime.showTip(key, event?.currentTarget?.getBoundingClientRect?.()),
+          onMouseLeave: () => runtime.hideTip(),
+          onFocus: (event) => runtime.showTip(key, event?.currentTarget?.getBoundingClientRect?.()),
+          onBlur: () => runtime.hideTip(),
+        })
         /** Clicking the window title folds the window into the pill. */
         function onNameClick() {
           if (suppressTitleClick.current) {
@@ -4495,6 +4572,56 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
           runtime.setCollapsed(false)
         }
 
+        /** Place the explanation bubble below its control, flipping when short on room. */
+        function tipPosition(box) {
+          const width = 224
+          const viewportWidth =
+            typeof window !== 'undefined' && Number.isFinite(window.innerWidth) ? window.innerWidth : 360
+          const viewportHeight =
+            typeof window !== 'undefined' && Number.isFinite(window.innerHeight) ? window.innerHeight : 720
+          const center = (box.left + box.right) / 2
+          const left = Math.min(Math.max(8, center - width / 2), Math.max(8, viewportWidth - width - 8))
+          const below = box.bottom + 6
+          const flip = below + 92 > viewportHeight
+          return {
+            left: `${Math.round(left)}px`,
+            top: `${Math.round(flip ? box.top - 6 : below)}px`,
+            width: `${width}px`,
+            ...(flip ? { transform: 'translateY(-100%)' } : null),
+          }
+        }
+
+        /** Title, live state and one-line purpose of a window control. */
+        function tipSpecOf(key) {
+          if (key === 'quick') {
+            return { title: t('quickTitle'), state: state.quick ? t('tipOn') : t('tipOff'), hint: t('quickTip') }
+          }
+          if (key === 'autopaste') {
+            return {
+              title: t('autoPasteTitle'),
+              state: state.autoPaste ? t('tipOn') : t('tipOff'),
+              hint: t('autoPasteTip'),
+            }
+          }
+          if (key === 'delivery') {
+            const steer = delivery === 'steer'
+            return {
+              title: t('deliveryTitle'),
+              state: steer ? t('steer') : t('queue'),
+              hint: steer ? t('deliveryTipSteer') : t('deliveryTipQueue'),
+            }
+          }
+          if (key === 'turbo') {
+            return { title: t('turboTitle'), state: turbo ? t('tipOn') : t('tipOff'), hint: t('turboTip') }
+          }
+          if (key === 'settings') {
+            return { title: t('openSettings'), state: '', hint: t('settingsTip') }
+          }
+          return null
+        }
+        const tipSpec = state.tip === null ? null : tipSpecOf(state.tip.key)
+        const tipStyle = state.tip === null || tipSpec === null ? null : tipPosition(state.tip)
+
         return h(
           React.Fragment,
           null,
@@ -4543,8 +4670,8 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
               {
                 type: 'button',
                 className: 'dsh-nudge-icon',
-                title: t('openSettings'),
                 'aria-label': t('openSettings'),
+                ...tipProps('settings'),
                 onClick: () => {
                   // A second press leaves the in-window form, like any toggle.
                   if (state.settingsOpen) runtime.closeSettings()
@@ -4641,9 +4768,9 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
                   {
                     type: 'button',
                     className: `dsh-nudge-head-icon dsh-nudge-annotation-quick${state.quick ? ' active' : ''}`,
-                    title: state.quick ? t('quickOn') : t('quickOff'),
                     'aria-label': state.quick ? t('quickOn') : t('quickOff'),
                     'aria-pressed': state.quick ? 'true' : 'false',
+                    ...tipProps('quick'),
                     onClick: () => runtime.setQuick(!state.quick),
                   },
                   quoteIcon,
@@ -4653,9 +4780,9 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
                   {
                     type: 'button',
                     className: `dsh-nudge-head-icon dsh-nudge-annotation-autopaste${state.autoPaste ? ' active' : ''}`,
-                    title: state.autoPaste ? t('autoPasteOn') : t('autoPasteOff'),
                     'aria-label': state.autoPaste ? t('autoPasteOn') : t('autoPasteOff'),
                     'aria-pressed': state.autoPaste ? 'true' : 'false',
+                    ...tipProps('autopaste'),
                     onClick: () => runtime.setAutoPaste(!state.autoPaste),
                   },
                   pasteIcon,
@@ -4804,11 +4931,9 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
                       className: `dsh-nudge-head-icon dsh-nudge-delivery-toggle${insertMode ? ' inactive' : ''}${
                         delivery === 'steer' ? ' steer' : ''
                       }`,
-                      title: insertMode
-                        ? t('modeInactive')
-                        : `${t('mode')}：${delivery === 'steer' ? t('steer') : t('queue')}（点击切换）`,
                       'aria-label': `${t('mode')}：${delivery === 'steer' ? t('steer') : t('queue')}`,
                       disabled: insertMode,
+                      ...tipProps('delivery'),
                       onClick: () => runtime.setDelivery(delivery === 'steer' ? 'followup' : 'steer'),
                     },
                     delivery === 'steer' ? steerIcon : queueIcon,
@@ -4818,9 +4943,9 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
                     {
                       type: 'button',
                       className: `dsh-nudge-head-icon dsh-nudge-turbo-toggle${turbo ? ' active' : ''}`,
-                      title: `${t('turboTitle')}：${turbo ? t('switchOn') : t('switchOff')}（点击切换）`,
-                      'aria-label': t('turboTitle'),
+                      'aria-label': `${t('turboTitle')}：${turbo ? t('switchOn') : t('switchOff')}`,
                       'aria-pressed': turbo ? 'true' : 'false',
+                      ...tipProps('turbo'),
                       onClick: () => runtime.setTurbo(!turbo),
                     },
                     boltIcon,
@@ -4988,6 +5113,19 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
             ),
           ),
           popup,
+          tipSpec !== null && tipStyle !== null
+            ? h(
+                'div',
+                { key: 'tip', className: 'dsh-nudge-tip', role: 'tooltip', style: tipStyle },
+                h(
+                  'div',
+                  { className: 'dsh-nudge-tip-head' },
+                  h('span', { className: 'dsh-nudge-tip-title' }, tipSpec.title),
+                  tipSpec.state === '' ? null : h('span', { className: 'dsh-nudge-tip-state' }, tipSpec.state),
+                ),
+                tipSpec.hint === '' ? null : h('div', { className: 'dsh-nudge-tip-hint' }, tipSpec.hint),
+              )
+            : null,
         ),
         )
       }
@@ -5475,11 +5613,6 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
         const statsDays = state.stats?.days ?? {}
         /** The trend window, oldest first; the chart and Top 3 share it. */
         const windowKeys = recentDayKeys(15)
-        const statLabels = {
-          send: t('statsSend'),
-          insert: t('statsInsertShort'),
-          annotation: t('statsAnnotation'),
-        }
         const windowTotals = { send: 0, insert: 0, annotation: 0 }
         for (const key of windowKeys) {
           for (const field of STAT_FIELDS) windowTotals[field] += statsDays[key]?.[field] ?? 0
@@ -5491,6 +5624,10 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
         // question ("how much did I annotate?").
         const inputSeries = windowKeys.map((key) => (statsDays[key]?.send ?? 0) + (statsDays[key]?.insert ?? 0))
         const noteSeries = windowKeys.map((key) => statsDays[key]?.annotation ?? 0)
+        // Today splits the same two ways as the chart: a quick input counts
+        // once whether it was sent or written, and notes stay their own number.
+        const todayInputs = inputSeries[windowKeys.length - 1] ?? 0
+        const todayNotes = noteSeries[windowKeys.length - 1] ?? 0
         const hasActivity = inputSeries.some((value) => value > 0) || noteSeries.some((value) => value > 0)
         /** Tallest value in either series; both lines share one scale. */
         const peak = Math.max(1, ...inputSeries, ...noteSeries)
@@ -5511,45 +5648,60 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
           .sort((a, b) => b.total - a.total || String(a.preset.id).localeCompare(String(b.preset.id)))
           .slice(0, 3)
         const topTotal = topPresets.reduce((sum, item) => sum + item.total, 0)
-        const topShare = windowInputs > 0 ? Math.min(100, Math.round((topTotal / windowInputs) * 100)) : 0
 
-        // Hand-rolled SVG: the plugin ships no chart dependency. One shared
-        // scale and equally spaced days keep both lines comparable.
+        // Hand-rolled SVG: the plugin ships no chart dependency. The days are
+        // discrete, so the line runs straight between them and every day that
+        // actually carries a count gets a marker: no invented smooth curve, and
+        // the reader can still see where the data really is.
         const CHART_W = 320
-        const CHART_H = 96
-        const CHART_PAD_X = 4
-        const CHART_PAD_TOP = 10
-        const CHART_PAD_BOTTOM = 6
-        const step = (CHART_W - CHART_PAD_X * 2) / Math.max(1, windowKeys.length - 1)
+        const CHART_H = 168
+        const CHART_PAD_X = 6
+        const CHART_PAD_TOP = 12
+        const CHART_PAD_BOTTOM = 8
         const round = (value) => Math.round(value * 10) / 10
-        const xAt = (index) => CHART_PAD_X + index * step
-        const yAt = (value) =>
-          CHART_H - CHART_PAD_BOTTOM - (value / peak) * (CHART_H - CHART_PAD_TOP - CHART_PAD_BOTTOM)
-        /** One smooth cubic path through a series, in viewBox units. */
-        function smoothPath(points) {
-          const baseline = CHART_H - CHART_PAD_BOTTOM
-          // Catmull-Rom can overshoot a spike below the axis; clamping the
-          // control points keeps the curve inside its own value band.
-          const clampY = (value) => Math.min(baseline, Math.max(CHART_PAD_TOP, value))
-          let d = `M ${round(points[0].x)} ${round(points[0].y)}`
-          for (let index = 0; index < points.length - 1; index += 1) {
-            const p0 = points[index - 1] ?? points[index]
-            const p1 = points[index]
-            const p2 = points[index + 1]
-            const p3 = points[index + 2] ?? p2
-            const tension = 0.16
-            const c1x = p1.x + (p2.x - p0.x) * tension
-            const c1y = clampY(p1.y + (p2.y - p0.y) * tension)
-            const c2x = p2.x - (p3.x - p1.x) * tension
-            const c2y = clampY(p2.y - (p3.y - p1.y) * tension)
-            d += ` C ${round(c1x)} ${round(c1y)}, ${round(c2x)} ${round(c2y)}, ${round(p2.x)} ${round(p2.y)}`
-          }
-          return d
+        const baseline = CHART_H - CHART_PAD_BOTTOM
+        const plotHeight = CHART_H - CHART_PAD_TOP - CHART_PAD_BOTTOM
+        /** The scale tops out at the busiest day; the top padding is the headroom. */
+        const scaleMax = Math.max(1, peak)
+        const xAt = (index) =>
+          windowKeys.length <= 1
+            ? CHART_PAD_X
+            : CHART_PAD_X + (index * (CHART_W - CHART_PAD_X * 2)) / (windowKeys.length - 1)
+        const yAt = (value) => baseline - (Math.max(0, value) / scaleMax) * plotHeight
+        /** Straight segments between days: the value between two days is unknown. */
+        function linePath(series) {
+          return series
+            .map((value, index) => `${index === 0 ? 'M' : 'L'} ${round(xAt(index))} ${round(yAt(value))}`)
+            .join(' ')
         }
-        const inputLine = smoothPath(inputSeries.map((value, index) => ({ x: xAt(index), y: yAt(value) })))
-        const noteLine = smoothPath(noteSeries.map((value, index) => ({ x: xAt(index), y: yAt(value) })))
-        const areaOf = (line) =>
-          `${line} L ${round(CHART_W - CHART_PAD_X)} ${CHART_H - CHART_PAD_BOTTOM} L ${round(CHART_PAD_X)} ${CHART_H - CHART_PAD_BOTTOM} Z`
+        /** The same line closed down to the baseline, for the soft fill. */
+        function areaPath(series) {
+          const first = round(xAt(0))
+          const last = round(xAt(series.length - 1))
+          return `${linePath(series)} L ${last} ${baseline} L ${first} ${baseline} Z`
+        }
+        /** One marker per day that really carries a count. */
+        function pointsOf(series, className) {
+          return series.flatMap((value, index) =>
+            value <= 0
+              ? []
+              : [
+                  h('circle', {
+                    key: `point-${className}-${index}`,
+                    className: `dsh-nudge-chart-point ${className}`,
+                    cx: round(xAt(index)),
+                    cy: round(yAt(value)),
+                    r: className === 'input' ? '2.9' : '2.5',
+                  }),
+                ],
+          )
+        }
+        /** Gridlines at half and full height, so the scale is readable. */
+        const gridValues = [1, 0.5]
+        const inputLine = linePath(inputSeries)
+        const noteLine = linePath(noteSeries)
+        const inputArea = areaPath(inputSeries)
+        const noteArea = areaPath(noteSeries)
         const todayIndex = windowKeys.length - 1
 
         /** Fill `{n}` in a message template. */
@@ -5647,13 +5799,16 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
         }
 
         /** A nested, closed-by-default editor (the long prompt list). */
-        function foldGroup(key, title, meta, children) {
+        function foldGroup(key, title, meta, children, hint) {
           return h(
             'details',
             { key, className: 'dsh-nudge-settings-fold' },
             h(
               'summary',
-              { className: 'dsh-nudge-settings-fold-head' },
+              {
+                className: 'dsh-nudge-settings-fold-head',
+                ...(typeof hint === 'string' && hint !== '' ? { title: hint } : null),
+              },
               h('span', null, title),
               meta ? h('span', { className: 'dsh-nudge-settings-fold-meta' }, meta) : null,
             ),
@@ -5681,7 +5836,7 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
               h(
                 'div',
                 { className: 'dsh-nudge-stats-trend-head' },
-                h('span', null, t('statsRecent')),
+                h('span', { className: 'dsh-nudge-chart-peak' }, fill(t('statsPeak'), peak)),
                 h('span', { className: 'dsh-nudge-stats-total' }, fill(t('statsTimes'), windowTotal)),
               ),
               h(
@@ -5701,37 +5856,47 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
                     h(
                       'linearGradient',
                       { id: 'dsh-nudge-fill-input', x1: '0', y1: '0', x2: '0', y2: '1' },
-                      h('stop', { offset: '0%', stopColor: 'var(--dsw-static-deepseek-450,#5686fe)', stopOpacity: '0.2' }),
+                      h('stop', { offset: '0%', stopColor: 'var(--dsw-static-deepseek-450,#5686fe)', stopOpacity: '0.14' }),
                       h('stop', { offset: '100%', stopColor: 'var(--dsw-static-deepseek-450,#5686fe)', stopOpacity: '0' }),
                     ),
                     h(
                       'linearGradient',
                       { id: 'dsh-nudge-fill-note', x1: '0', y1: '0', x2: '0', y2: '1' },
-                      h('stop', { offset: '0%', stopColor: 'var(--dn-note)', stopOpacity: '0.18' }),
+                      h('stop', { offset: '0%', stopColor: 'var(--dn-note)', stopOpacity: '0.10' }),
                       h('stop', { offset: '100%', stopColor: 'var(--dn-note)', stopOpacity: '0' }),
                     ),
                   ),
+                  ...gridValues.map((fraction) =>
+                    h('line', {
+                      key: `grid-${fraction}`,
+                      className: 'dsh-nudge-chart-grid',
+                      x1: '0',
+                      y1: round(baseline - fraction * plotHeight),
+                      x2: CHART_W,
+                      y2: round(baseline - fraction * plotHeight),
+                      vectorEffect: 'non-scaling-stroke',
+                    }),
+                  ),
                   h('line', {
+                    className: 'dsh-nudge-chart-axis-line',
                     x1: '0',
-                    y1: CHART_H - CHART_PAD_BOTTOM,
+                    y1: baseline,
                     x2: CHART_W,
-                    y2: CHART_H - CHART_PAD_BOTTOM,
-                    stroke: 'var(--dn-line)',
-                    strokeWidth: '1',
+                    y2: baseline,
                     vectorEffect: 'non-scaling-stroke',
                   }),
                   hasActivity
                     ? h('path', {
-                        d: areaOf(noteLine),
+                        className: 'dsh-nudge-chart-area note',
+                        d: noteArea,
                         fill: 'url(#dsh-nudge-fill-note)',
-                        stroke: 'none',
                       })
                     : null,
                   hasActivity
                     ? h('path', {
-                        d: areaOf(inputLine),
+                        className: 'dsh-nudge-chart-area input',
+                        d: inputArea,
                         fill: 'url(#dsh-nudge-fill-input)',
-                        stroke: 'none',
                       })
                     : null,
                   hasActivity
@@ -5741,8 +5906,8 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
                         fill: 'none',
                         stroke: 'var(--dn-note)',
                         strokeWidth: '1.6',
-                        strokeLinecap: 'round',
                         strokeLinejoin: 'round',
+                        strokeLinecap: 'round',
                         vectorEffect: 'non-scaling-stroke',
                       })
                     : null,
@@ -5753,31 +5918,13 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
                         fill: 'none',
                         stroke: 'var(--dsw-static-deepseek-450,#5686fe)',
                         strokeWidth: '1.8',
-                        strokeLinecap: 'round',
                         strokeLinejoin: 'round',
+                        strokeLinecap: 'round',
                         vectorEffect: 'non-scaling-stroke',
                       })
                     : null,
-                  inputSeries[todayIndex] > 0
-                    ? h('circle', {
-                        cx: round(xAt(todayIndex)),
-                        cy: round(yAt(inputSeries[todayIndex])),
-                        r: '2.6',
-                        fill: 'var(--dsw-static-deepseek-450,#5686fe)',
-                        stroke: 'var(--dsw-alias-bg-layer-1,#fff)',
-                        strokeWidth: '1.4',
-                      })
-                    : null,
-                  noteSeries[todayIndex] > 0
-                    ? h('circle', {
-                        cx: round(xAt(todayIndex)),
-                        cy: round(yAt(noteSeries[todayIndex])),
-                        r: '2.6',
-                        fill: 'var(--dn-note)',
-                        stroke: 'var(--dsw-alias-bg-layer-1,#fff)',
-                        strokeWidth: '1.4',
-                      })
-                    : null,
+                  ...(hasActivity ? pointsOf(noteSeries, 'note') : []),
+                  ...(hasActivity ? pointsOf(inputSeries, 'input') : []),
                 ),
                 hasActivity
                   ? null
@@ -5846,12 +5993,15 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
                 h(
                   'div',
                   { className: 'dsh-nudge-stats' },
-                  ...STAT_FIELDS.map((field) =>
+                  ...[
+                    { key: 'input', value: todayInputs, label: t('statsLegendInput') },
+                    { key: 'note', value: todayNotes, label: t('statsAnnotation') },
+                  ].map((item) =>
                     h(
                       'div',
-                      { key: field, className: 'dsh-nudge-stat' },
-                      h('span', { className: 'dsh-nudge-stat-value' }, String(statsDays[today]?.[field] ?? 0)),
-                      h('span', { className: 'dsh-nudge-stat-label' }, statLabels[field]),
+                      { key: item.key, className: 'dsh-nudge-stat' },
+                      h('span', { className: 'dsh-nudge-stat-value' }, String(item.value)),
+                      h('span', { className: 'dsh-nudge-stat-label' }, item.label),
                     ),
                   ),
                 ),
@@ -5876,8 +6026,8 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
                       ),
                     ),
                   ),
-              topPresets.length > 0 && windowInputs > 0
-                ? h('div', { className: 'dsh-nudge-stats-share' }, fill(t('statsTopShare'), topShare))
+              topPresets.length > 0
+                ? h('div', { className: 'dsh-nudge-stats-share' }, fill(t('statsTopShare'), topTotal))
                 : null,
             ),
           ),
@@ -5888,9 +6038,9 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
           { className: 'dsh-nudge-settings' },
           h('style', { key: 'dsh-nudge-css' }, CSS),
           statsSection,
-          // The settings page follows the floating window's modules: notes
-          // first (as in the window), then prompts, then the status row. The
-          // long prompt editor starts folded so the switches stay in view.
+          // The settings page follows the floating window: notes, quick input,
+          // then appearance (border and status line). Both long editors start
+          // folded so the switches stay in view.
           settingsSection('annotations', t('annotationsTitle'), null, [
             toggleRow({
               key: 'quick',
@@ -5908,7 +6058,7 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
             }),
           ]),
           settingsSection('quickinput', t('nudgeModule'), t('presetsHint'), [
-            foldGroup('presets', t('preset'), t('presetCount').replace('{n}', String(state.presets.length)), [
+            foldGroup('presets', t('presetList'), t('presetCount').replace('{n}', String(state.presets.length)), [
             // The list is a table of contents: names only, bodies on demand.
             h(
               'div',
@@ -6052,9 +6202,12 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
             ]),
             h(
               'div',
-              { key: 'delivery', className: 'dsh-nudge-settings-group' },
+              {
+                key: 'delivery',
+                className: 'dsh-nudge-settings-group dsh-nudge-settings-inline',
+                title: t('deliveryDesc'),
+              },
               h('span', { className: 'dsh-nudge-toggle-title' }, t('deliveryTitle')),
-              h('span', { className: 'dsh-nudge-toggle-desc' }, t('deliveryDesc')),
               h(
                 'div',
                 { className: 'dsh-nudge-presets', role: 'group', 'aria-label': t('deliveryTitle') },
@@ -6063,6 +6216,7 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
                   {
                     type: 'button',
                     className: `dsh-nudge-chip${delivery === 'steer' ? ' active' : ''}`,
+                    title: t('deliveryTipSteer'),
                     'aria-pressed': delivery === 'steer' ? 'true' : 'false',
                     onClick: () => runtime.setDelivery('steer'),
                   },
@@ -6073,6 +6227,7 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
                   {
                     type: 'button',
                     className: `dsh-nudge-chip${delivery === 'steer' ? '' : ' active'}`,
+                    title: t('deliveryTipQueue'),
                     'aria-pressed': delivery === 'steer' ? 'false' : 'true',
                     onClick: () => runtime.setDelivery('followup'),
                   },
@@ -6091,9 +6246,12 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
           settingsSection('appearance', t('appearanceTitle'), null, [
             h(
               'div',
-              { key: 'frame', className: 'dsh-nudge-settings-group' },
+              {
+                key: 'frame',
+                className: 'dsh-nudge-settings-group dsh-nudge-settings-inline',
+                title: t('frameDesc'),
+              },
               h('span', { className: 'dsh-nudge-toggle-title' }, t('frameTitle')),
-              h('span', { className: 'dsh-nudge-toggle-desc' }, t('frameDesc')),
               h(
                 'div',
                 { className: 'dsh-nudge-presets', role: 'group', 'aria-label': t('frameTitle') },
@@ -6112,55 +6270,57 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
                 ),
               ),
             ),
-          ]),
-          settingsSection('statusline', t('tipsTitle'), t('tipsHint'), [
-            // The paste box sits above the list: it is the way in, so it must not
-            // hide under a dozen existing lines.
-            h(
-              'div',
-              { key: 'tip-draft', className: 'dsh-nudge-tip-draft' },
-              h('textarea', {
-                value: draftTip,
-                placeholder: t('tipsPastePlaceholder'),
-                'aria-label': t('tipsPastePlaceholder'),
-                onChange: (event) => setDraftTip(event.target.value),
-                onPaste: onTipPaste,
-                onKeyDown: (event) => {
-                  if (event.key === 'Enter' && (event.ctrlKey === true || event.metaKey === true)) {
-                    addTipLine()
-                  }
-                },
-              }),
-              h('button', { type: 'button', className: 'dsh-nudge-btn primary', onClick: addTipLine }, t('addTip')),
-            ),
-            note.length > 0 ? h('div', { key: 'tips-note', className: 'dsh-nudge-settings-note' }, note) : null,
-            ...state.tips.map((line, index) =>
-              h(TipRow, {
-                key: `tip-${index}`,
-                value: line,
-                t,
-                onError: setError,
-                index,
-              }),
-            ),
-            h(
-              'div',
-              { key: 'tips-reset', className: 'dsh-nudge-preset-actions' },
+            // The status row belongs to how the window looks, so it lives with
+            // the border. Its list is long: the editor starts folded.
+            foldGroup('tips', t('tipsTitle'), t('tipsCount').replace('{n}', String(state.tips.length)), [
+              // The paste box sits above the list: it is the way in, so it must
+              // not hide under a dozen existing lines.
               h(
-                'button',
-                {
-                  type: 'button',
-                  className: 'dsh-nudge-btn',
-                  onClick: () => {
-                    runtime.resetTips()
-                    setError('')
-                    setNote('')
+                'div',
+                { key: 'tip-draft', className: 'dsh-nudge-tip-draft' },
+                h('textarea', {
+                  value: draftTip,
+                  placeholder: t('tipsPastePlaceholder'),
+                  'aria-label': t('tipsPastePlaceholder'),
+                  onChange: (event) => setDraftTip(event.target.value),
+                  onPaste: onTipPaste,
+                  onKeyDown: (event) => {
+                    if (event.key === 'Enter' && (event.ctrlKey === true || event.metaKey === true)) {
+                      addTipLine()
+                    }
                   },
-                },
-                t('resetTips'),
+                }),
+                h('button', { type: 'button', className: 'dsh-nudge-btn primary', onClick: addTipLine }, t('addTip')),
               ),
-            ),
-          ], { collapsible: true }),
+              note.length > 0 ? h('div', { key: 'tips-note', className: 'dsh-nudge-settings-note' }, note) : null,
+              ...state.tips.map((line, index) =>
+                h(TipRow, {
+                  key: `tip-${index}`,
+                  value: line,
+                  t,
+                  onError: setError,
+                  index,
+                }),
+              ),
+              h(
+                'div',
+                { key: 'tips-reset', className: 'dsh-nudge-preset-actions' },
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    className: 'dsh-nudge-btn',
+                    onClick: () => {
+                      runtime.resetTips()
+                      setError('')
+                      setNote('')
+                    },
+                  },
+                  t('resetTips'),
+                ),
+              ),
+            ], t('tipsHint')),
+          ]),
           error.length > 0 ? h('div', { className: 'dsh-nudge-settings-error' }, error) : null,
         )
       }
