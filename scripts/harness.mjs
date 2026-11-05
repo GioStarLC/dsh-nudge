@@ -79,6 +79,16 @@ export function pointerAt(clientX, clientY, target) {
   }
 }
 
+/** SVG presentation attributes React spells in camelCase. */
+const SVG_CAMEL_ATTRS = new Map([
+  ['strokeWidth', 'stroke-width'],
+  ['strokeLinecap', 'stroke-linecap'],
+  ['strokeLinejoin', 'stroke-linejoin'],
+  ['vectorEffect', 'vector-effect'],
+  ['stopColor', 'stop-color'],
+  ['stopOpacity', 'stop-opacity'],
+])
+
 /** A minimal React stub: the factory only reads createElement and hooks. */
 export const ReactStub = {
   createElement: (type, props, ...children) => ({ type, props, children }),
@@ -308,6 +318,8 @@ export function renderToHtml(node) {
       attrs.push(`class="${escapeHtml(value)}"`)
     } else if (key === 'dangerouslySetInnerHTML' && value?.__html) {
       // handled below
+    } else if (SVG_CAMEL_ATTRS.has(key)) {
+      attrs.push(`${SVG_CAMEL_ATTRS.get(key)}="${escapeHtml(value)}"`)
     } else if (typeof value !== 'object') {
       attrs.push(`${key}="${escapeHtml(value)}"`)
     }

@@ -164,7 +164,7 @@ const written = await call(
         notes: { s1: [{ id: 'n1', quote: '原文' }] },
         stats: {
           days: {
-            '2026-01-02': { send: 2, insert: 1, bogus: 5 },
+            '2026-01-02': { send: 2, insert: 1, bogus: 5, presets: { brief: 3, bad: -1, '': 2 } },
             'not-a-day': { send: 9 },
             '2026-01-01': { annotation: -1 },
           },
@@ -184,6 +184,8 @@ check('write: stats kept', written.json?.store?.stats?.days?.['2026-01-02']?.sen
 check('write: stats unknown field dropped', 'bogus' in (written.json?.store?.stats?.days?.['2026-01-02'] ?? {}), false)
 check('write: stats malformed day dropped', 'not-a-day' in (written.json?.store?.stats?.days ?? {}), false)
 check('write: stats negative count drops the day', '2026-01-01' in (written.json?.store?.stats?.days ?? {}), false)
+check('write: stats keeps per-prompt counts', written.json?.store?.stats?.days?.['2026-01-02']?.presets?.brief, 3)
+check('write: stats drops invalid prompt counts', Object.keys(written.json?.store?.stats?.days?.['2026-01-02']?.presets ?? {}).join('|'), 'brief')
 check('write: blank tip dropped', written.json?.store?.tips?.[0], '第一句')
 check('write: savedAt stamped', typeof written.json?.store?.savedAt, 'string')
 check('write: border width kept', written.json?.store?.frame, 2)
@@ -200,6 +202,7 @@ check('read: presets round-trip', reloaded.json?.store?.presets?.length, 1)
 check('read: notes round-trip', reloaded.json?.store?.notes?.s1?.[0]?.id, 'n1')
 check('read: stats round-trip', reloaded.json?.store?.stats?.days?.['2026-01-02']?.insert, 1)
 check('read: border width round-trips', reloaded.json?.store?.frame, 2)
+check('read: prompt counts round-trip', reloaded.json?.store?.stats?.days?.['2026-01-02']?.presets?.brief, 3)
 
 // The border width is one of the three the browser half offers, nothing else.
 const oddFrame = await call(makeReq({ method: 'POST', body: { store: { frame: 9 } } }))

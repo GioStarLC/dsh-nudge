@@ -24,7 +24,7 @@ import { writeFile, mkdir, access } from 'node:fs/promises'
 import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { dirname, join, resolve } from 'node:path'
-import { boot, tick, renderToHtml, findByClass, pointerAt } from './harness.mjs'
+import { boot, tick, renderToHtml, findByClass, pointerAt, storageStub } from './harness.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const ROOT = resolve(HERE, '..')
@@ -49,6 +49,51 @@ const BROWSER_CANDIDATES = [
     ]
   }),
 ].filter(Boolean)
+
+/** Local calendar day, matching the client's own counter buckets. */
+function localDayKey(date) {
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${date.getFullYear()}-${month}-${day}`
+}
+
+function dayKeyOffset(offset) {
+  const now = new Date()
+  return localDayKey(new Date(now.getFullYear(), now.getMonth(), now.getDate() + offset))
+}
+
+/**
+ * A spread of recent counters so the stats section renders its real shape in
+ * previews (empty stores would only ever show the empty state).
+ */
+function statsPreviewStorage() {
+  const storage = storageStub()
+  const days = {
+    [dayKeyOffset(0)]: { send: 3, insert: 1, annotation: 2, presets: { brief: 2, fast: 1, 'four-line': 1 } },
+    [dayKeyOffset(-1)]: { send: 1, annotation: 1, presets: { brief: 1 } },
+    [dayKeyOffset(-2)]: { insert: 2, presets: { brief: 1, fast: 1 } },
+    [dayKeyOffset(-4)]: { send: 2, insert: 1, annotation: 1, presets: { brief: 1, fast: 1, 'custom-list': 1 } },
+    [dayKeyOffset(-5)]: { annotation: 1 },
+    [dayKeyOffset(-8)]: { send: 1, presets: { fast: 1 } },
+    [dayKeyOffset(-11)]: { send: 2, annotation: 1, presets: { brief: 1, 'four-line': 1 } },
+    [dayKeyOffset(-14)]: { insert: 1, presets: { brief: 1 } },
+  }
+  storage.setItem('dsh-nudge:stats', JSON.stringify({ days }))
+  storage.setItem(
+    'dsh-nudge:presets',
+    JSON.stringify([
+      { id: 'brief', label: '简述', text: '简述一下：目标、已完成、下一步、是否需要我。' },
+      { id: 'fast', label: '快一点', text: '快一点，别先急着测试，先开发完。' },
+      {
+        id: 'four-line',
+        label: '四行',
+        text: '按固定四行汇报当前状态：Goal / Done / Next / Needs you；无内容写「无」。',
+      },
+      { id: 'custom-list', label: '整理成清单', text: '把刚才的结论整理成一份可执行的清单。' },
+    ]),
+  )
+  return storage
+}
 
 /**
  * Named scenes -> a drive function over a freshly booted instance.
@@ -84,10 +129,11 @@ const SCENES = {
   },
   settings: {
     bg: '#f3f4f6',
+    storage: statsPreviewStorage,
     drive: async (b) => {
       b.sessionsList.set({ ids: ['A'], byId: { A: { title: '示例会话', retainedBy: { mainView: 1 } } } })
       await tick()
-      return { view: 'settings.section', width: 560, height: 640 }
+      return { view: 'settings.section', width: 560, height: 1000 }
     },
   },
   'annotation-popup': {
@@ -110,6 +156,7 @@ const SCENES = {
   },
   'settings-panel': {
     bg: '#f6f7f9',
+    storage: statsPreviewStorage,
     drive: async (b) => {
       // No shell settings route in the preview harness: the gear's fallback
       // paints the form inside the window, which is what gets captured.
@@ -178,7 +225,7 @@ function screenshot(browser, htmlPath, pngPath, width, height) {
 async function renderScene(name, { dark }) {
   const scene = SCENES[name]
   if (!scene) throw new Error(`unknown scene "${name}"`)
-  const booted = await boot({})
+  const booted = await boot(scene.storage ? { storage: scene.storage() } : {})
   const { view, width, height } = await scene.drive(booted)
   const Component = findView(booted, view)
   const tree = Component()

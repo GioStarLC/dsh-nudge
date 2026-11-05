@@ -139,6 +139,7 @@ function expandTree(node) {
   check('stats: a send is counted', written.days[todayKey()].send, 1)
   check('stats: the snapshot carries it', booted.runtime.getSnapshot().stats.days[todayKey()].send, 1)
   check('stats: a send is not a write', written.days[todayKey()].insert, undefined)
+  check('stats: a send credits the chosen prompt', written.days[todayKey()].presets.brief, 1)
 
   // The settings section shows today's number under the matching label.
   const Settings = booted.registrations.find((item) => item.entry.name === 'settings.section').Component
@@ -159,6 +160,7 @@ function expandTree(node) {
   const written = JSON.parse(booted.localStorage.getItem('dsh-nudge:stats'))
   check('stats: a composer write is counted', written.days[todayKey()].insert, 1)
   check('stats: a composer write is not a send', written.days[todayKey()].send, undefined)
+  check('stats: a write credits the chosen prompt', written.days[todayKey()].presets.brief, 1)
   check('stats: the write happened', writes.length, 1)
 }
 
@@ -171,6 +173,7 @@ function expandTree(node) {
   const written = JSON.parse(booted.localStorage.getItem('dsh-nudge:stats'))
   check('stats: a new note is counted', written.days[todayKey()].annotation, 1)
   check('stats: a note is not a send', written.days[todayKey()].send, undefined)
+  check('stats: a note credits no prompt', written.days[todayKey()].presets, undefined)
   booted.runtime.captureSelection()
   booted.runtime.quickReply('agree')
   const after = JSON.parse(booted.localStorage.getItem('dsh-nudge:stats'))
@@ -207,7 +210,7 @@ function expandTree(node) {
   )
 }
 
-// --- the 15-day table under today's counters ---------------------------
+// --- the 15-day dashboard: trend + prompt ranking ----------------------
 
 {
   const seeded = storageStub()
@@ -215,38 +218,100 @@ function expandTree(node) {
     'dsh-nudge:stats',
     JSON.stringify({
       days: {
-        [dayKeyOffset(0)]: { send: 2, annotation: 1 },
-        [dayKeyOffset(-1)]: { insert: 3 },
-        [dayKeyOffset(-14)]: { send: 1 },
-        [dayKeyOffset(-15)]: { send: 9 },
+        [dayKeyOffset(0)]: { send: 2, annotation: 1, presets: { brief: 2 } },
+        [dayKeyOffset(-1)]: { insert: 3, presets: { brief: 1, fast: 2 } },
+        [dayKeyOffset(-14)]: { send: 1, presets: { 'four-line': 1 } },
+        [dayKeyOffset(-15)]: { send: 9, presets: { brief: 9 } },
       },
     }),
   )
   const booted = await boot({ storage: seeded })
   const Settings = booted.registrations.find((item) => item.entry.name === 'settings.section').Component
   const tree = expandTree(Settings())
-  const lines = findAllByClass(tree, 'dsh-nudge-stats-line') ?? []
-  check('recent: one header row', (findAllByClass(tree, 'dsh-nudge-stats-line') ?? []).filter((node) => String(node.props.className).includes('head')).length, 1)
-  check('recent: header + 15 days + total', lines.length, 17)
-  check('recent: only today is highlighted', lines.filter((node) => String(node.props.className).includes('today')).length, 1)
-  const todayLine = lines[1]
-  check(
-    'recent: today row carries today\'s counts',
-    (findAllByClass(todayLine, 'dsh-nudge-stats-num') ?? []).map((node) => node.children?.[0]).join('|'),
-    '2|0|1',
+  check('dashboard: usage leads the settings page', String(tree.children?.[1]?.props?.className ?? '').includes('dsh-nudge-stats-group'), true)
+  const headings = (findAllByClass(tree, 'dsh-nudge-settings-section-title') ?? []).map(
+    (node) => node.children?.[0],
   )
-  const oldestLine = lines[lines.length - 2]
+  check('settings: sections follow the window modules', headings.join('|'), '批注|快捷输入|外观|状态行')
+  const sideTopTitle = (findAllByClass(tree, 'dsh-nudge-stats-side-head') ?? [])[0]?.children?.[0]?.children?.[0]
+  check('settings: the ranking uses the window term', sideTopTitle, '快捷输入 Top 3')
+  const help = findAllByClass(tree, 'dsh-nudge-settings-section')
+  check('settings: four grouped sections', help.length, 4)
   check(
-    'recent: the 15th day back is the oldest row',
-    (findAllByClass(oldestLine, 'dsh-nudge-stats-num') ?? []).map((node) => node.children?.[0]).join('|'),
-    '1|0|0',
+    'settings: note switches lead the settings sections',
+    (findAllByClass(help[0], 'dsh-nudge-toggle') ?? []).length,
+    2,
   )
-  const totalLine = lines[lines.length - 1]
   check(
-    'recent: the total sums the window only',
-    (findAllByClass(totalLine, 'dsh-nudge-stats-num') ?? []).map((node) => node.children?.[0]).join('|'),
-    '3|3|1',
+    'settings: prompts live in the quick-input section',
+    (findAllByClass(help[1], 'dsh-nudge-preset-toolbar') ?? []).length,
+    1,
   )
+  const promptFold = (findAllByClass(help[1], 'dsh-nudge-settings-fold') ?? [])[0]
+  check('settings: the prompt editor starts collapsed', promptFold?.type, 'details')
+  check('settings: send behavior stays outside the fold', findByProp(promptFold, 'data-setting', 'turbo'), null)
+  check('settings: the status editor starts collapsed', help[3].type, 'details')
+  const side = (findAllByClass(tree, 'dsh-nudge-stats-side') ?? [])[0]
+  const sideOrder = (side?.children ?? []).map((node) => String(node?.props?.className ?? ''))
+  check(
+    'dashboard: today sits in the sidebar above the ranking',
+    sideOrder[0].includes('dsh-nudge-stats-today') && sideOrder[1].includes('dsh-nudge-stats-side-head'),
+    true,
+  )
+  check('trend: the chart is drawn', (findAllByClass(tree, 'dsh-nudge-chart-svg') ?? []).length, 1)
+  check('trend: one hover target per day', (findAllByClass(tree, 'dsh-nudge-chart-hit') ?? []).length, 15)
+  check(
+    'trend: both series are drawn',
+    (findAllByClass(tree, 'dsh-nudge-chart-line') ?? []).map((node) => node.props.className).join('|'),
+    'dsh-nudge-chart-line note|dsh-nudge-chart-line input',
+  )
+  const total = (findAllByClass(tree, 'dsh-nudge-stats-total') ?? [])[0]?.children?.[0]
+  check('trend: the total covers the window only', total, '共 7 次')
+
+  const topItems = findAllByClass(tree, 'dsh-nudge-top-item') ?? []
+  check('top: three prompts ranked', topItems.length, 3)
+  check(
+    'top: labels run from most to least used',
+    topItems.map((node) => (findAllByClass(node, 'dsh-nudge-top-label') ?? [])[0]?.children?.[0]).join('|'),
+    '简述|快一点|四行',
+  )
+  check(
+    'top: counts match the window',
+    topItems
+      .map((node) => (findAllByClass(node, 'dsh-nudge-top-count') ?? [])[0]?.children?.[0])
+      .join('|'),
+    '3 次|2 次|1 次',
+  )
+  check(
+    'top: rank badges are numbered',
+    topItems
+      .map((node) => (findAllByClass(node, 'dsh-nudge-top-rank') ?? [])[0]?.children?.[0])
+      .join('|'),
+    '1|2|3',
+  )
+  check('top: the share line explains the ranking', (findAllByClass(tree, 'dsh-nudge-stats-share') ?? [])[0]?.children?.[0], '占近 15 天快捷输入的 100%')
+}
+
+{
+  // No counters at all: the board keeps its shape and says so in place.
+  const booted = await boot({})
+  const Settings = booted.registrations.find((item) => item.entry.name === 'settings.section').Component
+  const tree = expandTree(Settings())
+  check('empty: the chart explains itself', (findAllByClass(tree, 'dsh-nudge-chart-empty') ?? []).length, 1)
+  check('empty: no prompt ranking is claimed', (findAllByClass(tree, 'dsh-nudge-top-item') ?? []).length, 0)
+  check('empty: the side panel says so', (findAllByClass(tree, 'dsh-nudge-stats-side-empty') ?? []).length, 1)
+}
+
+{
+  // Older stats have day totals but no per-prompt detail; say that instead of
+  // claiming no prompt was ever used.
+  const seeded = storageStub()
+  seeded.setItem('dsh-nudge:stats', JSON.stringify({ days: { [dayKeyOffset(0)]: { send: 2 } } }))
+  const booted = await boot({ storage: seeded })
+  const Settings = booted.registrations.find((item) => item.entry.name === 'settings.section').Component
+  const tree = expandTree(Settings())
+  const note = (findAllByClass(tree, 'dsh-nudge-stats-side-empty') ?? [])[0]?.children?.[0]
+  check('top: an upgraded record explains the missing breakdown', note, '口径明细从本次更新后开始记录。')
 }
 
 // --- window border width ------------------------------------------------
@@ -293,7 +358,7 @@ function expandTree(node) {
   await tick()
   check('delivery switch accepted', booted.runtime.setDelivery('followup'), true)
   check('effective delivery', booted.runtime.effectiveDelivery(), 'followup')
-  check('switching delivery says so in words', booted.runtime.getSnapshot().flash, '方式：排队')
+  check('switching delivery says so in words', booted.runtime.getSnapshot().flash, '发送方式：排队')
   check('turbo toggle says so in words', booted.runtime.setTurbo(true) && booted.runtime.getSnapshot().flash, '急速模式：开')
   check('quick toggle says so in words', booted.runtime.setQuick(true) && booted.runtime.getSnapshot().flash, '快速批注：开')
   booted.runtime.ask()
@@ -340,7 +405,7 @@ function expandTree(node) {
   booted.runtime.ask()
   await tick()
   const state = booted.runtime.getSnapshot()
-  includes('delivery failure: reason', state.error, '投递失败')
+  includes('delivery failure: reason', state.error, '发送失败')
   includes('delivery failure: host detail kept', state.error, 'boom')
 }
 
@@ -1380,7 +1445,8 @@ function flowItemStub(key, text, children = []) {
   check('turbo prompt exposes double-click', typeof findByClass(tree, 'dsh-nudge-chip')?.props?.onDoubleClick, 'function')
 
   const settings = booted.registrations.find((item) => item.entry.name === 'settings.section')
-  const toggle = findByProp(settings.Component(), 'type', 'checkbox')
+  const turboRow = findByProp(settings.Component(), 'data-setting', 'turbo')
+  const toggle = findAllByTag(turboRow, 'input')[0]
   check('settings renders the turbo switch', Boolean(toggle), true)
   check('settings switch reflects turbo', toggle?.props?.checked, true)
   toggle.props.onChange({ target: { checked: false } })
@@ -2027,7 +2093,8 @@ const durable = (type, seq, data) => ({ type: 'event', event: { type, seq, time:
   runtime.resetTips()
   check('tips: reset restores the built-ins', runtime._debug.state().tips[0], start[0])
   const settings = booted.registrations.find((item) => item.entry.name === 'settings.section')
-  const pasteBox = findByProp(settings.Component(), 'placeholder', '整段粘贴会自动拆成一句一句；也可以手写，一行一句（Ctrl+Enter 提交）')
+  const tipDraft = findByClass(settings.Component(), 'dsh-nudge-tip-draft')
+  const pasteBox = findAllByTag(tipDraft, 'textarea')[0]
   check('tips: the paste box is a textarea', pasteBox?.type, 'textarea')
   check('tips: the paste box starts empty', pasteBox?.props?.value, '')
   pasteBox?.props?.onPaste?.({

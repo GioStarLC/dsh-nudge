@@ -58,6 +58,10 @@ const MAX_STORE_TIPS = 50
 /** Cap on the daily counter rows a record may carry, in local dates. */
 const MAX_STORE_DAYS = 60
 
+/** Cap on the per-preset counts one day may carry, and on an id's length. */
+const MAX_STORE_PRESETS = 20
+const MAX_STORE_PRESET_ID = 80
+
 /** The counters the browser half records; anything else is dropped. */
 const STAT_FIELDS = ['send', 'insert', 'annotation']
 
@@ -175,6 +179,19 @@ function pickStore(value) {
         const count = row[field]
         if (Number.isInteger(count) && count > 0) counts[field] = count
       }
+      const rawPresets = plainObjectOr(row.presets, {})
+      const presets = {}
+      let kept = 0
+      for (const id of Object.keys(rawPresets)) {
+        if (kept >= MAX_STORE_PRESETS) break
+        if (id.length === 0 || id.length > MAX_STORE_PRESET_ID) continue
+        if (id === '__proto__' || id === 'constructor' || id === 'prototype') continue
+        const count = rawPresets[id]
+        if (!Number.isInteger(count) || count <= 0) continue
+        presets[id] = count
+        kept += 1
+      }
+      if (kept > 0) counts.presets = presets
       if (Object.keys(counts).length > 0) days[key] = counts
     }
     store.stats = { days }

@@ -108,6 +108,9 @@ window.__ModuleLoader__.load({
     const STATS_KEY = 'dsh-nudge:stats'
     /** How many local days the counters keep before the oldest are dropped. */
     const STATS_DAYS = 60
+    /** How many preset ids one day may carry, and how long an id may be. */
+    const MAX_STAT_PRESETS = 20
+    const MAX_STAT_PRESET_ID = 80
     /** Upper bound on those lines, so the settings section stays scrollable. */
     const MAX_TIPS = 20
     /** Built-in idle lines; the settings section can edit, add and reset them. */
@@ -160,9 +163,9 @@ window.__ModuleLoader__.load({
       insert: '写入输入框',
       insertHint: '把选中的口径追加到输入框末尾',
       insertUnavailable: '输入框未就绪，暂时无法写入文案。',
-      modeInactive: '写入输入框时不需要投递方式',
+      modeInactive: '写入输入框时不需要发送方式',
       turboTitle: '急速模式',
-      turboDesc: '隐藏底部按钮：双击口径直接执行（光标在输入框就写入，否则发送）。',
+      turboDesc: '窗口不显示发送按钮；双击口径直接执行。',
       switchOn: '开',
       switchOff: '关',
       answerLabel: '我的回答：',
@@ -177,19 +180,20 @@ window.__ModuleLoader__.load({
       quickOn: '快速批注：开',
       quickOff: '快速批注：关',
       quickTitle: '快速批注',
-      quickHint: '开启后选中对话文字即刻弹出批注卡片；关闭时用标题栏的「+」手动捕获选区。',
+      quickHint: '选中对话文字就弹出批注卡片；关闭后改用标题栏的「+」。',
       autoPasteTitle: '自动粘贴批注',
-      autoPasteDesc: '点选输入框时，把当前待发送的批注自动写入输入框。',
-      autoPasteOn: '自动粘贴：开',
-      autoPasteOff: '自动粘贴：关',
+      autoPasteDesc: '点输入框时，把待发送的批注写进去。',
+      autoPasteOn: '自动粘贴批注：开',
+      autoPasteOff: '自动粘贴批注：关',
+      appearanceTitle: '外观',
       frameTitle: '窗口边框',
       frameDesc: '悬浮窗描边的粗细。',
       frameThin: '细',
       frameNormal: '标准',
       frameThick: '粗',
       copyHint: '复制选中的原文',
-      deliveryTitle: '投递方式',
-      deliveryDesc: '「直接打断」中止当前回答立刻处理；「排队」等这一轮结束后再处理。',
+      deliveryTitle: '发送方式',
+      deliveryDesc: '直接打断会中止当前回答；排队等这一轮结束。',
       sortUp: '上移',
       sortDown: '下移',
       nudgeModule: '快捷输入',
@@ -218,27 +222,27 @@ window.__ModuleLoader__.load({
       statusWaiting: '等待中',
       statusDone: '已返回',
       statusError: '失败',
-      mode: '方式',
+      mode: '发送方式',
       queue: '排队',
       steer: '直接打断',
       preset: '口径',
       noSession: '没有打开的会话，无法询问。',
       waitingQuestion: 'agent 正在等待你的回答',
-      transportMissing: '当前界面没有投递通道，无法发起询问。',
-      deliveryFailed: '投递失败',
+      transportMissing: '当前界面没有发送通道，无法发起询问。',
+      deliveryFailed: '发送失败',
       sessionClosed: '会话已结束或已归档，无法询问。',
-      badRequest: '投递内容被拒绝，无法询问。',
+      badRequest: '发送内容被拒绝，无法询问。',
       timeoutNote: '等待回答超时（agent 可能仍在运行）。',
       stillRunningNote: 'agent 仍在运行，继续等待回答。',
       unconfirmedNote: '未能确认是否已回答，请查看对话。',
-      noReceiptNote: '未收到询问的投递确认（会话可能已归档或已结束）。',
+      noReceiptNote: '未收到发送确认（会话可能已归档或已结束）。',
       turnBlockedNote: '会话已归档或被阻止运行，本轮没有回答。',
       turnFailedNote: '本轮执行失败，没有拿到回答。',
       turnAbortedNote: '本轮被中止，没有拿到回答。',
       noAnswerNote: '本轮没有产生回答。',
       newResult: '有新结果',
-      settings: '方式',
-      presetsHint: '口径保存在这个浏览器里，只影响当前客户端。窗口里点一下就能切换。',
+      settings: '发送方式',
+      presetsHint: '点一下窗口里的口径就能切换；设置只保存在本机。',
       presetsEmpty: '还没有口径，点「新增口径」加一条。',
       presetsAllDisabled: '口径都已停用，可在设置里重新启用。',
       presetLabel: '名称',
@@ -262,22 +266,22 @@ window.__ModuleLoader__.load({
       expandPreset: '展开正文',
       collapsePreset: '收起正文',
       importPresets: '批量导入',
-      importHint: '每段之间空三行及以上；每段第 1 行是标题，其余是正文；只有一行时，这一行同时作标题和内容。',
+      importHint: '每段空三行以上；第一行是名称，其余是内容。',
       importPlaceholder: '标题\n正文\n\n\n\n标题\n正文',
       importSubmit: '导入',
       importAdded: '已导入 {n} 条',
       importSkipped: '跳过 {n} 条（重复内容）',
       importEmpty: '没有识别出可导入的内容。',
       exportPresets: '批量导出',
-      exportHint: '把全部条目按「批量导入」的格式复制到剪贴板，停用的条目也会导出。',
+      exportHint: '按「批量导入」的格式复制全部条目（含已停用）。',
       exportDone: '已复制 {n} 条到剪贴板',
       exportFailed: '复制失败，请检查浏览器的剪贴板权限。',
       exportEmpty: '还没有可导出的条目。',
-      tipsTitle: '状态行文案',
-      tipsHint: '空闲时这行轮换显示下面的文案；切换开关的提示会停 5 秒，再继续轮换。',
+      tipsTitle: '状态行',
+      tipsHint: '窗口空闲时轮流显示；开关提示会停留 5 秒。',
       tipsEmpty: '还没有文案。',
       tipsPlaceholder: '一句闲时提示',
-      tipsPastePlaceholder: '整段粘贴会自动拆成一句一句；也可以手写，一行一句（Ctrl+Enter 提交）',
+      tipsPastePlaceholder: '粘贴整段会自动拆行；也可以一行一句，Ctrl+Enter 添加',
       tipsAdded: '已添加 {n} 句',
       tipsSkipped: '跳过 {n} 行空行、重复或超上限的行',
       addTip: '添加',
@@ -287,16 +291,20 @@ window.__ModuleLoader__.load({
       tipTextRequired: '文案不能为空。',
       tipLast: '至少保留一句。',
       statsTitle: '使用统计',
-      statsHint: '按本机日期记录每天发送、写入输入框和新增批注的次数；只保存在本地。',
+      statsHint: '统计发送、写入和批注的次数，只保存在本机。',
       statsToday: '今天',
       statsSend: '发送',
-      statsInsert: '写入输入框',
-      statsAnnotation: '批注',
-      statsEmpty: '今天还没有使用记录。',
-      statsRecent: '近 15 天',
-      statsDate: '日期',
       statsInsertShort: '写入',
-      statsTotal: '合计',
+      statsAnnotation: '批注',
+      statsEmpty: '近 15 天还没有使用记录。',
+      statsRecent: '近 15 天',
+      statsTimes: '共 {n} 次',
+      statsLegendInput: '快捷输入',
+      statsTopTitle: '快捷输入 Top 3',
+      statsTopEmpty: '近 15 天还没有用过快捷输入。',
+      statsTopSince: '口径明细从本次更新后开始记录。',
+      statsTopShare: '占近 15 天快捷输入的 {n}%',
+      statsCountUnit: '{n} 次',
       settingsTitle: '状态询问',
       settingsHead: '设置',
       back: '返回',
@@ -310,9 +318,9 @@ window.__ModuleLoader__.load({
       insert: 'Insert text',
       insertHint: 'Append the chosen prompt to the end of the input box',
       insertUnavailable: 'The input box is not ready; cannot insert the text.',
-      modeInactive: 'Delivery mode does not apply when inserting text',
+      modeInactive: 'Send mode does not apply when writing into the input box',
       turboTitle: 'Turbo mode',
-      turboDesc: 'Hide the primary button: double-click a prompt to run it right away (insert when the caret is in the input box, send otherwise).',
+      turboDesc: 'The send button is hidden; double-click a prompt to run it right away.',
       switchOn: 'on',
       switchOff: 'off',
       answerLabel: 'My answer: ',
@@ -327,19 +335,20 @@ window.__ModuleLoader__.load({
       quickOn: 'Quick notes: on',
       quickOff: 'Quick notes: off',
       quickTitle: 'Quick notes',
-      quickHint: 'When on, selecting text in the conversation opens a note card right away; when off, use the + in the title bar to capture the selection.',
+      quickHint: 'Selecting conversation text opens a note card; when off, use + in the title bar.',
       autoPasteTitle: 'Auto-paste notes',
-      autoPasteDesc: 'When you click into the input box, write the pending notes into it automatically.',
-      autoPasteOn: 'Auto-paste: on',
-      autoPasteOff: 'Auto-paste: off',
+      autoPasteDesc: 'Clicking the input box writes pending notes into it.',
+      autoPasteOn: 'Auto-paste notes: on',
+      autoPasteOff: 'Auto-paste notes: off',
+      appearanceTitle: 'Appearance',
       frameTitle: 'Window border',
       frameDesc: 'How thick the floating window outline is.',
       frameThin: 'Thin',
       frameNormal: 'Standard',
       frameThick: 'Thick',
       copyHint: 'copy this passage',
-      deliveryTitle: 'Delivery mode',
-      deliveryDesc: 'Interrupt stops the current answer and handles this right away; Queue waits for the running turn to finish.',
+      deliveryTitle: 'Send mode',
+      deliveryDesc: 'Interrupt stops the current answer; Queue waits for the turn to finish.',
       sortUp: 'Move up',
       sortDown: 'Move down',
       nudgeModule: 'Quick input',
@@ -368,27 +377,27 @@ window.__ModuleLoader__.load({
       statusWaiting: 'Waiting',
       statusDone: 'Answered',
       statusError: 'Failed',
-      mode: 'Mode',
+      mode: 'Send mode',
       queue: 'Queue',
       steer: 'Interrupt',
       preset: 'Prompt',
       noSession: 'No open conversation to ask.',
       waitingQuestion: 'The agent is waiting for your answer',
-      transportMissing: 'This page has no delivery channel, so the request cannot be sent.',
-      deliveryFailed: 'Delivery failed',
+      transportMissing: 'This page has no send channel, so the request cannot be sent.',
+      deliveryFailed: 'Send failed',
       sessionClosed: 'This session has ended or been archived; it cannot be asked.',
-      badRequest: 'The request content was rejected.',
+      badRequest: 'The message was rejected.',
       timeoutNote: 'Timed out waiting for the answer (the agent may still be running).',
       stillRunningNote: 'The agent is still running; still waiting for the answer.',
       unconfirmedNote: 'Could not confirm whether the answer arrived; check the conversation.',
-      noReceiptNote: 'The request was not admitted (the session may be archived or closed).',
+      noReceiptNote: 'No send confirmation was received (the session may be archived or closed).',
       turnBlockedNote: 'This session is archived or blocked, so the turn produced no answer.',
       turnFailedNote: 'The turn failed, so no answer arrived.',
       turnAbortedNote: 'The turn was aborted, so no answer arrived.',
       noAnswerNote: 'The turn produced no answer.',
       newResult: 'New result',
-      settings: 'Mode',
-      presetsHint: 'Prompts are stored in this browser and only affect this client. Click one in the window to switch.',
+      settings: 'Send mode',
+      presetsHint: 'Click a prompt in the window to switch; settings stay on this machine.',
       presetsEmpty: 'No prompts yet; add one.',
       presetsAllDisabled: 'Every prompt is disabled. Re-enable one in settings.',
       presetLabel: 'Name',
@@ -412,22 +421,22 @@ window.__ModuleLoader__.load({
       expandPreset: 'Show the text',
       collapsePreset: 'Hide the text',
       importPresets: 'Import',
-      importHint: 'Separate entries with three or more blank lines; the first line of each block is the name, the rest is the text. A one-line block uses that line for both.',
+      importHint: 'Separate entries with three or more blank lines; the first line is the name, the rest is the text.',
       importPlaceholder: 'Name\nText\n\n\n\nName\nText',
       importSubmit: 'Import',
       importAdded: 'Imported {n}',
       importSkipped: 'skipped {n} (duplicate text)',
       importEmpty: 'Nothing to import was found.',
       exportPresets: 'Export',
-      exportHint: 'Copy every entry to the clipboard in the import format; disabled entries are included.',
+      exportHint: 'Copy every entry in the import format, including disabled ones.',
       exportDone: 'Copied {n} to the clipboard',
       exportFailed: 'Copy failed; check the browser clipboard permission.',
       exportEmpty: 'There is nothing to export yet.',
-      tipsTitle: 'Status lines',
-      tipsHint: 'While idle this row rotates the lines below; a switch message holds here for 5 seconds, then the rotation resumes.',
+      tipsTitle: 'Status line',
+      tipsHint: 'Rotates while the window is idle; switch messages hold for 5 seconds.',
       tipsEmpty: 'No lines yet.',
       tipsPlaceholder: 'One idle line',
-      tipsPastePlaceholder: 'Paste a whole list and it is split per line; or type one line each (Ctrl+Enter adds them)',
+      tipsPastePlaceholder: 'Paste a block and it splits per line; Ctrl+Enter adds a line',
       tipsAdded: 'Added {n} lines',
       tipsSkipped: 'skipped {n} blank, duplicate or over-limit lines',
       addTip: 'Add',
@@ -437,16 +446,20 @@ window.__ModuleLoader__.load({
       tipTextRequired: 'The line cannot be empty.',
       tipLast: 'Keep at least one line.',
       statsTitle: 'Usage',
-      statsHint: 'Counts sends, composer writes and new notes per local day; kept on this machine only.',
+      statsHint: 'Counts sends, writes and notes; kept on this machine only.',
       statsToday: 'Today',
       statsSend: 'Sent',
-      statsInsert: 'Written',
-      statsAnnotation: 'Notes',
-      statsEmpty: 'No usage recorded today.',
-      statsRecent: 'Last 15 days',
-      statsDate: 'Date',
       statsInsertShort: 'Written',
-      statsTotal: 'Total',
+      statsAnnotation: 'Notes',
+      statsEmpty: 'No usage in the last 15 days.',
+      statsRecent: 'Last 15 days',
+      statsTimes: '{n} total',
+      statsLegendInput: 'Quick input',
+      statsTopTitle: 'Top 3 quick inputs',
+      statsTopEmpty: 'No quick input used in the last 15 days.',
+      statsTopSince: 'Per-prompt detail starts with this update.',
+      statsTopShare: '{n}% of quick inputs in the last 15 days',
+      statsCountUnit: '{n} uses',
       settingsTitle: 'Status Nudge',
       settingsHead: 'Settings',
       back: 'Back',
@@ -1114,6 +1127,23 @@ window.__ModuleLoader__.load({
         for (const field of STAT_FIELDS) {
           const count = raw[field]
           if (Number.isInteger(count) && count > 0) entry[field] = count
+        }
+        // Per-preset use is kept beside the daily totals, so the Top 3 list
+        // follows the same window and ages out with it.
+        const rawPresets = raw.presets
+        if (rawPresets !== null && typeof rawPresets === 'object' && !Array.isArray(rawPresets)) {
+          const presets = {}
+          let kept = 0
+          for (const id of Object.keys(rawPresets)) {
+            if (kept >= MAX_STAT_PRESETS) break
+            const count = rawPresets[id]
+            if (id.length === 0 || id.length > MAX_STAT_PRESET_ID) continue
+            if (id === '__proto__' || id === 'constructor' || id === 'prototype') continue
+            if (!Number.isInteger(count) || count <= 0) continue
+            presets[id] = count
+            kept += 1
+          }
+          if (kept > 0) entry.presets = presets
         }
         if (Object.keys(entry).length > 0) days[key] = entry
       }
@@ -1789,7 +1819,7 @@ window.__ModuleLoader__.load({
           return false
         }
         setState({ note: '', error: '' })
-        countStat('insert')
+        countStat('insert', preset.id)
         return true
       }
 
@@ -2705,7 +2735,7 @@ window.__ModuleLoader__.load({
         const preset = activePreset()
         if (!preset) return false
         const delivered = deliver(preset.text)
-        if (delivered) countStat('send')
+        if (delivered) countStat('send', preset.id)
         return delivered
       }
 
@@ -3270,14 +3300,27 @@ window.__ModuleLoader__.load({
       /**
        * Bump one of today's counters. The local calendar day is the bucket:
        * a click after midnight starts a fresh row, and the store keeps the
-       * newest `STATS_DAYS` rows only.
+       * newest `STATS_DAYS` rows only. A preset send/write also bumps that
+       * preset's own count so the settings board can rank the top prompts.
        */
-      function countStat(field) {
+      function countStat(field, presetId) {
         if (!STAT_FIELDS.includes(field)) return false
         const key = dayKey()
         const days = { ...state.stats.days }
         const today = { ...(days[key] ?? {}) }
         today[field] = (today[field] ?? 0) + 1
+        if (
+          typeof presetId === 'string' &&
+          presetId.length > 0 &&
+          presetId.length <= MAX_STAT_PRESET_ID &&
+          presetId !== '__proto__' &&
+          presetId !== 'constructor' &&
+          presetId !== 'prototype'
+        ) {
+          const presets = { ...(today.presets ?? {}) }
+          presets[presetId] = (presets[presetId] ?? 0) + 1
+          today.presets = presets
+        }
         days[key] = today
         const next = normalizeStats({ days })
         writeStats(next)
@@ -3679,7 +3722,7 @@ window.__ModuleLoader__.load({
     // ---------------------------------------------------------------------
 
     const CSS = `
-.dsh-nudge-card,.dsh-nudge-pill,.dsh-nudge-settings,.dsh-nudge-popup{--dn-accent:color-mix(in srgb,var(--dsw-static-deepseek-450,#5686fe) 78%,var(--dsw-alias-label-primary,#1a1a1a) 22%);--dn-accent-soft:color-mix(in srgb,var(--dsw-static-deepseek-450,#5686fe) 14%,transparent);--dn-accent-line:color-mix(in srgb,var(--dsw-static-deepseek-450,#5686fe) 38%,transparent);--dn-accent-edge:color-mix(in srgb,var(--dsw-static-deepseek-450,#5686fe) 62%,transparent);--dn-line:var(--dsw-alias-border-l1,rgba(127,127,127,.25));--dn-line-strong:color-mix(in srgb,var(--dsw-alias-label-primary,#1a1a1a) 28%,transparent);--dn-hover:color-mix(in srgb,var(--dsw-alias-label-primary,#1a1a1a) 6%,transparent);--dn-agree:#2e7d32;--dn-frame:1px}
+.dsh-nudge-card,.dsh-nudge-pill,.dsh-nudge-settings,.dsh-nudge-popup{--dn-accent:color-mix(in srgb,var(--dsw-static-deepseek-450,#5686fe) 78%,var(--dsw-alias-label-primary,#1a1a1a) 22%);--dn-accent-soft:color-mix(in srgb,var(--dsw-static-deepseek-450,#5686fe) 14%,transparent);--dn-accent-line:color-mix(in srgb,var(--dsw-static-deepseek-450,#5686fe) 38%,transparent);--dn-accent-edge:color-mix(in srgb,var(--dsw-static-deepseek-450,#5686fe) 62%,transparent);--dn-line:var(--dsw-alias-border-l1,rgba(127,127,127,.25));--dn-line-strong:color-mix(in srgb,var(--dsw-alias-label-primary,#1a1a1a) 28%,transparent);--dn-hover:color-mix(in srgb,var(--dsw-alias-label-primary,#1a1a1a) 6%,transparent);--dn-agree:#2e7d32;--dn-note:#8b5cf6;--dn-frame:1px}
 .dsh-nudge-card{position:fixed;z-index:${Z_INDEX};width:min(304px,calc(100vw - 24px));display:flex;flex-direction:column;border-radius:16px;border:var(--dn-frame) solid var(--dn-accent-edge);background:var(--dsw-alias-bg-layer-1,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);box-shadow:0 1px 2px rgba(15,23,42,.04),0 18px 44px -22px rgba(15,23,42,.3);font:13px/1.55 ui-sans-serif,system-ui,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;overflow:hidden;pointer-events:auto;animation:dsh-nudge-in .18s ease-out}
 @keyframes dsh-nudge-in{from{opacity:0;transform:translateY(-5px) scale(.985)}to{opacity:1;transform:none}}
 .dsh-nudge-title{display:flex;align-items:center;gap:8px;padding:12px 12px 10px 14px;cursor:grab;user-select:none;touch-action:none;border-bottom:1px solid var(--dn-line)}
@@ -3812,6 +3855,25 @@ window.__ModuleLoader__.load({
    :has() scope is what keeps the override from affecting other sections. */
 body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-height:min(800px,calc(100vh - 2 * max(24px,var(--dsh-frame-overlay-top,24px))));max-height:calc(100vh - 2 * max(24px,var(--dsh-frame-overlay-top,24px)))}
 .dsh-nudge-settings-hint{font-size:12px;line-height:1.6;color:var(--dsw-alias-label-secondary,#5a5a66)}
+.dsh-nudge-settings-section{display:flex;flex-direction:column;gap:8px}
+.dsh-nudge-settings-section-head{display:flex;align-items:center;gap:7px;padding:0 2px 7px;border-bottom:1px solid var(--dn-line)}
+.dsh-nudge-settings-section-head::before{content:'';flex:0 0 auto;width:3px;height:13px;border-radius:2px;background:var(--dn-accent);margin-left:2px}
+.dsh-nudge-settings-section-title{font-size:12.5px;font-weight:700;letter-spacing:.2px;color:var(--dsw-alias-label-primary,#1a1a1a)}
+.dsh-nudge-settings-section-desc{margin:-2px 2px 0;font-size:12px;line-height:1.5;color:var(--dsw-alias-label-secondary,#5a5a66)}
+.dsh-nudge-settings-section-meta{margin-left:auto;font-size:11px;line-height:1.4;color:var(--dsw-alias-label-secondary,#8a8a8a);font-variant-numeric:tabular-nums}
+.dsh-nudge-settings-section.collapsible .dsh-nudge-settings-section-head{cursor:pointer;user-select:none;list-style:none}
+.dsh-nudge-settings-section.collapsible .dsh-nudge-settings-section-head::-webkit-details-marker{display:none}
+.dsh-nudge-settings-section.collapsible .dsh-nudge-settings-section-head::after{content:'';flex:0 0 auto;width:6px;height:6px;margin-left:6px;border-right:1.5px solid var(--dsw-alias-label-secondary,#8a8a8a);border-bottom:1.5px solid var(--dsw-alias-label-secondary,#8a8a8a);opacity:.7;transform:rotate(45deg);transition:transform .15s ease}
+.dsh-nudge-settings-section.collapsible:not([open]) .dsh-nudge-settings-section-head::after{transform:rotate(-45deg)}
+.dsh-nudge-settings-section.collapsible .dsh-nudge-settings-section-head:hover,.dsh-nudge-settings-fold-head:hover{background:var(--dn-hover);border-radius:6px}
+.dsh-nudge-settings-section.collapsible .dsh-nudge-settings-section-head:focus-visible,.dsh-nudge-settings-fold-head:focus-visible{outline:2px solid var(--dn-accent-line);outline-offset:2px;border-radius:6px}
+.dsh-nudge-settings-section.collapsible[open] .dsh-nudge-settings-section-desc{margin-top:2px}
+.dsh-nudge-settings-fold{display:flex;flex-direction:column;gap:8px;padding-top:2px;border-top:1px solid var(--dn-line)}
+.dsh-nudge-settings-fold-head{display:flex;align-items:center;gap:8px;padding:5px 2px;cursor:pointer;list-style:none;font-size:12px;font-weight:600;color:var(--dsw-alias-label-primary,#1a1a1a);user-select:none}
+.dsh-nudge-settings-fold-head::-webkit-details-marker{display:none}
+.dsh-nudge-settings-fold-head::after{content:'';flex:0 0 auto;width:6px;height:6px;margin-left:6px;border-right:1.5px solid var(--dsw-alias-label-secondary,#8a8a8a);border-bottom:1.5px solid var(--dsw-alias-label-secondary,#8a8a8a);opacity:.7;transform:rotate(45deg);transition:transform .15s ease}
+.dsh-nudge-settings-fold:not([open]) .dsh-nudge-settings-fold-head::after{transform:rotate(-45deg)}
+.dsh-nudge-settings-fold-meta{margin-left:auto;font-size:11px;font-weight:400;color:var(--dsw-alias-label-secondary,#8a8a8a);font-variant-numeric:tabular-nums}
 .dsh-nudge-settings-note{font-size:12px;line-height:1.6;color:var(--dn-accent-line,var(--dsw-alias-label-secondary,#5a5a66))}
 .dsh-nudge-toggle{display:flex;align-items:flex-start;gap:10px;padding:12px;border-radius:12px;border:1px solid var(--dn-line);background:color-mix(in srgb,var(--dsw-alias-label-primary,#1a1a1a) 3%,transparent);cursor:pointer}
 .dsh-nudge-toggle input{accent-color:var(--dn-accent);margin:2px 0 0;flex:0 0 auto;width:14px;height:14px}
@@ -3827,19 +3889,64 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
 /* Preset rows are a table of contents: one name per line, bodies on demand. */
 .dsh-nudge-preset-row:has(> .dsh-nudge-preset-summary){gap:4px;padding:6px 8px}
 .dsh-nudge-preset-toolbar{display:flex;align-items:center;flex-wrap:wrap;gap:8px}
-.dsh-nudge-stats{display:flex;gap:8px}
 .dsh-nudge-stats-head{display:flex;align-items:center;gap:8px}
-.dsh-nudge-stats-today{margin-left:auto;font-size:11px;line-height:1.4;color:var(--dsw-alias-label-secondary,#8a8a8a)}
-.dsh-nudge-stat{flex:1 1 0;min-width:0;display:flex;flex-direction:column;gap:2px;padding:9px 12px;border:1px solid var(--dn-line);border-radius:12px;background:color-mix(in srgb,var(--dsw-alias-label-primary,#1a1a1a) 3%,transparent)}
-.dsh-nudge-stat-value{font-size:20px;line-height:1.25;font-weight:600;font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-primary,#1a1a1a)}
+.dsh-nudge-stats-today{display:flex;flex-direction:column;gap:5px}
+.dsh-nudge-stats-today-head{display:flex;align-items:baseline;gap:6px;font-size:11px;line-height:1.4;color:var(--dsw-alias-label-secondary,#8a8a8a)}
+.dsh-nudge-stats-today-label{font-weight:600}
+.dsh-nudge-stats-today-date{font-variant-numeric:tabular-nums}
+.dsh-nudge-stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.dsh-nudge-stat{display:flex;flex-direction:column;gap:1px;min-width:0;padding-left:12px;border-left:1px solid var(--dn-line)}
+.dsh-nudge-stat:first-child{padding-left:0;border-left:0}
+.dsh-nudge-stat-value{font-size:22px;line-height:1.15;font-weight:600;font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-primary,#1a1a1a)}
 .dsh-nudge-stat-label{font-size:11px;line-height:1.4;color:var(--dsw-alias-label-secondary,#8a8a8a)}
-.dsh-nudge-stats-subhead{margin-top:2px;font-size:11px;line-height:1.4;color:var(--dsw-alias-label-secondary,#8a8a8a)}
-.dsh-nudge-stats-table{display:flex;flex-direction:column;gap:1px;font-size:12px;font-variant-numeric:tabular-nums}
-.dsh-nudge-stats-line{display:grid;grid-template-columns:minmax(0,1fr) 42px 42px 42px;align-items:center;gap:6px;min-height:22px;padding:2px 4px;border-radius:6px}
-.dsh-nudge-stats-line.head{min-height:18px;color:var(--dsw-alias-label-secondary,#8a8a8a);font-size:11px}
-.dsh-nudge-stats-line.today{background:var(--dn-accent-soft);color:var(--dn-accent)}
-.dsh-nudge-stats-line.total{margin-top:3px;padding-top:6px;border-top:1px solid var(--dn-line);font-weight:600}
-.dsh-nudge-stats-num{text-align:right}
+/* One board: trend on the left, prompt ranking on the right. Narrow panels
+   (the in-window fallback) stack the two instead of squeezing the chart. */
+.dsh-nudge-stats-board{display:grid;grid-template-columns:minmax(0,1fr);gap:14px;margin-top:2px;padding-top:12px;border-top:1px solid var(--dn-line)}
+.dsh-nudge-stats-chart-pane{display:flex;flex-direction:column;gap:6px;min-width:0;height:100%}
+.dsh-nudge-stats-trend-head{display:flex;align-items:baseline;justify-content:space-between;gap:8px;font-size:11px;line-height:1.4;color:var(--dsw-alias-label-secondary,#8a8a8a)}
+.dsh-nudge-stats-total{font-variant-numeric:tabular-nums}
+.dsh-nudge-chart-wrap{position:relative;flex:1 1 auto;min-height:84px;overflow:hidden}
+.dsh-nudge-chart-svg{display:block;width:100%;height:100%;overflow:visible}
+.dsh-nudge-chart-empty{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;padding:0 12px;font-size:11px;line-height:1.5;color:var(--dsw-alias-label-secondary,#8a8a8a);text-align:center}
+.dsh-nudge-chart-hits{position:absolute;inset:0;display:flex}
+.dsh-nudge-chart-hit{flex:1 1 0;position:relative;min-width:0}
+.dsh-nudge-chart-tip{position:absolute;top:2px;left:50%;transform:translateX(-50%);z-index:2;display:flex;flex-direction:column;gap:1px;padding:5px 8px;border-radius:8px;border:1px solid var(--dn-line);background:var(--dsw-alias-bg-layer-1,#fff);box-shadow:0 8px 22px -12px rgba(15,23,42,.45);font-size:11px;line-height:1.4;white-space:nowrap;opacity:0;pointer-events:none;transition:opacity .12s ease}
+.dsh-nudge-chart-hit:hover .dsh-nudge-chart-tip{opacity:1}
+.dsh-nudge-chart-hit:nth-child(-n+3) .dsh-nudge-chart-tip{left:0;transform:none}
+.dsh-nudge-chart-hit:nth-last-child(-n+3) .dsh-nudge-chart-tip{left:auto;right:0;transform:none}
+.dsh-nudge-chart-tip-date{font-weight:600;color:var(--dsw-alias-label-primary,#1a1a1a);font-variant-numeric:tabular-nums}
+.dsh-nudge-chart-tip-values{color:var(--dsw-alias-label-secondary,#8a8a8a)}
+.dsh-nudge-stats-axis{display:flex;justify-content:space-between;gap:8px;font-size:10.5px;line-height:1.4;color:var(--dsw-alias-label-secondary,#8a8a8a);font-variant-numeric:tabular-nums}
+.dsh-nudge-chart-legend{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:11px;line-height:1.5;color:var(--dsw-alias-label-secondary,#8a8a8a)}
+.dsh-nudge-chart-legend-item{display:inline-flex;align-items:center;gap:5px;white-space:nowrap}
+.dsh-nudge-chart-dot{flex:0 0 auto;width:6px;height:6px;border-radius:50%}
+.dsh-nudge-chart-dot.input{background:var(--dsw-static-deepseek-450,#5686fe)}
+.dsh-nudge-chart-dot.note{background:var(--dn-note)}
+.dsh-nudge-stats-side{display:flex;flex-direction:column;gap:6px;min-width:0}
+/* Today sits above the ranking and stays compact: the board is a summary, not
+   a second settings page. */
+.dsh-nudge-stats-side .dsh-nudge-stats-today{gap:4px;padding-bottom:8px;border-bottom:1px solid var(--dn-line)}
+.dsh-nudge-stats-side .dsh-nudge-stats-today-head{justify-content:space-between}
+.dsh-nudge-stats-side .dsh-nudge-stats{gap:6px}
+.dsh-nudge-stats-side .dsh-nudge-stat{padding-left:7px}
+.dsh-nudge-stats-side .dsh-nudge-stat:first-child{padding-left:0}
+.dsh-nudge-stats-side .dsh-nudge-stat-value{font-size:18px;line-height:1.1}
+.dsh-nudge-stats-side .dsh-nudge-stat-label{font-size:10px;line-height:1.3}
+.dsh-nudge-stats-side-head{margin-top:1px}
+.dsh-nudge-stats-side-head{display:flex;align-items:baseline;justify-content:space-between;gap:8px;font-size:11px;line-height:1.4;font-weight:600;color:var(--dsw-alias-label-secondary,#8a8a8a)}
+.dsh-nudge-stats-side-empty{font-size:11px;line-height:1.6;color:var(--dsw-alias-label-secondary,#8a8a8a)}
+.dsh-nudge-top-list{display:flex;flex-direction:column;gap:2px;margin:0;padding:0;list-style:none}
+.dsh-nudge-top-item{display:flex;align-items:center;gap:8px;min-width:0;padding:3px 6px;border-radius:8px;transition:background .15s ease}
+.dsh-nudge-top-item:hover{background:var(--dn-hover)}
+.dsh-nudge-top-rank{flex:0 0 18px;height:18px;border-radius:6px;background:color-mix(in srgb,var(--dsw-alias-label-primary,#1a1a1a) 6%,transparent);color:var(--dsw-alias-label-secondary,#8a8a8a);font-size:10.5px;font-weight:600;line-height:18px;text-align:center;font-variant-numeric:tabular-nums}
+.dsh-nudge-top-item:first-child .dsh-nudge-top-rank{background:var(--dn-accent-soft);color:var(--dn-accent)}
+.dsh-nudge-top-label{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;line-height:1.5;color:var(--dsw-alias-label-primary,#1a1a1a)}
+.dsh-nudge-top-count{flex:0 0 auto;font-size:11px;line-height:1.4;color:var(--dsw-alias-label-secondary,#8a8a8a);font-variant-numeric:tabular-nums;white-space:nowrap}
+.dsh-nudge-stats-share{margin-top:auto;padding:4px 6px 0;font-size:10.5px;line-height:1.5;color:var(--dsw-alias-label-secondary,#8a8a8a)}
+@container dsh-nudge-stats (min-width: 430px){
+  .dsh-nudge-stats-board{grid-template-columns:minmax(0,1.55fr) minmax(150px,1fr);gap:18px}
+  .dsh-nudge-stats-side{padding-left:18px;border-left:1px solid var(--dn-line)}
+}
 .dsh-nudge-preset-count{margin-right:auto;font-size:11px;color:var(--dsw-alias-label-secondary,#8a8a8a);font-variant-numeric:tabular-nums}
 .dsh-nudge-preset-summary{display:flex;align-items:center;gap:6px;min-width:0}
 .dsh-nudge-preset-grip{cursor:grab;padding:2px;border-radius:6px;color:var(--dsw-alias-label-secondary,#8a8a8a);font-size:13px;line-height:1;user-select:none}
@@ -3883,6 +3990,9 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
 .dsh-nudge-btn:disabled{opacity:.4;cursor:default}
 .dsh-nudge-btn:disabled:hover{background:transparent}
 .dsh-nudge-settings-group,.dsh-nudge-stats-group{display:flex;flex-direction:column;gap:7px;padding:12px;border-radius:12px;border:1px solid var(--dn-line);background:color-mix(in srgb,var(--dsw-alias-label-primary,#1a1a1a) 3%,transparent)}
+/* The stats board is the page's hero: slightly raised, and a container so the
+   chart/ranking split only kicks in when the panel is actually wide enough. */
+.dsh-nudge-stats-group{container-type:inline-size;container-name:dsh-nudge-stats;background:var(--dsw-alias-bg-layer-1,#fff);box-shadow:0 1px 2px rgba(15,23,42,.04)}
 .dsh-nudge-settings-error{color:var(--dsw-alias-state-error-primary,#c8433c);font-size:12px;line-height:1.5}
 `.trim()
 
@@ -4910,7 +5020,7 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
         const { title, desc, checked, onChange } = props
         return h(
           'label',
-          { className: 'dsh-nudge-toggle', title: desc },
+          { className: 'dsh-nudge-toggle', title: desc, 'data-setting': props.key },
           h('input', {
             type: 'checkbox',
             checked: checked === true,
@@ -4935,9 +5045,9 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
             viewBox: '0 0 16 16',
             fill: 'none',
             stroke: 'currentColor',
-            'stroke-width': 1.4,
-            'stroke-linecap': 'round',
-            'stroke-linejoin': 'round',
+            strokeWidth: 1.4,
+            strokeLinecap: 'round',
+            strokeLinejoin: 'round',
             'aria-hidden': 'true',
           },
           h('path', { d: pathData }),
@@ -5358,17 +5468,84 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
         const delivery = runtime.effectiveDelivery()
         const today = dayKey()
         const statsDays = state.stats?.days ?? {}
-        const recentKeys = recentDayKeys(15)
-        const recentRows = [...recentKeys].reverse()
-        const recentTotals = { send: 0, insert: 0, annotation: 0 }
-        for (const key of recentKeys) {
-          for (const field of STAT_FIELDS) recentTotals[field] += statsDays[key]?.[field] ?? 0
-        }
+        /** The trend window, oldest first; the chart and Top 3 share it. */
+        const windowKeys = recentDayKeys(15)
         const statLabels = {
           send: t('statsSend'),
           insert: t('statsInsertShort'),
           annotation: t('statsAnnotation'),
         }
+        const windowTotals = { send: 0, insert: 0, annotation: 0 }
+        for (const key of windowKeys) {
+          for (const field of STAT_FIELDS) windowTotals[field] += statsDays[key]?.[field] ?? 0
+        }
+        const windowTotal = STAT_FIELDS.reduce((sum, field) => sum + windowTotals[field], 0)
+        const windowInputs = windowTotals.send + windowTotals.insert
+        // Two series: everything typed into or sent to the composer is one
+        // prompt use; notes stay separate because they answer a different
+        // question ("how much did I annotate?").
+        const inputSeries = windowKeys.map((key) => (statsDays[key]?.send ?? 0) + (statsDays[key]?.insert ?? 0))
+        const noteSeries = windowKeys.map((key) => statsDays[key]?.annotation ?? 0)
+        const hasActivity = inputSeries.some((value) => value > 0) || noteSeries.some((value) => value > 0)
+        /** Tallest value in either series; both lines share one scale. */
+        const peak = Math.max(1, ...inputSeries, ...noteSeries)
+
+        // Rank the prompts used in this same window. Counts live beside the
+        // daily totals, so deleted prompts simply fall out of the list.
+        const presetTotals = new Map()
+        for (const key of windowKeys) {
+          const presets = statsDays[key]?.presets
+          if (presets === null || typeof presets !== 'object') continue
+          for (const [id, count] of Object.entries(presets)) {
+            presetTotals.set(id, (presetTotals.get(id) ?? 0) + count)
+          }
+        }
+        const topPresets = [...presetTotals.entries()]
+          .map(([id, total]) => ({ preset: state.presets.find((item) => item.id === id), total }))
+          .filter((item) => item.preset !== undefined)
+          .sort((a, b) => b.total - a.total || String(a.preset.id).localeCompare(String(b.preset.id)))
+          .slice(0, 3)
+        const topTotal = topPresets.reduce((sum, item) => sum + item.total, 0)
+        const topShare = windowInputs > 0 ? Math.min(100, Math.round((topTotal / windowInputs) * 100)) : 0
+
+        // Hand-rolled SVG: the plugin ships no chart dependency. One shared
+        // scale and equally spaced days keep both lines comparable.
+        const CHART_W = 320
+        const CHART_H = 96
+        const CHART_PAD_X = 4
+        const CHART_PAD_TOP = 10
+        const CHART_PAD_BOTTOM = 6
+        const step = (CHART_W - CHART_PAD_X * 2) / Math.max(1, windowKeys.length - 1)
+        const round = (value) => Math.round(value * 10) / 10
+        const xAt = (index) => CHART_PAD_X + index * step
+        const yAt = (value) =>
+          CHART_H - CHART_PAD_BOTTOM - (value / peak) * (CHART_H - CHART_PAD_TOP - CHART_PAD_BOTTOM)
+        /** One smooth cubic path through a series, in viewBox units. */
+        function smoothPath(points) {
+          const baseline = CHART_H - CHART_PAD_BOTTOM
+          // Catmull-Rom can overshoot a spike below the axis; clamping the
+          // control points keeps the curve inside its own value band.
+          const clampY = (value) => Math.min(baseline, Math.max(CHART_PAD_TOP, value))
+          let d = `M ${round(points[0].x)} ${round(points[0].y)}`
+          for (let index = 0; index < points.length - 1; index += 1) {
+            const p0 = points[index - 1] ?? points[index]
+            const p1 = points[index]
+            const p2 = points[index + 1]
+            const p3 = points[index + 2] ?? p2
+            const tension = 0.16
+            const c1x = p1.x + (p2.x - p0.x) * tension
+            const c1y = clampY(p1.y + (p2.y - p0.y) * tension)
+            const c2x = p2.x - (p3.x - p1.x) * tension
+            const c2y = clampY(p2.y - (p3.y - p1.y) * tension)
+            d += ` C ${round(c1x)} ${round(c1y)}, ${round(c2x)} ${round(c2y)}, ${round(p2.x)} ${round(p2.y)}`
+          }
+          return d
+        }
+        const inputLine = smoothPath(inputSeries.map((value, index) => ({ x: xAt(index), y: yAt(value) })))
+        const noteLine = smoothPath(noteSeries.map((value, index) => ({ x: xAt(index), y: yAt(value) })))
+        const areaOf = (line) =>
+          `${line} L ${round(CHART_W - CHART_PAD_X)} ${CHART_H - CHART_PAD_BOTTOM} L ${round(CHART_PAD_X)} ${CHART_H - CHART_PAD_BOTTOM} Z`
+        const todayIndex = windowKeys.length - 1
 
         /** Fill `{n}` in a message template. */
         function fill(template, count) {
@@ -5443,340 +5620,542 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
           addTipLines(text)
         }
 
-        return h(
+        /**
+         * One settings block with the same heading rhythm as a floating-window
+         * module: accent bar, title, optional one-line description.
+         */
+        function settingsSection(key, title, desc, children, options) {
+          const collapsible = options?.collapsible === true
+          const head = h(
+            collapsible ? 'summary' : 'div',
+            { className: 'dsh-nudge-settings-section-head' },
+            h('span', { className: 'dsh-nudge-settings-section-title' }, title),
+            options?.meta ? h('span', { className: 'dsh-nudge-settings-section-meta' }, options.meta) : null,
+          )
+          return h(
+            collapsible ? 'details' : 'section',
+            { key, className: `dsh-nudge-settings-section${collapsible ? ' collapsible' : ''}` },
+            head,
+            desc ? h('div', { className: 'dsh-nudge-settings-section-desc' }, desc) : null,
+            ...children,
+          )
+        }
+
+        /** A nested, closed-by-default editor (the long prompt list). */
+        function foldGroup(key, title, meta, children) {
+          return h(
+            'details',
+            { key, className: 'dsh-nudge-settings-fold' },
+            h(
+              'summary',
+              { className: 'dsh-nudge-settings-fold-head' },
+              h('span', null, title),
+              meta ? h('span', { className: 'dsh-nudge-settings-fold-meta' }, meta) : null,
+            ),
+            ...children,
+          )
+        }
+
+        // The dashboard leads the settings page: it answers "am I using this?"
+        // before the switches that change how it behaves.
+        const statsSection = h(
           'div',
-          { className: 'dsh-nudge-settings' },
-          h('style', { key: 'dsh-nudge-css' }, CSS),
-          // Every switch on the floating window has a row here, so the window
-          // can stay icon-only without hiding how it is configured.
-          toggleRow({
-            key: 'turbo',
-            title: t('turboTitle'),
-            desc: t('turboDesc'),
-            checked: state.turbo === true,
-            onChange: (value) => runtime.setTurbo(value),
-          }),
-          toggleRow({
-            key: 'quick',
-            title: t('quickTitle'),
-            desc: t('quickHint'),
-            checked: state.quick === true,
-            onChange: (value) => runtime.setQuick(value),
-          }),
-          toggleRow({
-            key: 'autopaste',
-            title: t('autoPasteTitle'),
-            desc: t('autoPasteDesc'),
-            checked: state.autoPaste === true,
-            onChange: (value) => runtime.setAutoPaste(value),
-          }),
+          { key: 'stats', className: 'dsh-nudge-stats-group' },
           h(
             'div',
-            { key: 'frame', className: 'dsh-nudge-settings-group' },
-            h('span', { className: 'dsh-nudge-toggle-title' }, t('frameTitle')),
-            h('span', { className: 'dsh-nudge-toggle-desc' }, t('frameDesc')),
-            h(
-              'div',
-              { className: 'dsh-nudge-presets', role: 'group', 'aria-label': t('frameTitle') },
-              ...FRAME_CHOICES.map((width) =>
-                h(
-                  'button',
-                  {
-                    key: `frame-${width}`,
-                    type: 'button',
-                    className: `dsh-nudge-chip${state.frame === width ? ' active' : ''}`,
-                    'aria-pressed': state.frame === width ? 'true' : 'false',
-                    onClick: () => runtime.setFrame(width),
-                  },
-                  t(frameLabelKey(width)),
-                ),
-              ),
-            ),
+            { className: 'dsh-nudge-stats-head' },
+            h('span', { className: 'dsh-nudge-toggle-title' }, t('statsTitle')),
           ),
+          h('span', { className: 'dsh-nudge-toggle-desc' }, t('statsHint')),
           h(
             'div',
-            { key: 'delivery', className: 'dsh-nudge-settings-group' },
-            h('span', { className: 'dsh-nudge-toggle-title' }, t('deliveryTitle')),
-            h('span', { className: 'dsh-nudge-toggle-desc' }, t('deliveryDesc')),
+            { className: 'dsh-nudge-stats-board' },
             h(
               'div',
-              { className: 'dsh-nudge-presets', role: 'group', 'aria-label': t('deliveryTitle') },
-              h(
-                'button',
-                {
-                  type: 'button',
-                  className: `dsh-nudge-chip${delivery === 'steer' ? ' active' : ''}`,
-                  'aria-pressed': delivery === 'steer' ? 'true' : 'false',
-                  onClick: () => runtime.setDelivery('steer'),
-                },
-                t('steer'),
-              ),
-              h(
-                'button',
-                {
-                  type: 'button',
-                  className: `dsh-nudge-chip${delivery === 'steer' ? '' : ' active'}`,
-                  'aria-pressed': delivery === 'steer' ? 'false' : 'true',
-                  onClick: () => runtime.setDelivery('followup'),
-                },
-                t('queue'),
-              ),
-            ),
-          ),
-          h(
-            'div',
-            { key: 'stats', className: 'dsh-nudge-stats-group' },
-            h(
-              'div',
-              { className: 'dsh-nudge-stats-head' },
-              h('span', { className: 'dsh-nudge-toggle-title' }, t('statsTitle')),
-              h('span', { className: 'dsh-nudge-stats-today' }, t('statsToday')),
-            ),
-            h('span', { className: 'dsh-nudge-toggle-desc' }, t('statsHint')),
-            h(
-              'div',
-              { className: 'dsh-nudge-stats' },
-              ...STAT_FIELDS.map((field) =>
-                h(
-                  'div',
-                  { key: field, className: 'dsh-nudge-stat' },
-                  h('span', { className: 'dsh-nudge-stat-value' }, String(statsDays[today]?.[field] ?? 0)),
-                  h('span', { className: 'dsh-nudge-stat-label' }, t(`stats${field[0].toUpperCase()}${field.slice(1)}`)),
-                ),
-              ),
-            ),
-            statsDays[today] === undefined
-              ? h('div', { className: 'dsh-nudge-settings-hint' }, t('statsEmpty'))
-              : null,
-            h('div', { className: 'dsh-nudge-stats-subhead' }, t('statsRecent')),
-            h(
-              'div',
-              { className: 'dsh-nudge-stats-table' },
+              { className: 'dsh-nudge-stats-chart-pane' },
               h(
                 'div',
-                { className: 'dsh-nudge-stats-line head' },
-                h('span', null, t('statsDate')),
-                ...STAT_FIELDS.map((field) =>
-                  h('span', { key: field, className: 'dsh-nudge-stats-num' }, statLabels[field]),
-                ),
+                { className: 'dsh-nudge-stats-trend-head' },
+                h('span', null, t('statsRecent')),
+                h('span', { className: 'dsh-nudge-stats-total' }, fill(t('statsTimes'), windowTotal)),
               ),
-              ...recentRows.map((key) =>
+              h(
+                'div',
+                { className: 'dsh-nudge-chart-wrap' },
+                h(
+                  'svg',
+                  {
+                    className: 'dsh-nudge-chart-svg',
+                    viewBox: `0 0 ${CHART_W} ${CHART_H}`,
+                    preserveAspectRatio: 'none',
+                    'aria-hidden': 'true',
+                  },
+                  h(
+                    'defs',
+                    null,
+                    h(
+                      'linearGradient',
+                      { id: 'dsh-nudge-fill-input', x1: '0', y1: '0', x2: '0', y2: '1' },
+                      h('stop', { offset: '0%', stopColor: 'var(--dsw-static-deepseek-450,#5686fe)', stopOpacity: '0.2' }),
+                      h('stop', { offset: '100%', stopColor: 'var(--dsw-static-deepseek-450,#5686fe)', stopOpacity: '0' }),
+                    ),
+                    h(
+                      'linearGradient',
+                      { id: 'dsh-nudge-fill-note', x1: '0', y1: '0', x2: '0', y2: '1' },
+                      h('stop', { offset: '0%', stopColor: 'var(--dn-note)', stopOpacity: '0.18' }),
+                      h('stop', { offset: '100%', stopColor: 'var(--dn-note)', stopOpacity: '0' }),
+                    ),
+                  ),
+                  h('line', {
+                    x1: '0',
+                    y1: CHART_H - CHART_PAD_BOTTOM,
+                    x2: CHART_W,
+                    y2: CHART_H - CHART_PAD_BOTTOM,
+                    stroke: 'var(--dn-line)',
+                    strokeWidth: '1',
+                    vectorEffect: 'non-scaling-stroke',
+                  }),
+                  hasActivity
+                    ? h('path', {
+                        d: areaOf(noteLine),
+                        fill: 'url(#dsh-nudge-fill-note)',
+                        stroke: 'none',
+                      })
+                    : null,
+                  hasActivity
+                    ? h('path', {
+                        d: areaOf(inputLine),
+                        fill: 'url(#dsh-nudge-fill-input)',
+                        stroke: 'none',
+                      })
+                    : null,
+                  hasActivity
+                    ? h('path', {
+                        className: 'dsh-nudge-chart-line note',
+                        d: noteLine,
+                        fill: 'none',
+                        stroke: 'var(--dn-note)',
+                        strokeWidth: '1.6',
+                        strokeLinecap: 'round',
+                        strokeLinejoin: 'round',
+                        vectorEffect: 'non-scaling-stroke',
+                      })
+                    : null,
+                  hasActivity
+                    ? h('path', {
+                        className: 'dsh-nudge-chart-line input',
+                        d: inputLine,
+                        fill: 'none',
+                        stroke: 'var(--dsw-static-deepseek-450,#5686fe)',
+                        strokeWidth: '1.8',
+                        strokeLinecap: 'round',
+                        strokeLinejoin: 'round',
+                        vectorEffect: 'non-scaling-stroke',
+                      })
+                    : null,
+                  inputSeries[todayIndex] > 0
+                    ? h('circle', {
+                        cx: round(xAt(todayIndex)),
+                        cy: round(yAt(inputSeries[todayIndex])),
+                        r: '2.6',
+                        fill: 'var(--dsw-static-deepseek-450,#5686fe)',
+                        stroke: 'var(--dsw-alias-bg-layer-1,#fff)',
+                        strokeWidth: '1.4',
+                      })
+                    : null,
+                  noteSeries[todayIndex] > 0
+                    ? h('circle', {
+                        cx: round(xAt(todayIndex)),
+                        cy: round(yAt(noteSeries[todayIndex])),
+                        r: '2.6',
+                        fill: 'var(--dn-note)',
+                        stroke: 'var(--dsw-alias-bg-layer-1,#fff)',
+                        strokeWidth: '1.4',
+                      })
+                    : null,
+                ),
+                hasActivity
+                  ? null
+                  : h('div', { className: 'dsh-nudge-chart-empty' }, t('statsEmpty')),
                 h(
                   'div',
-                  { key, className: `dsh-nudge-stats-line${key === today ? ' today' : ''}` },
-                  h('span', null, key === today ? t('statsToday') : key.slice(5)),
-                  ...STAT_FIELDS.map((field) =>
+                  { className: 'dsh-nudge-chart-hits' },
+                  ...windowKeys.map((key, index) =>
                     h(
-                      'span',
-                      { key: field, className: 'dsh-nudge-stats-num' },
-                      String(statsDays[key]?.[field] ?? 0),
+                      'div',
+                      { key, className: 'dsh-nudge-chart-hit' },
+                      h(
+                        'span',
+                        { className: 'dsh-nudge-chart-tip' },
+                        h(
+                          'span',
+                          { className: 'dsh-nudge-chart-tip-date' },
+                          key === today ? t('statsToday') : key.slice(5),
+                        ),
+                        h(
+                          'span',
+                          { className: 'dsh-nudge-chart-tip-values' },
+                          `${t('statsLegendInput')} ${inputSeries[index]} · ${t('statsAnnotation')} ${noteSeries[index]}`,
+                        ),
+                      ),
                     ),
                   ),
                 ),
               ),
               h(
                 'div',
-                { className: 'dsh-nudge-stats-line total' },
-                h('span', null, t('statsTotal')),
-                ...STAT_FIELDS.map((field) =>
+                { className: 'dsh-nudge-stats-axis' },
+                h('span', null, windowKeys[0].slice(5)),
+                h('span', null, windowKeys[7].slice(5)),
+                h('span', null, t('statsToday')),
+              ),
+              h(
+                'div',
+                { className: 'dsh-nudge-chart-legend' },
+                h(
+                  'span',
+                  { className: 'dsh-nudge-chart-legend-item' },
+                  h('i', { className: 'dsh-nudge-chart-dot input' }),
+                  t('statsLegendInput'),
+                ),
+                h(
+                  'span',
+                  { className: 'dsh-nudge-chart-legend-item' },
+                  h('i', { className: 'dsh-nudge-chart-dot note' }),
+                  t('statsAnnotation'),
+                ),
+              ),
+            ),
+            h(
+              'div',
+              { className: 'dsh-nudge-stats-side' },
+              h(
+                'div',
+                { className: 'dsh-nudge-stats-today' },
+                h(
+                  'div',
+                  { className: 'dsh-nudge-stats-today-head' },
+                  h('span', { className: 'dsh-nudge-stats-today-label' }, t('statsToday')),
+                  h('span', { className: 'dsh-nudge-stats-today-date' }, today.slice(5)),
+                ),
+                h(
+                  'div',
+                  { className: 'dsh-nudge-stats' },
+                  ...STAT_FIELDS.map((field) =>
+                    h(
+                      'div',
+                      { key: field, className: 'dsh-nudge-stat' },
+                      h('span', { className: 'dsh-nudge-stat-value' }, String(statsDays[today]?.[field] ?? 0)),
+                      h('span', { className: 'dsh-nudge-stat-label' }, statLabels[field]),
+                    ),
+                  ),
+                ),
+              ),
+              h('div', { className: 'dsh-nudge-stats-side-head' }, h('span', null, t('statsTopTitle'))),
+              topPresets.length === 0
+                ? h(
+                    'div',
+                    { className: 'dsh-nudge-stats-side-empty' },
+                    windowInputs > 0 ? t('statsTopSince') : t('statsTopEmpty'),
+                  )
+                : h(
+                    'ol',
+                    { className: 'dsh-nudge-top-list' },
+                    ...topPresets.map((item, index) =>
+                      h(
+                        'li',
+                        { key: item.preset.id, className: 'dsh-nudge-top-item' },
+                        h('span', { className: 'dsh-nudge-top-rank' }, String(index + 1)),
+                        h('span', { className: 'dsh-nudge-top-label', title: item.preset.text }, item.preset.label),
+                        h('span', { className: 'dsh-nudge-top-count' }, fill(t('statsCountUnit'), item.total)),
+                      ),
+                    ),
+                  ),
+              topPresets.length > 0 && windowInputs > 0
+                ? h('div', { className: 'dsh-nudge-stats-share' }, fill(t('statsTopShare'), topShare))
+                : null,
+            ),
+          ),
+        )
+
+        return h(
+          'div',
+          { className: 'dsh-nudge-settings' },
+          h('style', { key: 'dsh-nudge-css' }, CSS),
+          statsSection,
+          // The settings page follows the floating window's modules: notes
+          // first (as in the window), then prompts, then the status row. The
+          // long prompt editor starts folded so the switches stay in view.
+          settingsSection('annotations', t('annotationsTitle'), null, [
+            toggleRow({
+              key: 'quick',
+              title: t('quickTitle'),
+              desc: t('quickHint'),
+              checked: state.quick === true,
+              onChange: (value) => runtime.setQuick(value),
+            }),
+            toggleRow({
+              key: 'autopaste',
+              title: t('autoPasteTitle'),
+              desc: t('autoPasteDesc'),
+              checked: state.autoPaste === true,
+              onChange: (value) => runtime.setAutoPaste(value),
+            }),
+          ]),
+          settingsSection('quickinput', t('nudgeModule'), t('presetsHint'), [
+            foldGroup('presets', t('preset'), t('presetCount').replace('{n}', String(state.presets.length)), [
+            // The list is a table of contents: names only, bodies on demand.
+            h(
+              'div',
+              { className: 'dsh-nudge-preset-toolbar' },
+              h('span', { className: 'dsh-nudge-preset-count' }, t('presetCount').replace('{n}', String(state.presets.length))),
+              h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'dsh-nudge-btn',
+                  disabled: state.presets.length === 0,
+                  onClick: () => runtime.setPresetsOpen(true),
+                },
+                t('expandAllPresets'),
+              ),
+              h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'dsh-nudge-btn',
+                  disabled: state.presetOpen.length === 0,
+                  onClick: () => runtime.setPresetsOpen(false),
+                },
+                t('collapseAllPresets'),
+              ),
+              h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'dsh-nudge-btn',
+                  'aria-expanded': importOpen ? 'true' : 'false',
+                  onClick: () => setImportOpen(importOpen !== true),
+                },
+                t('importPresets'),
+              ),
+              h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'dsh-nudge-btn',
+                  title: t('exportHint'),
+                  disabled: state.presets.length === 0,
+                  onClick: exportLines,
+                },
+                t('exportPresets'),
+              ),
+            ),
+            copyNote.length > 0
+              ? h('div', { key: 'preset-copy-note', className: 'dsh-nudge-settings-note' }, copyNote)
+              : null,
+            state.presets.length === 0
+              ? h('div', { className: 'dsh-nudge-preset-empty' }, t('presetsEmpty'))
+              : null,
+            ...state.presets.map((preset, index) =>
+              h(PresetRow, {
+                key: preset.id,
+                preset,
+                t,
+                onError: setError,
+                index,
+                total: state.presets.length,
+              }),
+            ),
+            h(
+              'div',
+              { className: 'dsh-nudge-preset-row dsh-nudge-preset-add' },
+              h(
+                'div',
+                { className: 'dsh-nudge-preset-line' },
+                h('input', {
+                  type: 'text',
+                  value: draftLabel,
+                  placeholder: t('presetLabel'),
+                  'aria-label': t('presetLabel'),
+                  onChange: (event) => setDraftLabel(event.target.value),
+                }),
+              ),
+              h('textarea', {
+                value: draftText,
+                placeholder: t('presetText'),
+                'aria-label': t('presetText'),
+                onChange: (event) => setDraftText(event.target.value),
+              }),
+              h(
+                'div',
+                { className: 'dsh-nudge-preset-actions' },
+                h('button', { type: 'button', className: 'dsh-nudge-btn primary', onClick: add }, t('addPreset')),
+              ),
+            ),
+            importOpen
+              ? h(
+                  'div',
+                  { className: 'dsh-nudge-preset-import' },
+                  h('div', { className: 'dsh-nudge-settings-hint' }, t('importHint')),
+                  h('textarea', {
+                    value: draftImport,
+                    placeholder: t('importPlaceholder'),
+                    'aria-label': t('importPresets'),
+                    onChange: (event) => setDraftImport(event.target.value),
+                  }),
                   h(
-                    'span',
-                    { key: field, className: 'dsh-nudge-stats-num' },
-                    String(recentTotals[field]),
+                    'div',
+                    { className: 'dsh-nudge-preset-actions' },
+                    h(
+                      'button',
+                      { type: 'button', className: 'dsh-nudge-btn primary', onClick: () => importLines(draftImport) },
+                      t('importSubmit'),
+                    ),
+                    h(
+                      'button',
+                      {
+                        type: 'button',
+                        className: 'dsh-nudge-btn',
+                        onClick: () => {
+                          setImportOpen(false)
+                          setDraftImport('')
+                          setError('')
+                        },
+                      },
+                      t('cancelPreset'),
+                    ),
+                  ),
+                )
+              : null,
+            h(
+              'div',
+              { className: 'dsh-nudge-preset-actions' },
+              h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'dsh-nudge-btn',
+                  onClick: () => {
+                    runtime.resetPresets()
+                    setError('')
+                  },
+                },
+                t('resetPresets'),
+              ),
+            ),
+            ]),
+            h(
+              'div',
+              { key: 'delivery', className: 'dsh-nudge-settings-group' },
+              h('span', { className: 'dsh-nudge-toggle-title' }, t('deliveryTitle')),
+              h('span', { className: 'dsh-nudge-toggle-desc' }, t('deliveryDesc')),
+              h(
+                'div',
+                { className: 'dsh-nudge-presets', role: 'group', 'aria-label': t('deliveryTitle') },
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    className: `dsh-nudge-chip${delivery === 'steer' ? ' active' : ''}`,
+                    'aria-pressed': delivery === 'steer' ? 'true' : 'false',
+                    onClick: () => runtime.setDelivery('steer'),
+                  },
+                  t('steer'),
+                ),
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    className: `dsh-nudge-chip${delivery === 'steer' ? '' : ' active'}`,
+                    'aria-pressed': delivery === 'steer' ? 'false' : 'true',
+                    onClick: () => runtime.setDelivery('followup'),
+                  },
+                  t('queue'),
+                ),
+              ),
+            ),
+            toggleRow({
+              key: 'turbo',
+              title: t('turboTitle'),
+              desc: t('turboDesc'),
+              checked: state.turbo === true,
+              onChange: (value) => runtime.setTurbo(value),
+            }),
+          ]),
+          settingsSection('appearance', t('appearanceTitle'), null, [
+            h(
+              'div',
+              { key: 'frame', className: 'dsh-nudge-settings-group' },
+              h('span', { className: 'dsh-nudge-toggle-title' }, t('frameTitle')),
+              h('span', { className: 'dsh-nudge-toggle-desc' }, t('frameDesc')),
+              h(
+                'div',
+                { className: 'dsh-nudge-presets', role: 'group', 'aria-label': t('frameTitle') },
+                ...FRAME_CHOICES.map((width) =>
+                  h(
+                    'button',
+                    {
+                      key: `frame-${width}`,
+                      type: 'button',
+                      className: `dsh-nudge-chip${state.frame === width ? ' active' : ''}`,
+                      'aria-pressed': state.frame === width ? 'true' : 'false',
+                      onClick: () => runtime.setFrame(width),
+                    },
+                    t(frameLabelKey(width)),
                   ),
                 ),
               ),
             ),
-          ),
-          h('div', { className: 'dsh-nudge-settings-hint' }, t('presetsHint')),
-          // The list is a table of contents: names only, bodies on demand.
-          h(
-            'div',
-            { className: 'dsh-nudge-preset-toolbar' },
-            h('span', { className: 'dsh-nudge-preset-count' }, t('presetCount').replace('{n}', String(state.presets.length))),
-            h(
-              'button',
-              {
-                type: 'button',
-                className: 'dsh-nudge-btn',
-                disabled: state.presets.length === 0,
-                onClick: () => runtime.setPresetsOpen(true),
-              },
-              t('expandAllPresets'),
-            ),
-            h(
-              'button',
-              {
-                type: 'button',
-                className: 'dsh-nudge-btn',
-                disabled: state.presetOpen.length === 0,
-                onClick: () => runtime.setPresetsOpen(false),
-              },
-              t('collapseAllPresets'),
-            ),
-            h(
-              'button',
-              {
-                type: 'button',
-                className: 'dsh-nudge-btn',
-                'aria-expanded': importOpen ? 'true' : 'false',
-                onClick: () => setImportOpen(importOpen !== true),
-              },
-              t('importPresets'),
-            ),
-            h(
-              'button',
-              {
-                type: 'button',
-                className: 'dsh-nudge-btn',
-                title: t('exportHint'),
-                disabled: state.presets.length === 0,
-                onClick: exportLines,
-              },
-              t('exportPresets'),
-            ),
-          ),
-          copyNote.length > 0
-            ? h('div', { key: 'preset-copy-note', className: 'dsh-nudge-settings-note' }, copyNote)
-            : null,
-          state.presets.length === 0
-            ? h('div', { className: 'dsh-nudge-preset-empty' }, t('presetsEmpty'))
-            : null,
-          ...state.presets.map((preset, index) =>
-            h(PresetRow, {
-              key: preset.id,
-              preset,
-              t,
-              onError: setError,
-              index,
-              total: state.presets.length,
-            }),
-          ),
-          h(
-            'div',
-            { className: 'dsh-nudge-preset-row dsh-nudge-preset-add' },
+          ]),
+          settingsSection('statusline', t('tipsTitle'), t('tipsHint'), [
+            // The paste box sits above the list: it is the way in, so it must not
+            // hide under a dozen existing lines.
             h(
               'div',
-              { className: 'dsh-nudge-preset-line' },
-              h('input', {
-                type: 'text',
-                value: draftLabel,
-                placeholder: t('presetLabel'),
-                'aria-label': t('presetLabel'),
-                onChange: (event) => setDraftLabel(event.target.value),
+              { key: 'tip-draft', className: 'dsh-nudge-tip-draft' },
+              h('textarea', {
+                value: draftTip,
+                placeholder: t('tipsPastePlaceholder'),
+                'aria-label': t('tipsPastePlaceholder'),
+                onChange: (event) => setDraftTip(event.target.value),
+                onPaste: onTipPaste,
+                onKeyDown: (event) => {
+                  if (event.key === 'Enter' && (event.ctrlKey === true || event.metaKey === true)) {
+                    addTipLine()
+                  }
+                },
+              }),
+              h('button', { type: 'button', className: 'dsh-nudge-btn primary', onClick: addTipLine }, t('addTip')),
+            ),
+            note.length > 0 ? h('div', { key: 'tips-note', className: 'dsh-nudge-settings-note' }, note) : null,
+            ...state.tips.map((line, index) =>
+              h(TipRow, {
+                key: `tip-${index}`,
+                value: line,
+                t,
+                onError: setError,
+                index,
               }),
             ),
-            h('textarea', {
-              value: draftText,
-              placeholder: t('presetText'),
-              'aria-label': t('presetText'),
-              onChange: (event) => setDraftText(event.target.value),
-            }),
             h(
               'div',
-              { className: 'dsh-nudge-preset-actions' },
-              h('button', { type: 'button', className: 'dsh-nudge-btn primary', onClick: add }, t('addPreset')),
-            ),
-          ),
-          importOpen
-            ? h(
-                'div',
-                { className: 'dsh-nudge-preset-import' },
-                h('div', { className: 'dsh-nudge-settings-hint' }, t('importHint')),
-                h('textarea', {
-                  value: draftImport,
-                  placeholder: t('importPlaceholder'),
-                  'aria-label': t('importPresets'),
-                  onChange: (event) => setDraftImport(event.target.value),
-                }),
-                h(
-                  'div',
-                  { className: 'dsh-nudge-preset-actions' },
-                  h(
-                    'button',
-                    { type: 'button', className: 'dsh-nudge-btn primary', onClick: () => importLines(draftImport) },
-                    t('importSubmit'),
-                  ),
-                  h(
-                    'button',
-                    {
-                      type: 'button',
-                      className: 'dsh-nudge-btn',
-                      onClick: () => {
-                        setImportOpen(false)
-                        setDraftImport('')
-                        setError('')
-                      },
-                    },
-                    t('cancelPreset'),
-                  ),
-                ),
-              )
-            : null,
-          h(
-            'div',
-            { className: 'dsh-nudge-preset-actions' },
-            h(
-              'button',
-              {
-                type: 'button',
-                className: 'dsh-nudge-btn',
-                onClick: () => {
-                  runtime.resetPresets()
-                  setError('')
+              { key: 'tips-reset', className: 'dsh-nudge-preset-actions' },
+              h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'dsh-nudge-btn',
+                  onClick: () => {
+                    runtime.resetTips()
+                    setError('')
+                    setNote('')
+                  },
                 },
-              },
-              t('resetPresets'),
+                t('resetTips'),
+              ),
             ),
-          ),
-          h('div', { key: 'tips-title', className: 'dsh-nudge-settings-hint' }, t('tipsTitle')),
-          h('div', { key: 'tips-hint', className: 'dsh-nudge-settings-hint' }, t('tipsHint')),
-          // The paste box sits above the list: it is the way in, so it must not
-          // hide under a dozen existing lines.
-          h(
-            'div',
-            { key: 'tip-draft', className: 'dsh-nudge-tip-draft' },
-            h('textarea', {
-              value: draftTip,
-              placeholder: t('tipsPastePlaceholder'),
-              'aria-label': t('tipsPastePlaceholder'),
-              onChange: (event) => setDraftTip(event.target.value),
-              onPaste: onTipPaste,
-              onKeyDown: (event) => {
-                if (event.key === 'Enter' && (event.ctrlKey === true || event.metaKey === true)) {
-                  addTipLine()
-                }
-              },
-            }),
-            h('button', { type: 'button', className: 'dsh-nudge-btn primary', onClick: addTipLine }, t('addTip')),
-          ),
-          note.length > 0 ? h('div', { key: 'tips-note', className: 'dsh-nudge-settings-note' }, note) : null,
-          ...state.tips.map((line, index) =>
-            h(TipRow, {
-              key: `tip-${index}`,
-              value: line,
-              t,
-              onError: setError,
-              index,
-            }),
-          ),
-          h(
-            'div',
-            { key: 'tips-reset', className: 'dsh-nudge-preset-actions' },
-            h(
-              'button',
-              {
-                type: 'button',
-                className: 'dsh-nudge-btn',
-                onClick: () => {
-                  runtime.resetTips()
-                  setError('')
-                  setNote('')
-                },
-              },
-              t('resetTips'),
-            ),
-          ),
+          ], { collapsible: true }),
           error.length > 0 ? h('div', { className: 'dsh-nudge-settings-error' }, error) : null,
         )
       }
