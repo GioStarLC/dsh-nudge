@@ -2164,9 +2164,14 @@ window.__ModuleLoader__.load({
         return true
       }
 
-      /** Add the captured passage with the 同意 / 不同意 answer. */
+      /**
+       * Add the captured passage with the 同意 / 不同意 answer. A remark typed
+       * in the card is kept: the verdict comes first, then the remark.
+       */
       function quickReply(kind) {
-        return addAnnotation(kind === 'agree' ? text('agree') : text('disagree'))
+        const verdict = kind === 'agree' ? text('agree') : text('disagree')
+        const remark = typeof state.annotationNote === 'string' ? state.annotationNote.trim() : ''
+        return addAnnotation(remark === '' || remark === verdict ? verdict : `${verdict}，${remark}`)
       }
 
       /** Drop the pending annotation draft without adding it. */

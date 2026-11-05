@@ -1203,6 +1203,44 @@ function flowItemStub(key, text, children = []) {
 }
 
 {
+  // A remark typed in the card survives the 👍 / 👎 shortcut: the verdict is
+  // written first and the user's own words follow it.
+  const booted = await boot({})
+  const plain = { nodeType: 1, closest: () => null }
+  const capture = (passage) => {
+    booted.sandbox.getSelection = selectionStub(passage, plain)
+    return booted.runtime.captureSelection()
+  }
+  capture('引用甲')
+  booted.runtime.setAnnotationNote('但第三点要改')
+  check('quick reply: agree accepts a typed remark', booted.runtime.quickReply('agree'), true)
+  check(
+    'quick reply: verdict comes before the remark',
+    booted.runtime.getSnapshot().annotations[0].note,
+    '同意，但第三点要改',
+  )
+  capture('引用乙')
+  booted.runtime.setAnnotationNote('先别动')
+  check('quick reply: disagree accepts a typed remark', booted.runtime.quickReply('disagree'), true)
+  check(
+    'quick reply: disagree verdict comes before the remark',
+    booted.runtime.getSnapshot().annotations[1].note,
+    '不同意，先别动',
+  )
+  capture('引用丙')
+  booted.runtime.setAnnotationNote('同意')
+  booted.runtime.quickReply('agree')
+  check('quick reply: an identical verdict is not repeated', booted.runtime.getSnapshot().annotations[2].note, '同意')
+  capture('引用丁')
+  check('quick reply: no remark keeps the bare verdict', booted.runtime.quickReply('agree'), true)
+  check('quick reply: bare verdict note', booted.runtime.getSnapshot().annotations[3].note, '同意')
+  let written = ''
+  booted.runtime.attachComposer({ readDraft: () => '', setDraft: (value) => (written = value) })
+  check('quick reply: write accepted', booted.runtime.writeAnnotations(), true)
+  check('quick reply: composed message carries verdict + remark', written.includes('我的回答：同意，但第三点要改'), true)
+}
+
+{
   // Selections inside fields, modals and this window are ignored.
   const cases = [
     ['input', (selector) => (selector.includes('input') ? {} : null)],
