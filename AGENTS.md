@@ -41,7 +41,10 @@ npm run changelog:write  # 重新生成 CHANGELOG.md（生成物，不手改）
 npm run hooks:install    # 启用 .githooks/pre-commit
 
 # 更新代码图（本会话改过代码后、或 graphify_status 报 STALE 时；纯本地、秒级、不花 token）
-uv run --with "graphifyy[mcp]==0.9.57" graphify update .
+# 务必传绝对仓库根——传 `.` 会把 graphify-out/.graphify_root 写成 `.`，
+# 插件把相对值拼到 graphify-out/ 上，所有 graphify_* 查询就找不到 graph.json 了。
+# 已经写坏了就删掉该标记文件，规范布局（dirname(graphify-out)）即可恢复。
+uv run --with "graphifyy[mcp]==0.9.57" graphify update "$(cygpath -w "$PWD")"
 ```
 
 `check` 是本项目的"单测"，不是构建：不编译、不下载、不装 `node_modules`。可以直接跑，不受全局「构建约束」限制。`test` 脚本不存在，也不要新增。
@@ -52,7 +55,7 @@ uv run --with "graphifyy[mcp]==0.9.57" graphify update .
 
 - **回答架构或代码库问题前，先读 `graphify-out/GRAPH_REPORT.md`**（约 130 行：枢纽节点、17 个社区的成员清单）。比一次 `query_graph` 便宜，也基本就是本仓库缺的那张模块地图。
 - **存在 `graphify-out/wiki/index.md` 时先看它**，但结论仍回源码确认（本仓库当前没有 wiki）。
-- **本会话改过代码后，跑一次** `uv run --with "graphifyy[mcp]==0.9.57" graphify update .`（AST-only，不花 API）；`graphify` 本身不在 PATH 上，别直接敲 `graphify update`。
+- **本会话改过代码后，跑一次**「命令」里那条 `graphify update`（AST-only，不花 API）；`graphify` 本身不在 PATH 上，别直接敲 `graphify update`，也别把路径写成 `.`（原因见那条命令上方的注释）。
 - **报告会落后于图。** `update` 只重写 `graph.json`，不重画 `GRAPH_REPORT.md`；要新的社区结构就补一次 `graphify cluster-only`。行号与边以 `graph.json` 为准。
 
 ## 查代码：grep 定位符号，graphify 看结构
