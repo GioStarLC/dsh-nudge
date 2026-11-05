@@ -38,6 +38,10 @@ window.__ModuleLoader__.load({
     const TURBO_KEY = 'dsh-nudge:turbo'
     const QUICK_KEY = 'dsh-nudge:quick'
     const AUTOPASTE_KEY = 'dsh-nudge:autopaste'
+    const FRAME_KEY = 'dsh-nudge:frame'
+    /** The border widths the settings offer for the floating window, in px. */
+    const FRAME_CHOICES = [1, 2, 3]
+    const DEFAULT_FRAME = 2
     const NOTES_KEY = 'dsh-nudge:notes'
     /** Flow item attribute the shell uses for stable transcript anchors. */
     const ANCHOR_SELECTOR = '[data-chat-anchor-key]'
@@ -178,6 +182,11 @@ window.__ModuleLoader__.load({
       autoPasteDesc: '点选输入框时，把当前待发送的批注自动写入输入框。',
       autoPasteOn: '自动粘贴：开',
       autoPasteOff: '自动粘贴：关',
+      frameTitle: '窗口边框',
+      frameDesc: '悬浮窗描边的粗细。',
+      frameThin: '细',
+      frameNormal: '标准',
+      frameThick: '粗',
       copyHint: '复制选中的原文',
       deliveryTitle: '投递方式',
       deliveryDesc: '「直接打断」中止当前回答立刻处理；「排队」等这一轮结束后再处理。',
@@ -323,6 +332,11 @@ window.__ModuleLoader__.load({
       autoPasteDesc: 'When you click into the input box, write the pending notes into it automatically.',
       autoPasteOn: 'Auto-paste: on',
       autoPasteOff: 'Auto-paste: off',
+      frameTitle: 'Window border',
+      frameDesc: 'How thick the floating window outline is.',
+      frameThin: 'Thin',
+      frameNormal: 'Standard',
+      frameThick: 'Thick',
       copyHint: 'copy this passage',
       deliveryTitle: 'Delivery mode',
       deliveryDesc: 'Interrupt stops the current answer and handles this right away; Queue waits for the running turn to finish.',
@@ -719,6 +733,8 @@ window.__ModuleLoader__.load({
       if (store.getItem(TURBO_KEY) === '1') snapshot.turbo = true
       if (store.getItem(QUICK_KEY) === '1') snapshot.quick = true
       if (store.getItem(AUTOPASTE_KEY) === '1') snapshot.autoPaste = true
+      const frame = Number(store.getItem(FRAME_KEY))
+      if (isFrameWidth(frame)) snapshot.frame = frame
       const preset = store.getItem(PRESET_KEY)
       if (typeof preset === 'string' && preset !== '') snapshot.preset = preset
       const presets = readJson(PRESETS_KEY)
@@ -756,6 +772,8 @@ window.__ModuleLoader__.load({
         if (value.turbo === true) store.setItem(TURBO_KEY, '1')
         if (value.quick === true) store.setItem(QUICK_KEY, '1')
         if (value.autoPaste === true) store.setItem(AUTOPASTE_KEY, '1')
+        const frame = value.frame
+        if (isFrameWidth(frame)) store.setItem(FRAME_KEY, String(frame))
         if (typeof value.preset === 'string' && value.preset !== '') store.setItem(PRESET_KEY, value.preset)
         if (Array.isArray(value.presets)) store.setItem(PRESETS_KEY, JSON.stringify(value.presets))
         if (Array.isArray(value.tips)) store.setItem(TIPS_KEY, JSON.stringify(value.tips))
@@ -1004,6 +1022,28 @@ window.__ModuleLoader__.load({
       } catch {
         return false
       }
+    }
+
+    /** Whether a value is one of the frame widths the settings offer. */
+    function isFrameWidth(value) {
+      return FRAME_CHOICES.includes(value)
+    }
+
+    /** Read the floating-window border width; anything else falls back. */
+    function readFrame() {
+      try {
+        const text = storage()?.getItem(FRAME_KEY)
+        const width = text === null || text === undefined ? NaN : Number(text)
+        return isFrameWidth(width) ? width : DEFAULT_FRAME
+      } catch {
+        return DEFAULT_FRAME
+      }
+    }
+
+    /** The label key for one frame width, shared by the chips and the notice. */
+    function frameLabelKey(width) {
+      if (width === 1) return 'frameThin'
+      return width === 3 ? 'frameThick' : 'frameNormal'
     }
 
     /** The built-in idle lines, localized to one language. */
@@ -1367,6 +1407,8 @@ window.__ModuleLoader__.load({
         quick: readQuick(),
         /** Auto-paste switch: pending notes flow into the composer on focus. */
         autoPaste: readAutoPaste(),
+        /** Border width of the floating window, in px (the settings chips). */
+        frame: readFrame(),
         /** Idle lines for the status row, and which one is showing. */
         tips: readTips(language),
         tipIndex: 0,
@@ -1998,6 +2040,21 @@ window.__ModuleLoader__.load({
         }
         setState({ autoPaste: next })
         notify(next ? text('autoPasteOn') : text('autoPasteOff'))
+        return true
+      }
+
+      /** Border width of the floating window, in px; the default is not stored. */
+      function setFrame(value) {
+        const width = Number(value)
+        if (!isFrameWidth(width)) return false
+        try {
+          if (width === DEFAULT_FRAME) storage()?.removeItem(FRAME_KEY)
+          else storage()?.setItem(FRAME_KEY, String(width))
+        } catch {
+          /* best effort */
+        }
+        setState({ frame: width })
+        notify(`${text('frameTitle')}：${text(frameLabelKey(width))}`)
         return true
       }
 
@@ -3200,6 +3257,7 @@ window.__ModuleLoader__.load({
           turbo: readTurbo(),
           quick: readQuick(),
           autoPaste: readAutoPaste(),
+          frame: readFrame(),
           tips: readTips(state.lang),
           tipIndex: 0,
           stats: readStats(),
@@ -3579,6 +3637,7 @@ window.__ModuleLoader__.load({
         popupPosition,
         setQuick,
         setAutoPaste,
+        setFrame,
         addTip,
         addTips,
         updateTip,
@@ -3620,8 +3679,8 @@ window.__ModuleLoader__.load({
     // ---------------------------------------------------------------------
 
     const CSS = `
-.dsh-nudge-card,.dsh-nudge-pill,.dsh-nudge-settings,.dsh-nudge-popup{--dn-accent:color-mix(in srgb,var(--dsw-static-deepseek-450,#5686fe) 78%,var(--dsw-alias-label-primary,#1a1a1a) 22%);--dn-accent-soft:color-mix(in srgb,var(--dsw-static-deepseek-450,#5686fe) 14%,transparent);--dn-accent-line:color-mix(in srgb,var(--dsw-static-deepseek-450,#5686fe) 38%,transparent);--dn-accent-edge:color-mix(in srgb,var(--dsw-static-deepseek-450,#5686fe) 62%,transparent);--dn-line:var(--dsw-alias-border-l1,rgba(127,127,127,.25));--dn-line-strong:color-mix(in srgb,var(--dsw-alias-label-primary,#1a1a1a) 28%,transparent);--dn-hover:color-mix(in srgb,var(--dsw-alias-label-primary,#1a1a1a) 6%,transparent);--dn-agree:#2e7d32}
-.dsh-nudge-card{position:fixed;z-index:${Z_INDEX};width:min(304px,calc(100vw - 24px));display:flex;flex-direction:column;border-radius:16px;border:1px solid var(--dn-accent-edge);background:var(--dsw-alias-bg-layer-1,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);box-shadow:0 1px 2px rgba(15,23,42,.04),0 18px 44px -22px rgba(15,23,42,.3);font:13px/1.55 ui-sans-serif,system-ui,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;overflow:hidden;pointer-events:auto;animation:dsh-nudge-in .18s ease-out}
+.dsh-nudge-card,.dsh-nudge-pill,.dsh-nudge-settings,.dsh-nudge-popup{--dn-accent:color-mix(in srgb,var(--dsw-static-deepseek-450,#5686fe) 78%,var(--dsw-alias-label-primary,#1a1a1a) 22%);--dn-accent-soft:color-mix(in srgb,var(--dsw-static-deepseek-450,#5686fe) 14%,transparent);--dn-accent-line:color-mix(in srgb,var(--dsw-static-deepseek-450,#5686fe) 38%,transparent);--dn-accent-edge:color-mix(in srgb,var(--dsw-static-deepseek-450,#5686fe) 62%,transparent);--dn-line:var(--dsw-alias-border-l1,rgba(127,127,127,.25));--dn-line-strong:color-mix(in srgb,var(--dsw-alias-label-primary,#1a1a1a) 28%,transparent);--dn-hover:color-mix(in srgb,var(--dsw-alias-label-primary,#1a1a1a) 6%,transparent);--dn-agree:#2e7d32;--dn-frame:1px}
+.dsh-nudge-card{position:fixed;z-index:${Z_INDEX};width:min(304px,calc(100vw - 24px));display:flex;flex-direction:column;border-radius:16px;border:var(--dn-frame) solid var(--dn-accent-edge);background:var(--dsw-alias-bg-layer-1,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);box-shadow:0 1px 2px rgba(15,23,42,.04),0 18px 44px -22px rgba(15,23,42,.3);font:13px/1.55 ui-sans-serif,system-ui,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;overflow:hidden;pointer-events:auto;animation:dsh-nudge-in .18s ease-out}
 @keyframes dsh-nudge-in{from{opacity:0;transform:translateY(-5px) scale(.985)}to{opacity:1;transform:none}}
 .dsh-nudge-title{display:flex;align-items:center;gap:8px;padding:12px 12px 10px 14px;cursor:grab;user-select:none;touch-action:none;border-bottom:1px solid var(--dn-line)}
 .dsh-nudge-title:active{cursor:grabbing}
@@ -3740,7 +3799,7 @@ window.__ModuleLoader__.load({
    focusing the note field collapses the real selection before it can be kept.
    --dsh-nudge-capture-bg / -fg stay overridable for other platforms/themes. */
 ::highlight(dsh-nudge-capture){background:var(--dsh-nudge-capture-bg,#3367d1);color:var(--dsh-nudge-capture-fg,#fff)}
-.dsh-nudge-pill{position:fixed;z-index:${Z_INDEX};display:inline-flex;align-items:center;gap:8px;height:34px;padding:0 14px;border-radius:999px;border:1px solid var(--dn-accent-edge);background:var(--dsw-alias-bg-layer-1,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);box-shadow:0 1px 2px rgba(15,23,42,.04),0 10px 26px -14px rgba(15,23,42,.3);font:600 12px/1 ui-sans-serif,system-ui,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;cursor:grab;pointer-events:auto;touch-action:none;user-select:none;transition:transform .15s ease,box-shadow .15s ease;animation:dsh-nudge-in .18s ease-out}
+.dsh-nudge-pill{position:fixed;z-index:${Z_INDEX};display:inline-flex;align-items:center;gap:8px;height:34px;padding:0 14px;border-radius:999px;border:var(--dn-frame) solid var(--dn-accent-edge);background:var(--dsw-alias-bg-layer-1,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);box-shadow:0 1px 2px rgba(15,23,42,.04),0 10px 26px -14px rgba(15,23,42,.3);font:600 12px/1 ui-sans-serif,system-ui,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;cursor:grab;pointer-events:auto;touch-action:none;user-select:none;transition:transform .15s ease,box-shadow .15s ease;animation:dsh-nudge-in .18s ease-out}
 .dsh-nudge-pill:active{cursor:grabbing}
 .dsh-nudge-pill:hover{transform:translateY(-1px);box-shadow:0 1px 2px rgba(15,23,42,.04),0 14px 30px -14px rgba(15,23,42,.35)}
 .dsh-nudge-pill:focus-visible{outline:2px solid var(--dn-accent-line);outline-offset:2px}
@@ -4210,7 +4269,7 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
                 key: 'pill',
                 type: 'button',
                 className: 'dsh-nudge-pill',
-                style: { left: `${state.pos.x}px`, top: `${state.pos.y}px` },
+                style: { left: `${state.pos.x}px`, top: `${state.pos.y}px`, '--dn-frame': `${state.frame}px` },
                 title: t('expand'),
                 'aria-label': t('expand'),
                 onClick: onPillClick,
@@ -4331,7 +4390,7 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
             className: 'dsh-nudge-card',
             role: 'dialog',
             'aria-label': t('title'),
-            style: { left: `${state.pos.x}px`, top: `${state.pos.y}px` },
+            style: { left: `${state.pos.x}px`, top: `${state.pos.y}px`, '--dn-frame': `${state.frame}px` },
           },
           h('style', { key: 'dsh-nudge-css' }, CSS),
           attention
@@ -5411,6 +5470,29 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
             checked: state.autoPaste === true,
             onChange: (value) => runtime.setAutoPaste(value),
           }),
+          h(
+            'div',
+            { key: 'frame', className: 'dsh-nudge-settings-group' },
+            h('span', { className: 'dsh-nudge-toggle-title' }, t('frameTitle')),
+            h('span', { className: 'dsh-nudge-toggle-desc' }, t('frameDesc')),
+            h(
+              'div',
+              { className: 'dsh-nudge-presets', role: 'group', 'aria-label': t('frameTitle') },
+              ...FRAME_CHOICES.map((width) =>
+                h(
+                  'button',
+                  {
+                    key: `frame-${width}`,
+                    type: 'button',
+                    className: `dsh-nudge-chip${state.frame === width ? ' active' : ''}`,
+                    'aria-pressed': state.frame === width ? 'true' : 'false',
+                    onClick: () => runtime.setFrame(width),
+                  },
+                  t(frameLabelKey(width)),
+                ),
+              ),
+            ),
+          ),
           h(
             'div',
             { key: 'delivery', className: 'dsh-nudge-settings-group' },

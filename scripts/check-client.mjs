@@ -249,6 +249,42 @@ function expandTree(node) {
   )
 }
 
+// --- window border width ------------------------------------------------
+
+{
+  const booted = await boot({})
+  const overlay = booted.registrations.find((item) => item.entry.name === 'shell.overlay')
+  const cardStyle = () => findByClass(expandTree(overlay.Component()), 'dsh-nudge-card')?.props?.style?.['--dn-frame']
+  check('frame: default is the standard width', booted.runtime.getSnapshot().frame, 2)
+  check('frame: the window carries it as a custom property', cardStyle(), '2px')
+  const stylesheet = String(findAllByTag(expandTree(overlay.Component()), 'style')?.[0]?.children?.[0] ?? '')
+  check(
+    'frame: the window and the pill both draw their border from it',
+    (stylesheet.match(/border:var\(--dn-frame\) solid var\(--dn-accent-edge\)/g) ?? []).length,
+    2,
+  )
+  check('frame: thicker is accepted', booted.runtime.setFrame(3), true)
+  check('frame: thicker lands in the state', booted.runtime.getSnapshot().frame, 3)
+  check('frame: thicker is persisted', booted.localStorage.getItem('dsh-nudge:frame'), '3')
+  check('frame: the window follows the setting', cardStyle(), '3px')
+  includes('frame: the switch says so in words', booted.runtime.getSnapshot().flash, '窗口边框：粗')
+  check('frame: thinner is accepted', booted.runtime.setFrame(1), true)
+  check('frame: thinner is persisted', booted.localStorage.getItem('dsh-nudge:frame'), '1')
+  check('frame: the default drops the key', booted.runtime.setFrame(2) && booted.localStorage.getItem('dsh-nudge:frame'), null)
+  check('frame: an unknown width is refused', booted.runtime.setFrame(4), false)
+  check('frame: a refused width leaves the state alone', booted.runtime.getSnapshot().frame, 2)
+  booted.runtime.setFrame(1)
+  const settings = booted.registrations.find((item) => item.entry.name === 'settings.section')
+  const groups = findAllByClass(expandTree(settings.Component()), 'dsh-nudge-settings-group') ?? []
+  const frameGroup = groups.find((group) => group.children?.[0]?.children?.[0] === '窗口边框')
+  const chips = findAllByClass(frameGroup, 'dsh-nudge-chip') ?? []
+  check('frame: the settings offer three widths', chips.length, 3)
+  check('frame: every chip names its width', chips.map((chip) => chip.children?.[0]).join('|'), '细|标准|粗')
+  check('frame: the chosen width is the pressed one', chips.map((chip) => chip.props['aria-pressed']).join('|'), 'true|false|false')
+  chips[2].props.onClick()
+  check('frame: a chip click sets it', booted.runtime.getSnapshot().frame, 3)
+}
+
 // --- 2.2 explicit queue mode --------------------------------------------
 
 {
@@ -1760,8 +1796,8 @@ const durable = (type, seq, data) => ({ type: 'event', event: { type, seq, time:
   )
   const toolbar = findAllByClass(tree, 'dsh-nudge-preset-toolbar')[0]
   check('settings: the toolbar carries expand, collapse, import and export', (findAllByClass(toolbar, 'dsh-nudge-btn') ?? []).length, 4)
-  check('settings: delivery group rendered', (findAllByClass(tree, 'dsh-nudge-settings-group') ?? []).length, 1)
-  check('settings: delivery offers both modes', (findAllByClass(tree, 'dsh-nudge-chip') ?? []).length, 2)
+  check('settings: delivery group rendered', (findAllByClass(tree, 'dsh-nudge-settings-group') ?? []).length, 2)
+  check('settings: delivery offers both modes, the border three widths', (findAllByClass(tree, 'dsh-nudge-chip') ?? []).length, 5)
 
   // Opening a row paints its read-only body; editing swaps in two fields.
   const openedId = booted.runtime.getSnapshot().presets[0].id

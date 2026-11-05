@@ -157,6 +157,7 @@ const written = await call(
         turbo: true,
         quick: true,
         autoPaste: true,
+        frame: 2,
         preset: 'custom-1',
         presets: [{ id: 'custom-1', label: '我的口径', text: '写一份进展' }],
         tips: ['第一句', '  ', '第二句'],
@@ -185,6 +186,7 @@ check('write: stats malformed day dropped', 'not-a-day' in (written.json?.store?
 check('write: stats negative count drops the day', '2026-01-01' in (written.json?.store?.stats?.days ?? {}), false)
 check('write: blank tip dropped', written.json?.store?.tips?.[0], '第一句')
 check('write: savedAt stamped', typeof written.json?.store?.savedAt, 'string')
+check('write: border width kept', written.json?.store?.frame, 2)
 
 const storePath = host.storePathOf(mounted.ctx)
 check('write: record exists', existsSync(storePath), true)
@@ -197,6 +199,13 @@ check('read: record round-trips', reloaded.json?.store?.delivery, 'queue')
 check('read: presets round-trip', reloaded.json?.store?.presets?.length, 1)
 check('read: notes round-trip', reloaded.json?.store?.notes?.s1?.[0]?.id, 'n1')
 check('read: stats round-trip', reloaded.json?.store?.stats?.days?.['2026-01-02']?.insert, 1)
+check('read: border width round-trips', reloaded.json?.store?.frame, 2)
+
+// The border width is one of the three the browser half offers, nothing else.
+const oddFrame = await call(makeReq({ method: 'POST', body: { store: { frame: 9 } } }))
+check('write: an out-of-range border width is dropped', 'frame' in (oddFrame.json?.store ?? {}), false)
+const textFrame = await call(makeReq({ method: 'POST', body: { store: { frame: '3' } } }))
+check('write: a stringified border width is dropped', 'frame' in (textFrame.json?.store ?? {}), false)
 
 // The counter record keeps the newest local days only.
 const manyDays = {}
