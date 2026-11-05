@@ -51,6 +51,8 @@ window.__ModuleLoader__.load({
     const MAX_NOTE_SESSIONS = 40
     /** Upper bound on painted quote candidates per anchor. */
     const MAX_OCCURRENCES = 40
+    /** Samples kept per diagnostic list in the persisted UI record. */
+    const DIAG_SAMPLES = 5
     const PRESET_KEY = 'dsh-nudge:preset'
     const PRESETS_KEY = 'dsh-nudge:presets'
     /**
@@ -574,6 +576,47 @@ window.__ModuleLoader__.load({
           best.index + packed.length + CONTEXT_CHARS,
         ),
         index: best.index,
+      }
+    }
+
+    /**
+     * The anchor a quote hangs on when no live selection is left: the innermost
+     * flow item whose projection carries the passage.
+     *
+     * This is the recovery path, not the primary one — the anchor of a fresh
+     * selection comes from the range. A passage carried by two unrelated flow
+     * items stays unanchored, because painting the wrong one is worse than
+     * painting none.
+     */
+    function anchorFromQuote(quote) {
+      const packed = packedText(quote)
+      if (packed === '') return null
+      const elements = document.querySelectorAll?.(ANCHOR_SELECTOR) ?? []
+      const matches = []
+      for (const element of elements) {
+        const key = element.getAttribute?.('data-chat-anchor-key')
+        if (typeof key !== 'string' || key === '') continue
+        const full = packedMapOf(element)
+        const index = full.packed.indexOf(packed)
+        if (index === -1) continue
+        matches.push({ element, key, full, index })
+      }
+      // A turn-process row wraps its member rows, so the deepest match is the
+      // one the passage really belongs to.
+      const deepest = matches.filter(
+        (match) =>
+          !matches.some(
+            (other) => other !== match && match.element.contains?.(other.element) === true,
+          ),
+      )
+      if (deepest.length !== 1) return null
+      const { key, full, index } = deepest[0]
+      return {
+        key,
+        quote: packed,
+        prefix: full.packed.slice(Math.max(0, index - CONTEXT_CHARS), index),
+        suffix: full.packed.slice(index + packed.length, index + packed.length + CONTEXT_CHARS),
+        index,
       }
     }
 
@@ -1875,10 +1918,19 @@ window.__ModuleLoader__.load({
           rect = null
         }
         if (rect !== null && rect.width === 0 && rect.height === 0) rect = null
+        // Anchor now, while the range still points at the nodes the user just
+        // selected. Waiting for the click would gamble on the page not having
+        // re-rendered in between, and a lost anchor means no highlight ever.
+        let anchor = null
+        try {
+          anchor = anchorFromRange(selection.range, selection.quote)
+        } catch {
+          anchor = null
+        }
         setState({
           annotationDraft: {
             quote: selection.quote,
-            anchor: null,
+            anchor,
             range: selection.range,
             rect: rect
               ? {
@@ -1984,9 +2036,11 @@ window.__ModuleLoader__.load({
             : typeof state.annotationNote === 'string'
               ? state.annotationNote.trim()
               : ''
-        // Anchoring walks the whole flow item; do it now (one click) instead of
-        // on every mouseup, so selecting text stays light.
-        let anchor = draft.anchor ?? null
+        // The capture already anchored the passage; the two retries cover a page
+        // that re-rendered between the selection and this click. Whatever still
+        // fails leaves a diagnostic sample, because a note without an anchor
+        // shows up only as a highlight that never appears.
+        let anchor = typeof draft.anchor?.key === 'string' ? draft.anchor : null
         if (anchor === null && draft.range != null) {
           try {
             anchor = anchorFromRange(draft.range, draft.quote)
@@ -1994,6 +2048,8 @@ window.__ModuleLoader__.load({
             anchor = null
           }
         }
+        if (anchor === null) anchor = anchorFromQuote(draft.quote)
+        if (anchor === null) recordAnchorMiss(draft.quote)
         const annotation = {
           id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
           quote: draft.quote,
@@ -2118,8 +2174,17 @@ window.__ModuleLoader__.load({
             return
           }
           const byKey = new Map()
+          // Notes saved before this build (or while the page was mid-stream) can
+          // carry no anchor. The quote still identifies the passage, so resolve
+          // it once per distinct quote and never draw a guess.
+          const recovered = new Map()
           for (const note of state.annotations) {
-            const anchor = note.anchor
+            let anchor = note.anchor
+            if (typeof anchor?.key !== 'string') {
+              const quote = typeof note.quote === 'string' ? note.quote : ''
+              if (!recovered.has(quote)) recovered.set(quote, anchorFromQuote(quote))
+              anchor = recovered.get(quote)
+            }
             if (anchor === null || typeof anchor !== 'object' || typeof anchor.key !== 'string') continue
             if (!byKey.has(anchor.key)) byKey.set(anchor.key, [])
             byKey.get(anchor.key).push({ note, anchor, capture: false })
@@ -3165,22 +3230,56 @@ window.__ModuleLoader__.load({
       // --- settings navigation --------------------------------------------
 
       /**
-       * Keep the last few navigation samples in the persisted UI record.
+       * Append one sample to a diagnostic list in the persisted UI record.
        *
        * The shell's open seams report nothing when they fail — `invoke` returns
        * void, a blocked command returns silently, a click on the wrong button is
        * accepted — so the only place a failure can be observed is the running
        * page. The samples land in `nudge-store.json`, next to the other settings.
        */
+      function recordUiDiag(name, entry) {
+        const ui = readJson(UI_KEY) ?? {}
+        const list = Array.isArray(ui[name]) ? ui[name].slice(-DIAG_SAMPLES) : []
+        list.push({ at: Date.now(), ...entry })
+        ui[name] = list
+        storage()?.setItem(UI_KEY, JSON.stringify(ui))
+      }
+
+      /** One settings-navigation sample. */
       function recordSettingsDiag(entry) {
         try {
-          const ui = readJson(UI_KEY) ?? {}
-          const list = Array.isArray(ui.settingsDiag) ? ui.settingsDiag.slice(-5) : []
-          list.push({ at: Date.now(), ...entry })
-          ui.settingsDiag = list
-          storage()?.setItem(UI_KEY, JSON.stringify(ui))
+          recordUiDiag('settingsDiag', entry)
         } catch {
           /* diagnostics are best-effort and never block the gear */
+        }
+      }
+
+      /**
+       * Why a passage could not be anchored, as one sample.
+       *
+       * `flows` counts the anchor elements on the page, `hits` how many of them
+       * carry the passage, and `inBody` whether the text is on the page at all:
+       * together they separate "the transcript re-rendered" from "the passage
+       * lives outside every flow item" without a debugger on the running app.
+       */
+      function recordAnchorMiss(quote) {
+        try {
+          const packed = packedText(quote)
+          const flows = document.querySelectorAll?.(ANCHOR_SELECTOR) ?? []
+          let hits = 0
+          for (const element of flows) {
+            if (packedMapOf(element).packed.indexOf(packed) !== -1) hits += 1
+          }
+          const body = packedText(document.body?.textContent ?? '')
+          recordUiDiag('anchorDiag', {
+            event: 'no-anchor',
+            length: packed.length,
+            flows: flows.length,
+            hits,
+            inBody: packed !== '' && body.indexOf(packed) !== -1,
+          })
+        } catch {
+          /* diagnostics are best-effort and never block the note */
         }
       }
 

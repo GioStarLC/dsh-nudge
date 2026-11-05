@@ -1062,6 +1062,27 @@ function selectionStub(text, element, rect) {
   })
 }
 
+/**
+ * One synthetic flow item: an anchor element whose subtree carries `text`.
+ * `children` model a turn-process row wrapping its member rows.
+ */
+function flowItemStub(key, text, children = []) {
+  const element = {
+    nodeType: 1,
+    tagName: 'DIV',
+    hidden: false,
+    getAttribute: (name) => (name === 'data-chat-anchor-key' ? key : null),
+    // Only the anchor selector matches: a flow item is not a field, a modal or
+    // this plugin's own card, so the selection must survive readSelection().
+    closest: (selector) => (selector === '[data-chat-anchor-key]' ? element : null),
+    contains: (other) => other === element || children.some((child) => child.contains(other)),
+    childNodes: [],
+  }
+  const node = { nodeType: 3, data: text, textContent: text, parentElement: element }
+  element.childNodes.push(node, ...children)
+  return element
+}
+
 {
   const booted = await boot({})
   booted.sandbox.getSelection = selectionStub('原文内容', { nodeType: 1, closest: () => null })
@@ -1134,6 +1155,95 @@ function selectionStub(text, element, rect) {
   booted.runtime.addAnnotation()
   check('annotation: send without session refused', booted.runtime.sendAnnotations(), false)
   check('annotation: tray survives a failed send', booted.runtime.getSnapshot().annotations.length, 1)
+}
+
+// --- annotations: the anchor that makes the highlight possible ----------
+
+{
+  // A passage selected inside a flow item is anchored at capture time, so the
+  // note it becomes can be painted later.
+  const booted = await boot({})
+  booted.sandbox.document.createRange = () => ({
+    setStart() {},
+    setEnd() {},
+    getBoundingClientRect: () => ({ left: 100, top: 300, right: 300, bottom: 320 }),
+  })
+  booted.sandbox.getSelection = selectionStub('可以标注', flowItemStub('turn-1', '这里是一段可以标注的原文'))
+  booted.runtime.captureSelection()
+  check(
+    'anchor: capture keeps the flow item',
+    booted.runtime.getSnapshot().annotationDraft?.anchor?.key,
+    'turn-1',
+  )
+  booted.runtime.addAnnotation('同意')
+  check(
+    'anchor: the note stores its anchor',
+    booted.runtime.getSnapshot().annotations[0].anchor?.key,
+    'turn-1',
+  )
+}
+
+{
+  // A selection whose range went stale anchors by quote instead, and keeps the
+  // surrounding context that locates it later.
+  const booted = await boot({})
+  booted.sandbox.getSelection = selectionStub('可以标注', { nodeType: 1, closest: () => null })
+  booted.runtime.captureSelection()
+  check(
+    'anchor: a detached selection starts unanchored',
+    booted.runtime.getSnapshot().annotationDraft?.anchor,
+    null,
+  )
+  const item = flowItemStub('turn-2', '这里是一段可以标注的原文')
+  booted.sandbox.document.querySelectorAll = (selector) =>
+    selector === '[data-chat-anchor-key]' ? [item] : []
+  booted.runtime.addAnnotation('同意')
+  const note = booted.runtime.getSnapshot().annotations[0]
+  check('anchor: the click recovers the flow item', note.anchor?.key, 'turn-2')
+  check('anchor: the recovery keeps the context before it', note.anchor?.prefix, '这里是一段')
+  check('anchor: the recovery keeps the context after it', note.anchor?.suffix, '的原文')
+}
+
+{
+  // A turn-process row wraps its member rows; the passage belongs to the member.
+  const booted = await boot({})
+  booted.sandbox.getSelection = selectionStub('组里的句子', { nodeType: 1, closest: () => null })
+  booted.runtime.captureSelection()
+  const member = flowItemStub('turn-3', '组里的句子')
+  const group = flowItemStub('group:turn-3', '', [member])
+  booted.sandbox.document.querySelectorAll = () => [group, member]
+  booted.runtime.addAnnotation('同意')
+  check(
+    'anchor: a wrapping group defers to its member',
+    booted.runtime.getSnapshot().annotations[0].anchor?.key,
+    'turn-3',
+  )
+}
+
+{
+  // The same passage in two unrelated flow items is not a guess: it stays
+  // unanchored and leaves one diagnostic sample behind.
+  const booted = await boot({})
+  booted.sandbox.document.body = { textContent: '前文 重复的一句 后文' }
+  booted.sandbox.getSelection = selectionStub('重复的一句', { nodeType: 1, closest: () => null })
+  booted.runtime.captureSelection()
+  booted.sandbox.document.querySelectorAll = () => [
+    flowItemStub('turn-4', '重复的一句'),
+    flowItemStub('turn-5', '重复的一句'),
+  ]
+  booted.runtime.addAnnotation('同意')
+  check(
+    'anchor: an ambiguous passage stays unanchored',
+    booted.runtime.getSnapshot().annotations[0].anchor,
+    null,
+  )
+  const ui = JSON.parse(booted.localStorage.getItem('dsh-nudge:ui') ?? '{}')
+  const diag = Array.isArray(ui.anchorDiag) ? ui.anchorDiag : []
+  check('anchor: a miss leaves one sample', diag.length, 1)
+  check('anchor: the sample names the miss', diag[0]?.event, 'no-anchor')
+  check('anchor: the sample counts the anchor elements', diag[0]?.flows, 2)
+  check('anchor: the sample counts the passage carriers', diag[0]?.hits, 2)
+  check('anchor: the sample says the text is on the page', diag[0]?.inBody, true)
 }
 
 {
