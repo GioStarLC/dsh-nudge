@@ -1116,7 +1116,8 @@ function expandTree(node) {
   const gear = findByProp(overlay.Component(), 'aria-label', '打开设置')
   gear.props.onClick()
   // The jump driver is a package-local chunk: the press resolves after it loads.
-  await tick()
+  // Wait for the outcome instead of assuming a fixed 20ms is enough for disk IO.
+  for (let i = 0; i < 25 && booted.runtime.getSnapshot().settingsOpen !== true; i += 1) await sleep(20)
   check('the gear opens the in-window form', booted.runtime.getSnapshot().settingsOpen, true)
   const gearAgain = findByProp(overlay.Component(), 'aria-label', '打开设置')
   gearAgain.props.onClick()
@@ -1272,11 +1273,14 @@ function composerFocus() {
 // --- annotations: selection -> tray -> send / write ---------------------
 
 /** A window.getSelection() stub over one non-collapsed range. */
-function selectionStub(text, element, rect) {
+function selectionStub(text, element, rect, onRemove) {
   return () => ({
     rangeCount: 1,
     isCollapsed: false,
     toString: () => text,
+    removeAllRanges: () => {
+      if (typeof onRemove === 'function') onRemove()
+    },
     getRangeAt: () => ({
       commonAncestorContainer: element,
       getBoundingClientRect: () => rect ?? { left: 100, top: 300, right: 300, bottom: 320, width: 200, height: 20 },
@@ -2177,6 +2181,47 @@ const durable = (type, seq, data) => ({ type: 'event', event: { type, seq, time:
   capture('点卡片时的引用')
   booted.dispatch('pointerdown', { target: { closest: (selector) => (selector ? {} : null) } })
   check('chain: click on the card keeps it open', booted.runtime.getSnapshot().annotationDraft?.quote, '点卡片时的引用')
+}
+
+// --- annotations: dismissing the card must not kill the selection --------
+// The card opens 200ms after the release and focuses its note field. A wheel
+// scroll or a Shift+click in that window must close/cancel the card without
+// clearing the reader's native selection, or the passage can never be extended.
+{
+  const booted = await boot({})
+  booted.runtime.setQuick(true)
+  booted.sandbox.getSelection = selectionStub('滚动前选中的原文', { nodeType: 1, closest: () => null })
+  booted.dispatch('mouseup', { clientX: 120, clientY: 240 })
+  check('selection: window scroll listener wired', booted.dispatchWindow('scroll', { target: { closest: () => null } }), true)
+  await sleep(260)
+  check('selection: a pending capture is cancelled by a scroll', booted.runtime.getSnapshot().annotationDraft, null)
+}
+
+{
+  const booted = await boot({})
+  booted.runtime.setQuick(true)
+  const plain = { nodeType: 1, closest: () => null }
+  let removed = 0
+  const capture = (text) => {
+    booted.sandbox.getSelection = selectionStub(text, plain, undefined, () => {
+      removed += 1
+    })
+    return booted.runtime.captureSelection()
+  }
+
+  check('selection: scroll capture', capture('滚动时保留的原文'), true)
+  booted.dispatchWindow('scroll', { target: { closest: () => null } })
+  check('selection: scroll closed the card', booted.runtime.getSnapshot().annotationDraft, null)
+  check('selection: scroll keeps the native selection', removed, 0)
+
+  check('selection: outside capture', capture('点外保留的原文'), true)
+  booted.dispatch('pointerdown', { target: { closest: () => null } })
+  check('selection: outside click closed the card', booted.runtime.getSnapshot().annotationDraft, null)
+  check('selection: outside click keeps the native selection', removed, 0)
+
+  check('selection: commit capture', capture('提交后清掉的原文'), true)
+  check('selection: commit accepted', booted.runtime.addAnnotation(), true)
+  check('selection: committing a note still clears the native selection', removed, 1)
 }
 
 // --- the status row is a permanent bar, not a transient line --------------

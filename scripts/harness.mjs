@@ -171,6 +171,12 @@ export async function boot(options = {}) {
    * card, a settled selection) without a DOM implementation.
    */
   const docListeners = new Map()
+  /**
+   * Window listeners are recorded too: scroll is where the card decides whether
+   * a selection is still in progress, and checks need to dispatch it the same
+   * way a browser does.
+   */
+  const winListeners = new Map()
   const documentStub = {
     querySelector: () => null,
     querySelectorAll: () => [],
@@ -200,8 +206,14 @@ export async function boot(options = {}) {
     innerWidth: options.innerWidth ?? 1440,
     innerHeight: options.innerHeight ?? 900,
     getComputedStyle: () => ({ getPropertyValue: () => '' }),
-    addEventListener: () => {},
-    removeEventListener: () => {},
+    addEventListener(type, fn) {
+      if (typeof fn !== 'function') return
+      if (!winListeners.has(type)) winListeners.set(type, new Set())
+      winListeners.get(type).add(fn)
+    },
+    removeEventListener(type, fn) {
+      winListeners.get(type)?.delete(fn)
+    },
   }
   // Only when a check supplies one: the bundle then mirrors its settings to the
   // Host half and adopts the durable record on boot, exactly as in the browser.
@@ -249,12 +261,23 @@ export async function boot(options = {}) {
     }
     return handled
   }
+  /** Fire one recorded window listener pass, like a capture-phase browser event. */
+  const dispatchWindow = (type, event) => {
+    let handled = false
+    for (const fn of [...(winListeners.get(type) ?? [])]) {
+      handled = true
+      fn(event ?? {})
+    }
+    return handled
+  }
   return {
     sandbox,
     runtime: sandbox.__dshNudge,
     dispatch,
+    dispatchWindow,
     document: documentStub,
     docListeners,
+    winListeners,
     calls,
     injects,
     registrations,

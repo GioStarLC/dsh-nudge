@@ -2517,11 +2517,15 @@ window.__ModuleLoader__.load({
         return { left: `${Math.round(left)}px`, top: `${Math.round(top)}px`, transform: 'none' }
       }
 
-      /** Close the selection card, dropping its draft and the restored selection. */
+      /**
+       * Close the selection card, dropping its draft. The native selection is
+       * left alone: a scroll or a press outside the card is not a request to
+       * stop selecting, and a Shift+click must still be able to extend it.
+       * Committing a note clears the native selection in addAnnotation().
+       */
       function closePopup() {
         const draft = state.annotationDraft
         if (draft === null && state.annotationEditingId === null) return false
-        if (draft !== null) clearNativeSelection(draft.quote)
         if (typeof document !== 'undefined' && document.activeElement?.closest?.(SELF_SELECTOR)) {
           try {
             document.activeElement.blur()
@@ -2550,7 +2554,6 @@ window.__ModuleLoader__.load({
 
       /** Scroll and Escape close the selection card, like the old popup did. */
       function onPopupDismiss(event) {
-        if (state.annotationDraft === null) return
         // Scrolling inside the card's own field/list must not dismiss it.
         if (
           event &&
@@ -2560,6 +2563,11 @@ window.__ModuleLoader__.load({
         ) {
           return
         }
+        // A scroll that starts right after the mouse release means the reader is
+        // still selecting, not opening a card: drop the pending capture before
+        // the 200ms timer can pop it up mid-gesture.
+        cancelPendingCapture()
+        if (state.annotationDraft === null) return
         closePopup()
       }
 
@@ -4100,8 +4108,9 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
         const noteInputRef = React.useRef(null)
         const popupInputRef = React.useRef(null)
         const quickAddInputRef = React.useRef(null)
-        // Only the repository edit box takes the caret. The selection card never
-        // steals focus from the transcript: the native selection stays intact.
+        // Only the repository edit box takes the caret here. The selection card
+        // focuses its own note field in the effect below, then restores the
+        // native selection so the passage can still be extended.
         React.useEffect(() => {
           if (state.annotationEditingId === null) return
           const node = noteInputRef.current
@@ -4114,16 +4123,36 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
           }
         }, [state.annotationEditingId])
         // The selection card is a writing box: opening it puts the caret straight
-        // into the note field so the user can type without clicking first.
+        // into the note field so the user can type without clicking first. Focusing
+        // the field collapses the editor's native selection, so keep a copy of the
+        // range and put it back afterwards; otherwise a following Shift+click has
+        // no anchor to extend.
         React.useEffect(() => {
           if (state.annotationDraft === null || state.annotationEditingId !== null) return
           const node = popupInputRef.current
-          if (node && typeof node.focus === 'function') {
-            try {
-              node.focus({ preventScroll: true })
-            } catch {
-              /* unfocusable */
+          if (!node || typeof node.focus !== 'function') return
+          let saved = null
+          try {
+            const selection = window.getSelection?.()
+            if (selection && selection.rangeCount > 0 && !selection.isCollapsed) {
+              saved = selection.getRangeAt(0).cloneRange()
             }
+          } catch {
+            saved = null
+          }
+          try {
+            node.focus({ preventScroll: true })
+          } catch {
+            return
+          }
+          if (document.activeElement !== node || saved === null) return
+          try {
+            const selection = window.getSelection?.()
+            if (!selection) return
+            selection.removeAllRanges()
+            selection.addRange(saved)
+          } catch {
+            /* the page re-rendered; keep the focus, drop the stale range */
           }
         }, [state.annotationDraft])
         // Opening the in-window prompt form puts the caret in the title field.
