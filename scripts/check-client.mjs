@@ -2303,8 +2303,59 @@ const durable = (type, seq, data) => ({ type: 'event', event: { type, seq, time:
   check('extend: extending never clears the native selection', removed, 0)
 }
 
+// --- annotations: an upward selection extends upward ---------------------
+// The native Shift+click grows from the end the gesture started from. For an
+// upward drag that end is the LOWER edge, so extending upward must keep the rows
+// below instead of replacing the whole selection with the rows above.
+{
+  const booted = await boot({})
+  booted.runtime.setQuick(true)
+  const plain = { nodeType: 1, closest: () => null }
+  const upper = { nodeType: 3, textContent: '上边一行', parentElement: plain }
+  const lower = { nodeType: 3, textContent: '下边一行', parentElement: plain }
+  const baseCalls = []
+  const range = {
+    commonAncestorContainer: plain,
+    startContainer: upper,
+    startOffset: 0,
+    endContainer: lower,
+    endOffset: 4,
+    collapse() {},
+    cloneRange: () => ({ ...range }),
+    getBoundingClientRect: () => ({ left: 10, top: 20, right: 200, bottom: 40, width: 190, height: 20 }),
+  }
+  // Serialized upward drag: the gesture started at the lower edge.
+  booted.sandbox.getSelection = () => ({
+    rangeCount: 1,
+    isCollapsed: false,
+    toString: () => '上边一行\n\n下边一行',
+    anchorNode: lower,
+    anchorOffset: 4,
+    focusNode: upper,
+    focusOffset: 0,
+    removeAllRanges() {},
+    setBaseAndExtent(baseNode, baseOffset, focusNode, focusOffset) {
+      baseCalls.push({ baseNode, baseOffset, focusNode, focusOffset })
+    },
+    getRangeAt: () => range,
+  })
+  check('extend up: capture', booted.runtime.captureSelection(), true)
+  check(
+    'extend up: the draft keeps the gesture start',
+    booted.runtime.getSnapshot().annotationDraft?.anchorPoint?.node,
+    lower,
+  )
+
+  booted.sandbox.document.caretRangeFromPoint = () => ({ startContainer: upper, startOffset: 0 })
+  booted.dispatch('mousedown', { shiftKey: true, clientX: 30, clientY: 30, target: plain, preventDefault() {} })
+  check('extend up: one extension happened', baseCalls.length, 1)
+  check('extend up: it grows from the lower edge', baseCalls[0]?.baseNode, lower)
+  check('extend up: it grows toward the press', baseCalls[0]?.focusNode, upper)
+}
+
 // --- annotations: a stowed card still extends -----------------------------
 // Scrolling stows the card but keeps the draft, so the Shift+press that follows
+// must grow the passage and bring the card back.
 // must grow the passage and bring the card back.
 {
   const booted = await boot({})

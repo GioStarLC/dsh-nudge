@@ -1892,7 +1892,25 @@ window.__ModuleLoader__.load({
           if (element.closest(EDITABLE_SELECTOR)) return null
           if (element.closest(MODAL_SELECTOR)) return null
           if (element.closest(SELF_SELECTOR)) return null
-          return { quote, range }
+          // The browser keeps two ends: `anchor` is where the gesture started,
+          // `focus` is where it ended. The native Shift+click grows from the
+          // anchor, so a downward drag extends forward and an upward drag
+          // extends backward. Both are kept while the range still points at
+          // live nodes.
+          let anchorPoint = null
+          let focusPoint = null
+          try {
+            if (selection.anchorNode) {
+              anchorPoint = { node: selection.anchorNode, offset: selection.anchorOffset }
+            }
+            if (selection.focusNode) {
+              focusPoint = { node: selection.focusNode, offset: selection.focusOffset }
+            }
+          } catch {
+            anchorPoint = null
+            focusPoint = null
+          }
+          return { quote, range, anchorPoint, focusPoint }
         } catch {
           return null
         }
@@ -2033,6 +2051,10 @@ window.__ModuleLoader__.load({
             quote: selection.quote,
             anchor,
             range: selection.range,
+            // The gesture's start end: Shift+press grows away from it, so an
+            // upward selection keeps its lower edge and an upward press extends
+            // further up instead of dropping the rows already selected.
+            anchorPoint: selection.anchorPoint,
             rect: rect
               ? {
                   left: rect.left,
@@ -2618,12 +2640,14 @@ window.__ModuleLoader__.load({
       }
 
       /**
-       * Grow the captured passage from its first character to the pointer.
+       * Grow the captured passage away from the gesture's start end to the
+       * pointer.
        *
        * The card holds the focus, and focusing it collapsed the native selection,
-       * so the browser's own Shift+click has no anchor left. The draft's saved
-       * range is the anchor, and the pointer is turned into a caret range; the
-       * resulting selection is written back into the draft so the card follows.
+       * so the browser's own Shift+click has no anchor left. The end the gesture
+       * started from is the anchor (it is the lower edge for an upward drag), and
+       * the pointer is turned into a caret range; the resulting selection is
+       * written back into the draft so the card follows.
        */
       function extendTo(x, y) {
         const draft = state.annotationDraft
@@ -2635,8 +2659,8 @@ window.__ModuleLoader__.load({
         try {
           selection.removeAllRanges()
           selection.setBaseAndExtent(
-            extendAnchor.startContainer,
-            extendAnchor.startOffset,
+            extendAnchor.node,
+            extendAnchor.offset,
             caret.startContainer,
             caret.startOffset,
           )
@@ -2665,6 +2689,9 @@ window.__ModuleLoader__.load({
             quote,
             anchor,
             range,
+            // Keep the gesture's original start end: consecutive Shift+presses
+            // grow away from it, whichever direction the first drag ran.
+            anchorPoint: draft.anchorPoint,
             rect: rect
               ? {
                   left: rect.left,
@@ -2695,13 +2722,21 @@ window.__ModuleLoader__.load({
           if (target.closest(SELF_SELECTOR)) return
         }
         let anchor = null
-        try {
-          anchor = draft.range ? draft.range.cloneRange() : null
-        } catch {
-          anchor = null
+        if (draft.anchorPoint && draft.anchorPoint.node) {
+          anchor = draft.anchorPoint
+        } else {
+          // Drafts captured before this build carry only the range.
+          try {
+            const range = draft.range && typeof draft.range.cloneRange === 'function' ? draft.range.cloneRange() : null
+            if (range !== null) {
+              range.collapse(true)
+              anchor = { node: range.startContainer, offset: range.startOffset }
+            }
+          } catch {
+            anchor = null
+          }
         }
         if (anchor === null) return
-        anchor.collapse(true)
         extendAnchor = anchor
         extending = true
         // Keep the caret in the card and stop the browser from starting a fresh
