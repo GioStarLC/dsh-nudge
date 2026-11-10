@@ -1472,6 +1472,11 @@ window.__ModuleLoader__.load({
         annotations: notesOfSession(initialTarget?.sessionId),
         /** The selection currently being annotated, or null. */
         annotationDraft: null,
+        /**
+         * True while the card is stowed: a scroll hides it, but the draft (and
+         * its anchor) stays so a following Shift+press can still extend it.
+         */
+        annotationCardHidden: false,
         /** The note being written for `annotationDraft`. */
         annotationNote: '',
         /** The collected annotation being edited, or null. */
@@ -2042,6 +2047,7 @@ window.__ModuleLoader__.load({
           },
           annotationNote: '',
           annotationEditingId: null,
+          annotationCardHidden: false,
           note: '',
           error: '',
         })
@@ -2075,7 +2081,13 @@ window.__ModuleLoader__.load({
           quick: next,
           ...(next
             ? { annotationExpanded: true }
-            : { annotationDraft: null, annotationEditingId: null, annotationNote: '', annotationExpanded: false }),
+            : {
+                annotationDraft: null,
+                annotationCardHidden: false,
+                annotationEditingId: null,
+                annotationNote: '',
+                annotationExpanded: false,
+              }),
         })
         if (next) repaintHighlights()
         else repaintHighlights()
@@ -2201,6 +2213,7 @@ window.__ModuleLoader__.load({
         setState({
           annotations: next,
           annotationDraft: null,
+          annotationCardHidden: false,
           annotationNote: '',
           annotationEditingId: null,
           note: '',
@@ -2226,7 +2239,7 @@ window.__ModuleLoader__.load({
 
       /** Drop the pending annotation draft without adding it. */
       function dismissAnnotationDraft() {
-        setState({ annotationDraft: null, annotationNote: '' })
+        setState({ annotationDraft: null, annotationCardHidden: false, annotationNote: '' })
         repaintHighlights()
       }
 
@@ -2238,6 +2251,7 @@ window.__ModuleLoader__.load({
           annotationEditingId: id,
           annotationNote: typeof item.note === 'string' ? item.note : '',
           annotationDraft: null,
+          annotationCardHidden: false,
           annotationExpanded: true,
           nudgeExpanded: false,
           note: '',
@@ -2519,8 +2533,7 @@ window.__ModuleLoader__.load({
 
       /**
        * Close the selection card, dropping its draft. The native selection is
-       * left alone: a scroll or a press outside the card is not a request to
-       * stop selecting, and a Shift+click must still be able to extend it.
+       * left alone: a press outside the card is not a request to stop selecting.
        * Committing a note clears the native selection in addAnnotation().
        */
       function closePopup() {
@@ -2533,7 +2546,12 @@ window.__ModuleLoader__.load({
             /* nothing focused */
           }
         }
-        setState({ annotationDraft: null, annotationNote: '', annotationEditingId: null })
+        setState({
+          annotationDraft: null,
+          annotationNote: '',
+          annotationEditingId: null,
+          annotationCardHidden: false,
+        })
         repaintHighlights()
         return true
       }
@@ -2541,12 +2559,14 @@ window.__ModuleLoader__.load({
       /**
        * A press anywhere outside the card closes it: the popup owns no focus
        * until its own field is clicked, so a click elsewhere is just the
-       * reader moving on.
+       * reader moving on. A Shift+press is the exception: it extends the
+       * captured passage, so the draft and its anchor must survive.
        */
       function onOuterPointerDown(event) {
         cancelPendingCapture()
         if (state.quick !== true) return
         if (state.annotationDraft === null && state.annotationEditingId === null) return
+        if (event?.shiftKey === true && state.annotationDraft !== null) return
         const target = event.target
         if (target && typeof target.closest === 'function' && target.closest(SELF_SELECTOR)) return
         closePopup()
@@ -2563,12 +2583,146 @@ window.__ModuleLoader__.load({
         ) {
           return
         }
-        // A scroll that starts right after the mouse release means the reader is
-        // still selecting, not opening a card: drop the pending capture before
-        // the 200ms timer can pop it up mid-gesture.
-        cancelPendingCapture()
+        // A scroll that trails the release (smooth scrolling, auto-scroll while
+        // dragging) is not a request to stop: a pending capture is left alone.
+        // A card that is already open stows itself instead of dropping the
+        // passage, so a following Shift+press can still extend it.
         if (state.annotationDraft === null) return
-        closePopup()
+        if (state.annotationCardHidden === true) return
+        setState({ annotationCardHidden: true })
+      }
+
+      /** True while a Shift+drag is extending the captured passage. */
+      let extending = false
+      /** The leading edge the extension grows from, or null. */
+      let extendAnchor = null
+
+      /** The caret under a viewport point, or null when the browser cannot say. */
+      function caretRangeAt(x, y) {
+        try {
+          if (typeof document.caretRangeFromPoint === 'function') {
+            return document.caretRangeFromPoint(x, y) ?? null
+          }
+          if (typeof document.caretPositionFromPoint === 'function') {
+            const position = document.caretPositionFromPoint(x, y)
+            if (!position) return null
+            const range = document.createRange()
+            range.setStart(position.offsetNode, position.offset)
+            range.collapse(true)
+            return range
+          }
+        } catch {
+          return null
+        }
+        return null
+      }
+
+      /**
+       * Grow the captured passage from its first character to the pointer.
+       *
+       * The card holds the focus, and focusing it collapsed the native selection,
+       * so the browser's own Shift+click has no anchor left. The draft's saved
+       * range is the anchor, and the pointer is turned into a caret range; the
+       * resulting selection is written back into the draft so the card follows.
+       */
+      function extendTo(x, y) {
+        const draft = state.annotationDraft
+        if (draft === null || extendAnchor === null) return false
+        const caret = caretRangeAt(x, y)
+        if (caret === null) return false
+        const selection = window.getSelection?.()
+        if (!selection) return false
+        try {
+          selection.removeAllRanges()
+          selection.setBaseAndExtent(
+            extendAnchor.startContainer,
+            extendAnchor.startOffset,
+            caret.startContainer,
+            caret.startOffset,
+          )
+        } catch {
+          return false
+        }
+        if (selection.isCollapsed) return false
+        const range = selection.getRangeAt(0)
+        const quote = tidyQuote(selection.toString())
+        if (quote.trim() === '') return false
+        let rect = null
+        try {
+          rect = range.getBoundingClientRect()
+        } catch {
+          rect = null
+        }
+        if (rect !== null && rect.width === 0 && rect.height === 0) rect = null
+        let anchor = null
+        try {
+          anchor = anchorFromRange(range, quote)
+        } catch {
+          anchor = null
+        }
+        setState({
+          annotationDraft: {
+            quote,
+            anchor,
+            range,
+            rect: rect
+              ? {
+                  left: rect.left,
+                  top: rect.top,
+                  right: rect.right,
+                  bottom: rect.bottom,
+                  width: rect.width,
+                  height: rect.height,
+                }
+              : null,
+            pointer: null,
+          },
+          annotationCardHidden: false,
+        })
+        repaintHighlights()
+        return true
+      }
+
+      /** Shift+press on the transcript keeps extending the captured passage. */
+      function onExtendPointerDown(event) {
+        if (state.quick !== true || event?.shiftKey !== true) return
+        const draft = state.annotationDraft
+        if (draft === null || state.annotationEditingId !== null) return
+        const target = event.target
+        if (target && typeof target.closest === 'function') {
+          if (target.closest(EDITABLE_SELECTOR)) return
+          if (target.closest(MODAL_SELECTOR)) return
+          if (target.closest(SELF_SELECTOR)) return
+        }
+        let anchor = null
+        try {
+          anchor = draft.range ? draft.range.cloneRange() : null
+        } catch {
+          anchor = null
+        }
+        if (anchor === null) return
+        anchor.collapse(true)
+        extendAnchor = anchor
+        extending = true
+        // Keep the caret in the card and stop the browser from starting a fresh
+        // selection at the press point.
+        event.preventDefault?.()
+        extendTo(event.clientX, event.clientY)
+      }
+
+      function onExtendPointerMove(event) {
+        if (!extending) return
+        if (typeof event?.buttons === 'number' && (event.buttons & 1) === 0) {
+          extending = false
+          extendAnchor = null
+          return
+        }
+        extendTo(event.clientX, event.clientY)
+      }
+
+      function onExtendPointerUp() {
+        extending = false
+        extendAnchor = null
       }
 
       /**
@@ -2643,6 +2797,7 @@ window.__ModuleLoader__.load({
         setState({
           annotations: [],
           annotationDraft: null,
+          annotationCardHidden: false,
           annotationNote: '',
           annotationEditingId: null,
           annotationExpanded: false,
@@ -2664,6 +2819,7 @@ window.__ModuleLoader__.load({
         setState({
           annotations: [],
           annotationDraft: null,
+          annotationCardHidden: false,
           annotationNote: '',
           annotationEditingId: null,
           annotationExpanded: false,
@@ -3564,6 +3720,7 @@ window.__ModuleLoader__.load({
             phase: 'idle',
             annotations: notesOfSession(targetId),
             annotationDraft: null,
+            annotationCardHidden: false,
             annotationNote: '',
             annotationEditingId: null,
             annotationExpanded: false,
@@ -3609,6 +3766,10 @@ window.__ModuleLoader__.load({
           document.addEventListener('keyup', onSelectionKeyup, true)
           document.addEventListener('selectionchange', onSelectionChange, true)
           document.addEventListener('click', onTranscriptClick, true)
+          // Shift+press extends the captured passage without the native anchor.
+          document.addEventListener('mousedown', onExtendPointerDown, true)
+          document.addEventListener('mousemove', onExtendPointerMove, true)
+          document.addEventListener('mouseup', onExtendPointerUp, true)
           // A press outside the window or card dismisses it.
           document.addEventListener('pointerdown', onOuterPointerDown, true)
           document.addEventListener('keydown', onPopupKeydown, true)
@@ -3668,6 +3829,9 @@ window.__ModuleLoader__.load({
             document.removeEventListener('keyup', onSelectionKeyup, true)
             document.removeEventListener('selectionchange', onSelectionChange, true)
             document.removeEventListener('click', onTranscriptClick, true)
+            document.removeEventListener('mousedown', onExtendPointerDown, true)
+            document.removeEventListener('mousemove', onExtendPointerMove, true)
+            document.removeEventListener('mouseup', onExtendPointerUp, true)
             document.removeEventListener('pointerdown', onOuterPointerDown, true)
             document.removeEventListener('keydown', onPopupKeydown, true)
             window.removeEventListener('scroll', scheduleRepaint, true)
@@ -4123,38 +4287,38 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
           }
         }, [state.annotationEditingId])
         // The selection card is a writing box: opening it puts the caret straight
-        // into the note field so the user can type without clicking first. Focusing
-        // the field collapses the editor's native selection, so keep a copy of the
-        // range and put it back afterwards; otherwise a following Shift+click has
-        // no anchor to extend.
-        React.useEffect(() => {
-          if (state.annotationDraft === null || state.annotationEditingId !== null) return
+        // into the note field so the user can type without clicking first.
+        //
+        // The focus runs in a layout effect and is retried on the next frame: the
+        // shell may hand the focus back to the composer in the same task the card
+        // mounts. The captured range is deliberately NOT put back — re-selecting
+        // fires a document-wide selectionchange and the browser paints the passage
+        // instead of the field, so the card looks unfocused. Extension is done by
+        // `onExtendPointerDown` from the draft's own range, which needs no native
+        // selection, and the passage stays painted by `::highlight`.
+        const useLayoutFocus = React.useLayoutEffect ?? React.useEffect
+        useLayoutFocus(() => {
+          if (state.annotationDraft === null || state.annotationEditingId !== null) return undefined
+          if (state.annotationCardHidden === true) return undefined
           const node = popupInputRef.current
-          if (!node || typeof node.focus !== 'function') return
-          let saved = null
-          try {
-            const selection = window.getSelection?.()
-            if (selection && selection.rangeCount > 0 && !selection.isCollapsed) {
-              saved = selection.getRangeAt(0).cloneRange()
+          if (!node || typeof node.focus !== 'function') return undefined
+          const focus = () => {
+            try {
+              node.focus({ preventScroll: true })
+            } catch {
+              /* unfocusable */
             }
-          } catch {
-            saved = null
           }
-          try {
-            node.focus({ preventScroll: true })
-          } catch {
-            return
-          }
-          if (document.activeElement !== node || saved === null) return
-          try {
-            const selection = window.getSelection?.()
-            if (!selection) return
-            selection.removeAllRanges()
-            selection.addRange(saved)
-          } catch {
-            /* the page re-rendered; keep the focus, drop the stale range */
-          }
-        }, [state.annotationDraft])
+          focus()
+          if (typeof window.requestAnimationFrame !== 'function') return undefined
+          const frame = window.requestAnimationFrame(() => {
+            const active = document.activeElement
+            if (active === node) return
+            if (active && typeof active.closest === 'function' && active.closest(SELF_SELECTOR)) return
+            focus()
+          })
+          return () => window.cancelAnimationFrame(frame)
+        }, [state.annotationDraft, state.annotationCardHidden])
         // Opening the in-window prompt form puts the caret in the title field.
         React.useEffect(() => {
           if (state.nudgeDraftOpen !== true) return
@@ -4207,7 +4371,7 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
               ? t('copyFailedShort')
               : t('copyQuote')
         const popup =
-          state.quick && draft !== null
+          state.quick && draft !== null && state.annotationCardHidden !== true
             ? h(
                 'div',
                 {

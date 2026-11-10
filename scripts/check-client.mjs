@@ -1274,6 +1274,16 @@ function composerFocus() {
 
 /** A window.getSelection() stub over one non-collapsed range. */
 function selectionStub(text, element, rect, onRemove) {
+  const range = {
+    commonAncestorContainer: element,
+    startContainer: element,
+    startOffset: 0,
+    endContainer: element,
+    endOffset: String(text ?? '').length,
+    collapse() {},
+    cloneRange: () => ({ ...range }),
+    getBoundingClientRect: () => rect ?? { left: 100, top: 300, right: 300, bottom: 320, width: 200, height: 20 },
+  }
   return () => ({
     rangeCount: 1,
     isCollapsed: false,
@@ -1281,10 +1291,8 @@ function selectionStub(text, element, rect, onRemove) {
     removeAllRanges: () => {
       if (typeof onRemove === 'function') onRemove()
     },
-    getRangeAt: () => ({
-      commonAncestorContainer: element,
-      getBoundingClientRect: () => rect ?? { left: 100, top: 300, right: 300, bottom: 320, width: 200, height: 20 },
-    }),
+    setBaseAndExtent: () => {},
+    getRangeAt: () => range,
   })
 }
 
@@ -2183,10 +2191,11 @@ const durable = (type, seq, data) => ({ type: 'event', event: { type, seq, time:
   check('chain: click on the card keeps it open', booted.runtime.getSnapshot().annotationDraft?.quote, '点卡片时的引用')
 }
 
-// --- annotations: dismissing the card must not kill the selection --------
-// The card opens 200ms after the release and focuses its note field. A wheel
-// scroll or a Shift+click in that window must close/cancel the card without
-// clearing the reader's native selection, or the passage can never be extended.
+// --- annotations: stowing the card must not kill the capture -------------
+// The card opens 200ms after the release and focuses its note field. A scroll
+// that trails the release (smooth scrolling, auto-scroll) must not swallow that
+// pending capture; an open card stows itself but keeps the draft, so a following
+// Shift+press can still extend the passage.
 {
   const booted = await boot({})
   booted.runtime.setQuick(true)
@@ -2194,7 +2203,8 @@ const durable = (type, seq, data) => ({ type: 'event', event: { type, seq, time:
   booted.dispatch('mouseup', { clientX: 120, clientY: 240 })
   check('selection: window scroll listener wired', booted.dispatchWindow('scroll', { target: { closest: () => null } }), true)
   await sleep(260)
-  check('selection: a pending capture is cancelled by a scroll', booted.runtime.getSnapshot().annotationDraft, null)
+  // The card is what takes the focus: a trailing scroll must not eat it.
+  check('selection: a trailing scroll still opens the card', booted.runtime.getSnapshot().annotationDraft?.quote, '滚动前选中的原文')
 }
 
 {
@@ -2211,17 +2221,125 @@ const durable = (type, seq, data) => ({ type: 'event', event: { type, seq, time:
 
   check('selection: scroll capture', capture('滚动时保留的原文'), true)
   booted.dispatchWindow('scroll', { target: { closest: () => null } })
-  check('selection: scroll closed the card', booted.runtime.getSnapshot().annotationDraft, null)
+  const stowed = booted.runtime.getSnapshot()
+  check('selection: scroll stows the card', stowed.annotationCardHidden, true)
+  check('selection: scroll keeps the draft', stowed.annotationDraft?.quote, '滚动时保留的原文')
   check('selection: scroll keeps the native selection', removed, 0)
 
   check('selection: outside capture', capture('点外保留的原文'), true)
   booted.dispatch('pointerdown', { target: { closest: () => null } })
-  check('selection: outside click closed the card', booted.runtime.getSnapshot().annotationDraft, null)
+  const closed = booted.runtime.getSnapshot()
+  check('selection: outside click closed the card', closed.annotationDraft, null)
+  check('selection: outside click re-shows the card next time', closed.annotationCardHidden, false)
   check('selection: outside click keeps the native selection', removed, 0)
 
   check('selection: commit capture', capture('提交后清掉的原文'), true)
   check('selection: commit accepted', booted.runtime.addAnnotation(), true)
   check('selection: committing a note still clears the native selection', removed, 1)
+}
+
+// --- annotations: Shift+press extends the passage without a native anchor --
+// Focusing the card collapsed the native selection, so the browser's own
+// Shift+click has nothing to grow from. The draft's saved range is the anchor
+// and the press point is turned into a caret range by the plugin itself.
+{
+  const booted = await boot({})
+  booted.runtime.setQuick(true)
+  const plain = { nodeType: 1, closest: () => null }
+  let removed = 0
+  booted.sandbox.getSelection = selectionStub('第一段原文', plain, undefined, () => {
+    removed += 1
+  })
+  check('extend: capture', booted.runtime.captureSelection(), true)
+  check('extend: draft stored', booted.runtime.getSnapshot().annotationDraft?.quote, '第一段原文')
+
+  // A Shift+press is part of selecting, not a click away from the card.
+  let prevented = 0
+  booted.dispatch('pointerdown', {
+    shiftKey: true,
+    target: plain,
+    preventDefault: () => (prevented += 1),
+  })
+  check('extend: shift+press keeps the draft', booted.runtime.getSnapshot().annotationDraft?.quote, '第一段原文')
+
+  // The browser hands the press point back as a caret; the plugin extends to it.
+  let current = '第一段原文'
+  const grown = {
+    commonAncestorContainer: plain,
+    startContainer: plain,
+    startOffset: 0,
+    endContainer: plain,
+    endOffset: 12,
+    collapse() {},
+    cloneRange: () => ({ ...grown }),
+    getBoundingClientRect: () => ({ left: 10, top: 20, right: 200, bottom: 40, width: 190, height: 20 }),
+  }
+  booted.sandbox.document.caretRangeFromPoint = () => ({ startContainer: plain, startOffset: 12 })
+  booted.sandbox.getSelection = () => ({
+    rangeCount: 1,
+    isCollapsed: false,
+    toString: () => current,
+    removeAllRanges() {},
+    setBaseAndExtent() {
+      current = '第一段原文和后面一段'
+    },
+    getRangeAt: () => grown,
+  })
+
+  check(
+    'extend: mousedown listener wired',
+    booted.dispatch('mousedown', {
+      shiftKey: true,
+      clientX: 50,
+      clientY: 60,
+      target: plain,
+      preventDefault: () => (prevented += 1),
+    }),
+    true,
+  )
+  check('extend: the draft carries the longer quote', booted.runtime.getSnapshot().annotationDraft?.quote, '第一段原文和后面一段')
+  check('extend: the card is visible again', booted.runtime.getSnapshot().annotationCardHidden, false)
+  check('extend: the press is consumed', prevented, 1)
+  check('extend: extending never clears the native selection', removed, 0)
+}
+
+// --- annotations: a stowed card still extends -----------------------------
+// Scrolling stows the card but keeps the draft, so the Shift+press that follows
+// must grow the passage and bring the card back.
+{
+  const booted = await boot({})
+  booted.runtime.setQuick(true)
+  const plain = { nodeType: 1, closest: () => null }
+  booted.sandbox.getSelection = selectionStub('滚动后的引文', plain)
+  booted.runtime.captureSelection()
+  booted.dispatchWindow('scroll', { target: { closest: () => null } })
+  check('stow: the card is hidden', booted.runtime.getSnapshot().annotationCardHidden, true)
+
+  let current = '滚动后的引文'
+  const grown = {
+    commonAncestorContainer: plain,
+    startContainer: plain,
+    startOffset: 0,
+    endContainer: plain,
+    endOffset: 10,
+    collapse() {},
+    cloneRange: () => ({ ...grown }),
+    getBoundingClientRect: () => ({ left: 10, top: 20, right: 200, bottom: 40, width: 190, height: 20 }),
+  }
+  booted.sandbox.document.caretRangeFromPoint = () => ({ startContainer: plain, startOffset: 10 })
+  booted.sandbox.getSelection = () => ({
+    rangeCount: 1,
+    isCollapsed: false,
+    toString: () => current,
+    removeAllRanges() {},
+    setBaseAndExtent() {
+      current = '滚动后的引文加上新的一段'
+    },
+    getRangeAt: () => grown,
+  })
+  booted.dispatch('mousedown', { shiftKey: true, clientX: 40, clientY: 80, target: plain, preventDefault() {} })
+  check('stow: shift+press grows the stowed passage', booted.runtime.getSnapshot().annotationDraft?.quote, '滚动后的引文加上新的一段')
+  check('stow: shift+press brings the card back', booted.runtime.getSnapshot().annotationCardHidden, false)
 }
 
 // --- the status row is a permanent bar, not a transient line --------------
