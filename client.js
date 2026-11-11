@@ -3985,6 +3985,19 @@ window.__ModuleLoader__.load({
     // view
     // ---------------------------------------------------------------------
 
+    /**
+     * The conversation renders selection actions into this one surface, and the
+     * official 「引用文本」 action is its only occupant. While quick notes own
+     * the selection, that surface stays out of the way; turning the notes off
+     * drops the rule and hands the selection back.
+     */
+    const OFFICIAL_SELECTION_CSS = '[data-text-interaction-surface]{display:none!important}'
+
+    /** The hide rule, appended to the window stylesheet while quick notes are on. */
+    function viewCss(quick) {
+      return quick === true ? `${CSS}\n${OFFICIAL_SELECTION_CSS}` : CSS
+    }
+
     const CSS = `
 .dsh-nudge-card,.dsh-nudge-pill,.dsh-nudge-settings,.dsh-nudge-popup{--dn-accent:color-mix(in srgb,var(--dsw-static-deepseek-450,#5686fe) 78%,var(--dsw-alias-label-primary,#1a1a1a) 22%);--dn-accent-soft:color-mix(in srgb,var(--dsw-static-deepseek-450,#5686fe) 14%,transparent);--dn-accent-line:color-mix(in srgb,var(--dsw-static-deepseek-450,#5686fe) 38%,transparent);--dn-accent-edge:color-mix(in srgb,var(--dsw-static-deepseek-450,#5686fe) 62%,transparent);--dn-line:var(--dsw-alias-border-l1,rgba(127,127,127,.25));--dn-line-strong:color-mix(in srgb,var(--dsw-alias-label-primary,#1a1a1a) 28%,transparent);--dn-hover:color-mix(in srgb,var(--dsw-alias-label-primary,#1a1a1a) 6%,transparent);--dn-agree:#2e7d32;--dn-note:#8b5cf6;--dn-frame:1px}
 .dsh-nudge-card{position:fixed;z-index:${Z_INDEX};width:min(304px,calc(100vw - 24px));display:flex;flex-direction:column;border-radius:16px;border:var(--dn-frame) solid var(--dn-accent-edge);background:var(--dsw-alias-bg-layer-1,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);box-shadow:0 1px 2px rgba(15,23,42,.04),0 18px 44px -22px rgba(15,23,42,.3);font:13px/1.55 ui-sans-serif,system-ui,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;overflow:hidden;pointer-events:auto;animation:dsh-nudge-in .18s ease-out}
@@ -4682,7 +4695,7 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
           return h(
             React.Fragment,
             null,
-            h('style', { key: 'dsh-nudge-css' }, CSS),
+            h('style', { key: 'dsh-nudge-css' }, viewCss(state.quick)),
             h(
               'button',
               {
@@ -4862,7 +4875,7 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
             'aria-label': t('title'),
             style: { left: `${state.pos.x}px`, top: `${state.pos.y}px`, '--dn-frame': `${state.frame}px` },
           },
-          h('style', { key: 'dsh-nudge-css' }, CSS),
+          h('style', { key: 'dsh-nudge-css' }, viewCss(state.quick)),
           attention
             ? h('span', { key: `attention-${state.attentionAt}`, className: 'dsh-nudge-attention-ring', 'aria-hidden': true })
             : null,
@@ -6264,7 +6277,7 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
         return h(
           'div',
           { className: 'dsh-nudge-settings' },
-          h('style', { key: 'dsh-nudge-css' }, CSS),
+          h('style', { key: 'dsh-nudge-css' }, viewCss(state.quick)),
           statsSection,
           // The settings page follows the floating window: notes, quick input,
           // then appearance (border and status line). Both long editors start

@@ -415,6 +415,26 @@ function expandTree(node) {
   check('frame: a chip click sets it', booted.runtime.getSnapshot().frame, 3)
 }
 
+// --- the official selection action yields while notes are on -------------
+
+{
+  const booted = await boot({})
+  const overlay = booted.registrations.find((item) => item.entry.name === 'shell.overlay')
+  const sheets = () =>
+    (findAllByTag(expandTree(overlay.Component()), 'style') ?? [])
+      .map((node) => String(node?.children?.[0] ?? ''))
+      .join('\n')
+  check('selection: the official action is left alone at rest', sheets().includes('data-text-interaction-surface'), false)
+  booted.runtime.setQuick(true)
+  check(
+    'selection: notes take the selection over',
+    sheets().includes('[data-text-interaction-surface]{display:none!important}'),
+    true,
+  )
+  booted.runtime.setQuick(false)
+  check('selection: turning notes off hands the selection back', sheets().includes('data-text-interaction-surface'), false)
+}
+
 // --- 2.2 explicit queue mode --------------------------------------------
 
 {
