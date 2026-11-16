@@ -101,6 +101,16 @@ function statsPreviewStorage() {
  * `tree` is produced by calling the registered slot Component.
  */
 const SCENES = {
+  // What a launch paints now: the collapsed pill, pinned to one side.
+  'pill-launch': {
+    bg: '#f3f4f6',
+    expanded: false,
+    drive: async (b) => {
+      b.sessionsList.set({ ids: ['A'], byId: { A: { title: '示例会话', retainedBy: { mainView: 1 } } } })
+      await tick()
+      return { view: 'shell.overlay', width: 360, height: 120 }
+    },
+  },
   'card-idle': {
     bg: '#f3f4f6',
     drive: async (b) => {
@@ -133,7 +143,7 @@ const SCENES = {
     drive: async (b) => {
       b.sessionsList.set({ ids: ['A'], byId: { A: { title: '示例会话', retainedBy: { mainView: 1 } } } })
       await tick()
-      return { view: 'settings.section', width: 560, height: 1000 }
+      return { view: 'settings.section', width: 560, height: 1600 }
     },
   },
   'annotation-popup': {
@@ -225,7 +235,11 @@ function screenshot(browser, htmlPath, pngPath, width, height) {
 async function renderScene(name, { dark }) {
   const scene = SCENES[name]
   if (!scene) throw new Error(`unknown scene "${name}"`)
-  const booted = await boot(scene.storage ? { storage: scene.storage() } : {})
+  const booted = await boot({
+    ...(scene.storage ? { storage: scene.storage() } : {}),
+    ...(scene.expanded === false ? { expanded: false } : {}),
+    ...(scene.fetch ? { fetch: scene.fetch } : {}),
+  })
   const { view, width, height } = await scene.drive(booted)
   const Component = findView(booted, view)
   const tree = Component()
