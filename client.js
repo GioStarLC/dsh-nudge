@@ -173,11 +173,13 @@ window.__ModuleLoader__.load({
       annotationsTitle: '批注',
       annotationPlaceholder: '对这段内容说点什么…',
       annotationsHint: '选中对话里的文字，选区旁会弹出批注卡片；批注汇总在这里。',
+    highlightHint: '点对话里的高亮，可以改批注或取消高亮。',
       annotationsOffHint: '快速批注已关闭；打开批注栏的开关才能从选中文字添加批注。',
       addAnnotation: '添加批注',
       dismissAnnotation: '取消',
-      deleteAnnotation: '删除',
+      deleteAnnotation: '取消高亮',
       writeAnnotations: '写入输入框',
+    writtenTag: '已写入',
       sendAnnotations: '发送',
       quickOn: '快速批注：开',
       quickOff: '快速批注：关',
@@ -338,11 +340,13 @@ window.__ModuleLoader__.load({
       annotationsTitle: 'Notes',
       annotationPlaceholder: 'Say something about this passage…',
       annotationsHint: 'Select text in the conversation and a note card opens beside it; notes are collected here.',
+    highlightHint: 'Click a highlight in the conversation to edit its note or remove the mark.',
       annotationsOffHint: 'Quick notes are off; turn them on in the note header to add notes from a selection.',
       addAnnotation: 'Add note',
       dismissAnnotation: 'Cancel',
-      deleteAnnotation: 'Delete',
+      deleteAnnotation: 'Remove highlight',
       writeAnnotations: 'Write to input',
+    writtenTag: 'Written',
       sendAnnotations: 'Send',
       quickOn: 'Quick notes: on',
       quickOff: 'Quick notes: off',
@@ -1058,6 +1062,7 @@ window.__ModuleLoader__.load({
       }
     }
 
+
     /** Whether a value is one of the frame widths the settings offer. */
     function isFrameWidth(value) {
       return FRAME_CHOICES.includes(value)
@@ -1398,6 +1403,28 @@ window.__ModuleLoader__.load({
       }
     }
 
+    /** Whether the window sits closer to the left edge than to the right one. */
+    function nearestEdge(point, collapsed) {
+      const vp = viewport()
+      const width = collapsed ? PILL_WIDTH : CARD_WIDTH
+      return point.x + width / 2 <= vp.width / 2 ? 'left' : 'right'
+    }
+
+    /**
+     * Pin a stored point to the side it belongs to.
+     *
+     * Only the vertical spot is the user's: the horizontal one is the edge, so
+     * a window left somewhere in the middle of a wider or narrower screen still
+     * comes back on a side instead of floating over the conversation.
+     */
+    function snapToEdge(point, collapsed) {
+      const vp = viewport()
+      const width = collapsed ? PILL_WIDTH : CARD_WIDTH
+      const edge = nearestEdge(point, collapsed)
+      const x = edge === 'left' ? EDGE : vp.width - width - rightInset()
+      return clampPoint({ x, y: point.y }, collapsed)
+    }
+
     /** Whether a stored value looks like a point. */
     function isPoint(point) {
       return (
@@ -1423,7 +1450,6 @@ window.__ModuleLoader__.load({
     function createRuntime(ctx) {
       const saved = readJson(UI_KEY) ?? {}
       const language = readLang(ctx)
-      const narrow = viewport().width < 720
       const presets = readPresets(language)
       const initialTarget = resolveTarget(ctx)
 
@@ -1436,13 +1462,13 @@ window.__ModuleLoader__.load({
         lastAt: undefined,
         lastSessionId: undefined,
         unread: false,
-        collapsed:
-          typeof saved.collapsed === 'boolean' ? saved.collapsed : narrow,
+        // Every launch starts as the pill: the window is a reminder to look at
+        // the conversation, not a panel to close first.
+        collapsed: true,
         // One anchor for both shapes: collapsing keeps the window in place and
-        // expanding returns it to the same spot.
-        pos: isPoint(saved.pos)
-          ? clampPoint(saved.pos, typeof saved.collapsed === 'boolean' ? saved.collapsed : narrow)
-          : dockPosition(typeof saved.collapsed === 'boolean' ? saved.collapsed : narrow),
+        // expanding returns it to the same spot. The stored record only says
+        // how far down it sat and which side it was on.
+        pos: isPoint(saved.pos) ? snapToEdge(saved.pos, true) : dockPosition(true),
         deliveryOverride: readDeliveryOverride(),
         turbo: readTurbo(),
         presets,
@@ -1499,7 +1525,6 @@ window.__ModuleLoader__.load({
         lang: language,
       }
       const listeners = new Set()
-
       /** One immutable snapshot per change, as `useSyncExternalStore` requires. */
       function getSnapshot() {
         return state
@@ -1872,9 +1897,25 @@ window.__ModuleLoader__.load({
         return note === '' ? quoted : `${quoted}\n${text('answerLabel')}${note}`
       }
 
-      /** All pending annotations as one message body. */
-      function annotationsText() {
-        return state.annotations.map(annotationBlock).join('\n\n')
+      /** The annotations still waiting to be written into a message. */
+      function pendingAnnotations() {
+        return state.annotations.filter((item) => item.written !== true)
+      }
+
+      /** One write or send batch as one message body. */
+      function annotationsText(list) {
+        const items = Array.isArray(list) ? list : pendingAnnotations()
+        return items.map(annotationBlock).join('\n\n')
+      }
+
+      /** Whether a node belongs to a text field rather than the transcript. */
+      function inEditable(node) {
+        if (!node || typeof node.closest !== 'function') return false
+        try {
+          return node.closest(EDITABLE_SELECTOR) !== null
+        } catch {
+          return false
+        }
       }
 
       /** The selection worth annotating: quote + its flow-item anchor. */
@@ -1923,6 +1964,14 @@ window.__ModuleLoader__.load({
       let highlightObserver
       /** Ranges painted for the current notes, used to hit-test clicks. */
       let highlighted = []
+      /**
+       * Anchors recovered by quote instead of by key, keyed by note id.
+       *
+       * A stored key stops naming an element when the row is recycled under
+       * another key; the healed anchor keeps the next repaint on the direct path
+       * instead of re-walking every flow item again.
+       */
+      const resolvedAnchors = new Map()
       /** True while a pointer gesture is down, so no card opens mid-drag. */
       let pointerHeld = false
 
@@ -1954,9 +2003,20 @@ window.__ModuleLoader__.load({
         }, 200)
       }
 
-      /** Keyboard selections end on a shifted keyup. */
+      /**
+       * Keyboard selections end on a shifted keyup — in the transcript only.
+       *
+       * Shift+Enter makes a newline and Shift+<letter> capitalises, so a keyup
+       * inside a text field is typing, not a selection gesture. Capturing it
+       * would read a caret as a passage and pull the card (and the focus) over
+       * the field the user is typing in.
+       */
       function onSelectionKeyup(event) {
-        if (state.quick === true && event?.shiftKey === true) captureSelectionLater()
+        if (state.quick !== true) return
+        if (event?.shiftKey !== true) return
+        if (inEditable(event?.target)) return
+        if (inEditable(document.activeElement)) return
+        captureSelectionLater()
       }
 
       /**
@@ -2337,6 +2397,7 @@ window.__ModuleLoader__.load({
 
       // --- painted highlights ---------------------------------------------
 
+
       /** Recompute which spans carry a note and repaint the CSS highlight. */
       function repaintHighlights() {
         highlighted = []
@@ -2346,7 +2407,8 @@ window.__ModuleLoader__.load({
           const captureDraft = state.annotationDraft
           const captureAnchor =
             captureDraft !== null && captureDraft.anchor != null ? captureDraft.anchor : null
-          if (state.quick !== true || (state.annotations.length === 0 && captureDraft === null)) {
+          const sources = state.annotations
+          if (state.quick !== true || (sources.length === 0 && captureDraft === null)) {
             registry.delete(HIGHLIGHT_NAME)
             registry.delete(CAPTURE_HIGHLIGHT)
             return
@@ -2356,8 +2418,8 @@ window.__ModuleLoader__.load({
           // carry no anchor. The quote still identifies the passage, so resolve
           // it once per distinct quote and never draw a guess.
           const recovered = new Map()
-          for (const note of state.annotations) {
-            let anchor = note.anchor
+          for (const note of sources) {
+            let anchor = resolvedAnchors.get(note.id) ?? note.anchor
             if (typeof anchor?.key !== 'string') {
               const quote = typeof note.quote === 'string' ? note.quote : ''
               if (!recovered.has(quote)) recovered.set(quote, anchorFromQuote(quote))
@@ -2390,6 +2452,7 @@ window.__ModuleLoader__.load({
           const maps = new Map()
           const ranges = []
           const captureRanges = []
+          const misses = []
           for (const element of elements) {
             const key = element.getAttribute?.('data-chat-anchor-key')
             const wanted = byKey.get(key)
@@ -2401,15 +2464,63 @@ window.__ModuleLoader__.load({
             }
             for (const entry of wanted) {
               const span = locateAnchor(full, entry.anchor)
-              if (span === null) continue
-              const range = rangeFromPacked(full, span.start, span.end)
-              if (range === null) continue
+              const range = span === null ? null : rangeFromPacked(full, span.start, span.end)
+              if (range === null) {
+                misses.push({ entry, quote: entry.anchor.quote })
+                continue
+              }
               if (entry.capture === true) {
                 captureRanges.push(range)
                 continue
               }
               ranges.push(range)
               highlighted.push({ note: entry.note, range })
+            }
+          }
+          // A key that names no element is the other half of the same problem:
+          // the row was re-keyed between the click and this repaint. Both cases
+          // fall through to one recovery pass over the quotes — the passage is
+          // identified by its text, not by the row that happened to hold it.
+          for (const [key, wanted] of byKey) {
+            if (maps.has(key)) continue
+            for (const entry of wanted) misses.push({ entry, quote: entry.anchor.quote })
+          }
+          for (const miss of misses) {
+            const packed = packedText(miss.quote)
+            if (packed === '') continue
+            const holders = []
+            for (const element of elements) {
+              const key = element.getAttribute?.('data-chat-anchor-key')
+              if (typeof key !== 'string') continue
+              let full = maps.get(key)
+              if (full === undefined) {
+                full = packedMapOf(element)
+                maps.set(key, full)
+              }
+              if (full.packed.indexOf(packed) === -1) continue
+              holders.push({ key, full })
+            }
+            // One holder or none: painting the wrong row is worse than letting
+            // the mark wait for the render that brings its passage back.
+            if (holders.length !== 1) continue
+            const index = holders[0].full.packed.indexOf(packed)
+            const range = rangeFromPacked(holders[0].full, index, index + packed.length)
+            if (range === null) continue
+            if (miss.entry.capture === true) {
+              captureRanges.push(range)
+              continue
+            }
+            ranges.push(range)
+            highlighted.push({ note: miss.entry.note, range })
+            // Heal the anchor so the next repaint takes the direct path.
+            if (miss.entry.note !== null && typeof miss.entry.note?.id === 'string') {
+              resolvedAnchors.set(miss.entry.note.id, {
+                key: holders[0].key,
+                quote: packed,
+                prefix: holders[0].full.packed.slice(Math.max(0, index - CONTEXT_CHARS), index),
+                suffix: holders[0].full.packed.slice(index + packed.length, index + packed.length + CONTEXT_CHARS),
+                index,
+              })
             }
           }
           if (ranges.length === 0) registry.delete(HIGHLIGHT_NAME)
@@ -2460,6 +2571,15 @@ window.__ModuleLoader__.load({
       /** Clicking a painted passage reopens its note for editing. */
       function onTranscriptClick(event) {
         if (state.quick !== true || highlighted.length === 0) return
+        // Only a click that lands on a transcript row can reopen a note. A
+        // click in the composer, a menu or a control belongs to something
+        // else: taking its focus would put the next Enter in our editor.
+        const target = event?.target
+        if (!target || typeof target.closest !== 'function') return
+        if (target.closest(ANCHOR_SELECTOR) === null) return
+        if (inEditable(target)) return
+        if (target.closest(MODAL_SELECTOR) !== null) return
+        if (target.closest('button, a, input, textarea, select, [role="button"]') !== null) return
         try {
           const selection = window.getSelection?.()
           if (selection && selection.isCollapsed === false) return
@@ -2803,15 +2923,16 @@ window.__ModuleLoader__.load({
         copyDraftQuote().then((ok) => notify(ok ? text('copiedShort') : text('copyFailedShort')))
       }
 
-      /** Append every collected annotation to the composer draft. */
+      /** Append every pending annotation to the composer draft. */
       function writeAnnotations() {
-        if (state.annotations.length === 0) return false
+        const pending = pendingAnnotations()
+        if (pending.length === 0) return false
         const handle = composer
         if (handle === undefined || typeof handle.setDraft !== 'function') {
           setState({ note: text('insertUnavailable'), error: '' })
           return false
         }
-        const body = annotationsText()
+        const body = annotationsText(pending)
         if (body === '') return false
         let draft = ''
         try {
@@ -2820,22 +2941,49 @@ window.__ModuleLoader__.load({
           draft = ''
         }
         if (typeof draft !== 'string') draft = ''
-        const next = draft.trim() === '' ? body : `${draft}${draft.endsWith('\n') ? '' : '\n'}${body}`
-        try {
-          handle.setDraft(next)
-        } catch (error) {
-          console.warn('[dsh-nudge] annotation write failed', error)
-          setState({ note: text('insertUnavailable'), error: '' })
-          return false
+        // Splice at the caret first: `setDraft` rebuilds every paragraph and
+        // drops the caret at the end, which is exactly what a write in the
+        // middle of typing must not do. The rebuild stays as the fallback for
+        // a shell without the insertion face, or for a draft that moved.
+        let written = false
+        if (typeof handle.insertText === 'function' && typeof handle.captureInsertion === 'function') {
+          try {
+            const span = handle.captureInsertion()
+            if (span && typeof span.start === 'number' && typeof span.end === 'number') {
+              const before = draft.slice(0, span.start)
+              const separator = before !== '' && before.endsWith('\n') === false ? '\n' : ''
+              written = handle.insertText(separator + body, span) === true
+            }
+          } catch {
+            written = false
+          }
         }
-        persistNotes([])
+        if (!written) {
+          const next = draft.trim() === '' ? body : `${draft}${draft.endsWith('\n') ? '' : '\n'}${body}`
+          try {
+            handle.setDraft(next)
+          } catch (error) {
+            console.warn('[dsh-nudge] annotation write failed', error)
+            setState({ note: text('insertUnavailable'), error: '' })
+            return false
+          }
+        }
+        // The note leaves the pending set but stays in the tray and keeps its
+        // passage painted: a mark belongs to the conversation, not to the
+        // draft. Clearing the input box no longer takes it away — only
+        // deleting the note does.
+        const ids = new Set(pending.map((item) => item.id))
+        const marked = state.annotations.map((item) =>
+          ids.has(item.id) ? { ...item, written: true } : item,
+        )
+        persistNotes(marked)
         setState({
-          annotations: [],
+          annotations: marked,
           annotationDraft: null,
           annotationCardHidden: false,
           annotationNote: '',
           annotationEditingId: null,
-          annotationExpanded: false,
+          annotationExpanded: true,
           note: '',
           error: '',
         })
@@ -2843,21 +2991,26 @@ window.__ModuleLoader__.load({
         return true
       }
 
-      /** Send every collected annotation as one user message. */
+      /** Send the pending annotations as one user message. */
       function sendAnnotations() {
         if (state.phase === 'waiting') return false
-        if (state.annotations.length === 0) return false
-        const body = annotationsText()
+        const pending = pendingAnnotations()
+        if (pending.length === 0) return false
+        const body = annotationsText(pending)
         if (body === '') return false
         if (!deliver(body)) return false
-        persistNotes([])
+        // What was just sent lives in the conversation now; the notes already
+        // written into the draft keep their marks.
+        const ids = new Set(pending.map((item) => item.id))
+        const next = state.annotations.filter((item) => !ids.has(item.id))
+        persistNotes(next)
         setState({
-          annotations: [],
+          annotations: next,
           annotationDraft: null,
           annotationCardHidden: false,
           annotationNote: '',
           annotationEditingId: null,
-          annotationExpanded: false,
+          annotationExpanded: next.length > 0,
         })
         repaintHighlights()
         return true
@@ -3498,6 +3651,9 @@ window.__ModuleLoader__.load({
       function saveUi() {
         // Keep keys this build does not own (an older record may carry more).
         writeJson(UI_KEY, { ...(readJson(UI_KEY) ?? {}), collapsed: state.collapsed, pos: state.pos })
+        // Geometry is a setting like the others: without the mirror, a restart
+        // on a fresh loopback port has no spot to come back to.
+        scheduleStoreSync()
       }
 
       // --- durable settings (Host half) -----------------------------------
@@ -3532,8 +3688,9 @@ window.__ModuleLoader__.load({
       function reloadFromStorage() {
         const presets = readPresets(state.lang)
         const saved = readJson(UI_KEY) ?? {}
-        const narrow = viewport().width < 720
-        const collapsed = typeof saved.collapsed === 'boolean' ? saved.collapsed : narrow
+        // The tray comes back from storage; the marks a write left behind in a
+        // draft do not, because the draft they pointed at may be gone too.
+        resolvedAnchors.clear()
         setState({
           presets,
           presetId: readPresetId(presets),
@@ -3546,8 +3703,9 @@ window.__ModuleLoader__.load({
           tipIndex: 0,
           stats: readStats(),
           annotations: notesOfSession(state.target?.sessionId),
-          collapsed,
-          pos: isPoint(saved.pos) ? clampPoint(saved.pos, collapsed) : dockPosition(collapsed),
+          // The restore follows the same launch rule as the first paint.
+          collapsed: true,
+          pos: isPoint(saved.pos) ? snapToEdge(saved.pos, true) : dockPosition(true),
         })
       }
 
@@ -3608,6 +3766,7 @@ window.__ModuleLoader__.load({
           /* diagnostics are best-effort and never block the gear */
         }
       }
+
 
       /**
        * Why a passage could not be anchored, as one sample.
@@ -3742,6 +3901,8 @@ window.__ModuleLoader__.load({
         const targetId = target?.sessionId
         if (targetId !== lastTargetId) {
           lastTargetId = targetId
+          // The marks belong to the conversation that quoted them.
+          resolvedAnchors.clear()
           // The ask is bound to the conversation it was clicked in (1.2); a
           // different conversation must not inherit its status or its wait.
           if (waiting !== null) endWaiting()
@@ -3890,6 +4051,7 @@ window.__ModuleLoader__.load({
           /* no highlight registry */
         }
         highlighted = []
+        resolvedAnchors.clear()
         listeners.clear()
       }
 
@@ -4068,6 +4230,8 @@ window.__ModuleLoader__.load({
 .dsh-nudge-popup-row button{height:32px;padding:0 9px;border:1px solid var(--dn-line);border-radius:8px;background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);font:inherit;font-size:13px;line-height:1;white-space:nowrap;cursor:pointer;transition:background-color .12s ease,border-color .12s ease,transform .12s ease}
 .dsh-nudge-popup-row button:active{transform:scale(.97)}
 .dsh-nudge-popup-row button:focus-visible{outline:2px solid var(--dn-accent-line);outline-offset:2px}
+.dsh-nudge-popup-mic{display:inline-flex;align-items:center;gap:5px;height:26px;padding:0 9px;border:1px solid var(--dn-line);border-radius:999px;background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-secondary,#5a5a66);font:inherit;font-size:11px;line-height:1;cursor:pointer}
+.dsh-nudge-popup-mic-hint{font-size:11px;line-height:1.4;color:var(--dsw-alias-label-secondary,#5a5a66)}
 .dsh-nudge-popup-quick{flex:1 1 0;display:inline-flex;align-items:center;justify-content:center;gap:5px;min-width:0}
 .dsh-nudge-popup-quick .emoji{font-size:15px;line-height:1}
 .dsh-nudge-popup-quick:hover{background:var(--dn-hover)}
@@ -4089,6 +4253,7 @@ window.__ModuleLoader__.load({
 .dsh-nudge-annotation-item{display:flex;flex-direction:column;gap:3px;padding:7px 8px;border-radius:9px;background:color-mix(in srgb,var(--dsw-alias-label-primary,#1a1a1a) 5%,transparent)}
 .dsh-nudge-annotation-item-head{display:flex;align-items:flex-start;gap:6px}
 .dsh-nudge-annotation-item-head .dsh-nudge-annotation-quote{flex:1 1 auto;min-width:0;-webkit-line-clamp:2}
+.dsh-nudge-annotation-written{flex:0 0 auto;font-size:10px;line-height:1.6;padding:0 4px;border-radius:4px;color:color-mix(in srgb,var(--dn-accent) 70%,#fff);background:color-mix(in srgb,var(--dn-accent) 18%,transparent)}
 .dsh-nudge-annotation-note{font-size:12px;line-height:1.5;color:var(--dsw-alias-label-primary,#1a1a1a);white-space:pre-wrap;word-break:break-word;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .dsh-nudge-annotation-remove{flex:0 0 auto;width:20px;height:20px;padding:0;border:0;border-radius:6px;background:transparent;color:var(--dsw-alias-label-secondary,#5a5a66);font-size:14px;line-height:1;cursor:pointer}
 .dsh-nudge-annotation-remove:hover{background:var(--dn-hover);color:var(--dsw-alias-label-primary,#1a1a1a)}
@@ -5116,6 +5281,9 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
                                   item.note !== ''
                                     ? h('span', { className: 'dsh-nudge-annotation-note' }, item.note)
                                     : null,
+                                  item.written === true
+                                    ? h('span', { className: 'dsh-nudge-annotation-written' }, t('writtenTag'))
+                                    : null,
                                 ),
                                 h(
                                   'button',
@@ -5134,6 +5302,13 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
                         )
                       : null,
                     state.annotations.length > 0
+                      ? h(
+                          'div',
+                          { key: 'annotation-hint', className: 'dsh-nudge-annotation-hint' },
+                          t('highlightHint'),
+                        )
+                      : null,
+                    state.annotations.some((item) => item.written !== true)
                       ? h(
                           'div',
                           { key: 'annotation-actions', className: 'dsh-nudge-annotation-actions' },
@@ -6596,6 +6771,20 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
                 ? (value) => inputActions.setDraft(value)
                 : undefined,
             readDraft: () => latest.current?.draft ?? '',
+            // The phase tells a sent message apart from a deleted quote; the
+            // input state publishes it next to the draft.
+            readPhase: () => latest.current?.phase,
+            // Insertion at the caret: the shell's own splice, which leaves
+            // the rest of the document (and its undo step) alone. The write
+            // path prefers it over rebuilding the whole draft.
+            captureInsertion:
+              typeof inputActions?.captureInsertion === 'function'
+                ? () => inputActions.captureInsertion()
+                : undefined,
+            insertText:
+              typeof inputActions?.insertText === 'function'
+                ? (text, span) => inputActions.insertText(text, span)
+                : undefined,
           }
         }
         // Render only stores the handle (no store update, so React never sees

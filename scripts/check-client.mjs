@@ -272,6 +272,7 @@ function expandTree(node) {
   const promptFold = (findAllByClass(help[1], 'dsh-nudge-settings-fold') ?? [])[0]
   check('settings: the prompt editor starts collapsed', promptFold?.type, 'details')
   check('settings: send behavior stays outside the fold', findByProp(promptFold, 'data-setting', 'turbo'), null)
+
   const appearanceSection = help[2]
   const frameRow = findByClass(appearanceSection, 'dsh-nudge-settings-inline')
   check('settings: border row drops its description line', (findAllByClass(frameRow, 'dsh-nudge-toggle-desc') ?? []).length, 0)
@@ -1421,7 +1422,8 @@ function flowItemStub(key, text, children = []) {
     writes[0],
     '已有草稿\n> 第二行\n>\n> 第四行',
   )
-  check('annotation: tray emptied after write', booted.runtime.getSnapshot().annotations.length, 0)
+  check('annotation: the written note stays in the tray', booted.runtime.getSnapshot().annotations.length, 1)
+  check('annotation: the note is marked written', booted.runtime.getSnapshot().annotations[0].written, true)
 }
 
 {
@@ -1536,6 +1538,77 @@ function flowItemStub(key, text, children = []) {
   check('anchor: the sample counts the anchor elements', diag[0]?.flows, 2)
   check('anchor: the sample counts the passage carriers', diag[0]?.hits, 2)
   check('anchor: the sample says the text is on the page', diag[0]?.inBody, true)
+}
+
+{
+  // A written note keeps its passage painted. The mark belongs to the
+  // annotation, not to the input box: clearing the draft leaves it alone, and
+  // only deleting the note ends it.
+  const booted = await boot({ highlights: true })
+  const item = flowItemStub('turn-9', '这里是一段可以继续标注的原文 第一段\n\n第二段')
+  booted.sandbox.document.querySelectorAll = (selector) =>
+    selector === '[data-chat-anchor-key]' ? [item] : []
+  booted.sandbox.document.createRange = () => ({
+    setStart() {},
+    setEnd() {},
+    getClientRects: () => [],
+    getBoundingClientRect: () => ({ left: 100, top: 300, right: 300, bottom: 320 }),
+  })
+  booted.runtime.setQuick(true)
+  booted.sandbox.getSelection = selectionStub('可以继续标注', item)
+  check('written note: capture keeps the flow item', booted.runtime.captureSelection(), true)
+  booted.runtime.setAnnotationNote('这条还在输入框里')
+  check('written note: added to the tray', booted.runtime.addAnnotation(), true)
+  const registry = booted.sandbox.CSS.highlights
+  check('written note: the passage is painted', registry.get('dsh-nudge-notes')?.ranges.length, 1)
+  let draft = ''
+  booted.runtime.attachComposer({ readDraft: () => draft, setDraft: (value) => (draft = value) })
+  check('written note: write accepted', booted.runtime.writeAnnotations(), true)
+  includes('written note: the quote reached the draft', draft, '可以继续标注')
+  check('written note: the note stays in the tray', booted.runtime.getSnapshot().annotations.length, 1)
+  check('written note: the note is marked written', booted.runtime.getSnapshot().annotations[0].written, true)
+  check('written note: the passage stays painted', registry.get('dsh-nudge-notes')?.ranges.length, 1)
+  draft = ''
+  booted.dispatchWindow('scroll', {})
+  await sleep(200)
+  check('written note: an emptied draft keeps the mark', registry.get('dsh-nudge-notes')?.ranges.length, 1)
+  check('written note: a second write has nothing left to do', booted.runtime.writeAnnotations(), false)
+  const id = booted.runtime.getSnapshot().annotations[0].id
+  check('written note: delete accepted', booted.runtime.removeAnnotation(id), true)
+  check('written note: deleting the note ends the mark', registry.has('dsh-nudge-notes'), false)
+  check('written note: the tray is empty after delete', booted.runtime.getSnapshot().annotations.length, 0)
+}
+
+{
+  // A stored key can stop naming an element: the turn is re-rendered under a
+  // new key once it stops streaming. The quote still identifies the passage,
+  // so the mark follows the text instead of waiting for a key that is gone.
+  const booted = await boot({ highlights: true })
+  const stale = flowItemStub('turn-10', '这里是一段换过 key 的原文')
+  booted.sandbox.document.querySelectorAll = (selector) =>
+    selector === '[data-chat-anchor-key]' ? [stale] : []
+  booted.sandbox.document.createRange = () => ({
+    setStart() {},
+    setEnd() {},
+    getClientRects: () => [],
+    getBoundingClientRect: () => ({ left: 100, top: 300, right: 300, bottom: 320 }),
+  })
+  booted.runtime.setQuick(true)
+  booted.sandbox.getSelection = selectionStub('换过 key 的原文', stale)
+  booted.runtime.captureSelection()
+  booted.runtime.addAnnotation('同意')
+  check(
+    'recovered mark: the note kept its key',
+    booted.runtime.getSnapshot().annotations[0].anchor?.key,
+    'turn-10',
+  )
+  const registry = booted.sandbox.CSS.highlights
+  const fresh = flowItemStub('turn-11', '这里是一段换过 key 的原文')
+  booted.sandbox.document.querySelectorAll = (selector) =>
+    selector === '[data-chat-anchor-key]' ? [fresh] : []
+  booted.dispatchWindow('scroll', {})
+  await sleep(200)
+  check('recovered mark: a gone key still paints its quote', registry.get('dsh-nudge-notes')?.ranges.length, 1)
 }
 
 {
@@ -1698,10 +1771,48 @@ function flowItemStub(key, text, children = []) {
   check('turbo double-click still switches the preset', booted.runtime.getSnapshot().presetId, 'fast')
 }
 
-// --- 7.4.3 narrow screens default collapsed ----------------------------
+// --- every launch paints the pill, pinned to one side -------------------
 
 {
-  const booted = await boot({ innerWidth: 480, innerHeight: 720 })
+  const booted = await boot({ expanded: false })
+  const state = booted.runtime.getSnapshot()
+  check('launch: the window starts collapsed', state.collapsed, true)
+  check('launch: the pill sits on a side', state.pos.x, 1440 - 104 - 16)
+  check('launch: the pill sits above the composer', state.pos.y, 56)
+  const pill = findByClass(
+    booted.registrations.find((item) => item.entry.name === 'shell.overlay').Component(),
+    'dsh-nudge-pill',
+  )
+  check('launch: the first paint is the pill', Boolean(pill), true)
+}
+
+{
+  // A restart lands on a new loopback port: the durable record is the only
+  // thing the launch has, and it must still come back as a pinned pill.
+  const host = hostStub({
+    store: { version: 1, ui: { collapsed: false, pos: { x: 700, y: 240 } } },
+  })
+  const booted = await boot({ storage: storageStub(), fetch: host.fetch, expanded: false })
+  await sleep(20)
+  const state = booted.runtime.getSnapshot()
+  check('launch: a restored window comes back collapsed', state.collapsed, true)
+  check('launch: a restored window comes back on its side', state.pos.x, 1440 - 104 - 16)
+  check('launch: the vertical spot survives', state.pos.y, 240)
+}
+
+{
+  // A window left near the left edge comes back on the left edge.
+  const host = hostStub({ store: { version: 1, ui: { pos: { x: 40, y: 300 } } } })
+  const booted = await boot({ storage: storageStub(), fetch: host.fetch, expanded: false })
+  await sleep(20)
+  check('launch: the nearer side is kept', booted.runtime.getSnapshot().pos.x, 16)
+  check('launch: the spot is kept on that side', booted.runtime.getSnapshot().pos.y, 300)
+}
+
+// --- 7.4.3 narrow screens start collapsed too ---------------------------
+
+{
+  const booted = await boot({ innerWidth: 480, innerHeight: 720, expanded: false })
   check('narrow screen defaults collapsed', booted.runtime.getSnapshot().collapsed, true)
 }
 
@@ -1958,11 +2069,96 @@ const durable = (type, seq, data) => ({ type: 'event', event: { type, seq, time:
   booted.runtime.attachComposer({ readDraft: () => '', setDraft: (value) => writes.push(value) })
   await tick()
   check('auto-paste: focused composer receives the note', writes[0], '> 待粘贴的批注')
-  check('auto-paste: tray emptied after pasting', booted.runtime.getSnapshot().annotations.length, 0)
+  check('auto-paste: the pasted note stays in the tray', booted.runtime.getSnapshot().annotations.length, 1)
+  check('auto-paste: the pasted note is marked written', booted.runtime.getSnapshot().annotations[0].written, true)
   check('auto-paste: switch back off', booted.runtime.setAutoPaste(false), true)
   check('auto-paste: off clears the stored flag', booted.localStorage.getItem('dsh-nudge:autopaste'), null)
 }
 
+
+{
+  // The tray says which notes already sit in the draft, and the hint names the
+  // other handle: the highlight itself opens the note.
+  const booted = await boot({})
+  booted.runtime.setQuick(true)
+  booted.sandbox.getSelection = selectionStub('标一句', { nodeType: 1, closest: () => null })
+  booted.runtime.captureSelection()
+  booted.runtime.addAnnotation('同意')
+  booted.runtime.attachComposer({ readDraft: () => '', setDraft: () => {} })
+  check('tray: write accepted before the tag shows', booted.runtime.writeAnnotations(), true)
+  const View = booted.registrations.find((item) => item.entry.name === 'shell.overlay').Component
+  const tree = View()
+  check('tray: a written note carries its tag', Boolean(findByClass(tree, 'dsh-nudge-annotation-written')), true)
+  check(
+    'tray: the hint names the click handle',
+    findByClass(tree, 'dsh-nudge-annotation-hint')?.children?.[0],
+    '点对话里的高亮，可以改批注或取消高亮。',
+  )
+  check('tray: a written note is no longer offered for writing', findByClass(tree, 'dsh-nudge-annotation-actions'), null)
+}
+// --- composer typing must stay untouched by the annotation path --------
+
+{
+  // A write goes in at the caret when the shell offers the insertion face:
+  // the draft keeps its paragraphs and `setDraft` is never reached.
+  const booted = await boot({})
+  booted.runtime.setQuick(true)
+  booted.sandbox.getSelection = selectionStub('写进光标处', { nodeType: 1, closest: () => null })
+  booted.runtime.captureSelection()
+  booted.runtime.addAnnotation('同意')
+  const calls = { inserted: [], written: [] }
+  booted.runtime.attachComposer({
+    readDraft: () => '已有草稿',
+    setDraft: (value) => calls.written.push(value),
+    captureInsertion: () => ({ start: 4, end: 4, draftRev: 7 }),
+    insertText: (text, span) => {
+    calls.inserted.push({ text, span })
+    return true
+    },
+  })
+  check('write: accepted at the caret', booted.runtime.writeAnnotations(), true)
+  check('write: one splice', calls.inserted.length, 1)
+  check('write: the splice carries a line separator', calls.inserted[0]?.text.startsWith('\n> 写进光标处'), true)
+  check('write: the span is the caret the shell reported', calls.inserted[0]?.span?.draftRev, 7)
+  check('write: the draft is not rebuilt', calls.written.length, 0)
+}
+
+{
+  // A refused splice (the draft moved) falls back to the rebuild, so a note
+  // is never lost to a stale caret.
+  const booted = await boot({})
+  booted.runtime.setQuick(true)
+  booted.sandbox.getSelection = selectionStub('兜底写入', { nodeType: 1, closest: () => null })
+  booted.runtime.captureSelection()
+  booted.runtime.addAnnotation('同意')
+  const written = []
+  booted.runtime.attachComposer({
+    readDraft: () => '原草稿',
+    setDraft: (value) => written.push(value),
+    captureInsertion: () => ({ start: 3, end: 3, draftRev: 2 }),
+    insertText: () => false,
+  })
+  check('write: a refused splice still writes', booted.runtime.writeAnnotations(), true)
+  check('write: the rebuild kept the draft', written[0], '原草稿\n> 兜底写入\n我的回答：同意')
+}
+
+{
+  // Shift+Enter is a newline, not a selection: a keyup inside a field must
+  // not read the caret as a passage and pull the card over the composer.
+  const booted = await boot({})
+  booted.runtime.setQuick(true)
+  const item = flowItemStub('turn-20', '这一段在对话里，不该被键盘捕获')
+  booted.sandbox.getSelection = selectionStub('一段在对话里', item)
+  const editor = { nodeType: 1, closest: (selector) => (selector.includes('contenteditable') ? editor : null) }
+  booted.sandbox.document.activeElement = editor
+  booted.dispatch('keyup', { key: 'Enter', shiftKey: true, target: editor })
+  await sleep(260)
+  check('typing: Shift+Enter in a field does not capture', booted.runtime.getSnapshot().annotationDraft, null)
+  booted.sandbox.document.activeElement = null
+  booted.dispatch('keyup', { key: 'ArrowLeft', shiftKey: true, target: item })
+  await sleep(260)
+  check('typing: a shifted keyup in the transcript still captures', booted.runtime.getSnapshot().annotationDraft?.quote, '一段在对话里')
+}
 // --- preset order: the arrows move a row and the order survives ----------
 
 {
@@ -1987,7 +2183,7 @@ const durable = (type, seq, data) => ({ type: 'event', event: { type, seq, time:
   const storage = storageStub()
   storage.setItem('dsh-nudge:presets', JSON.stringify({ presets: ['旧版快捷回复', { name: '旧名', body: '旧版正文' }] }))
   storage.setItem('dsh-nudge:ui', JSON.stringify({ collapsed: true, position: { x: 40, y: 60 } }))
-  const booted = await boot({ storage })
+  const booted = await boot({ storage, expanded: false })
   const state = booted.runtime.getSnapshot()
   check('update: a wrapped legacy list is still read', state.presets.length, 2)
   check('update: a bare-string entry keeps its text', state.presets[0].text, '旧版快捷回复')
@@ -2184,7 +2380,8 @@ const durable = (type, seq, data) => ({ type: 'event', event: { type, seq, time:
   check('chain: one draft written', writes.length, 1)
   check('chain: draft keeps the surviving passages', writes[0].includes('引用一') && writes[0].includes('不同意'), true)
   check('chain: draft carries the edited note', writes[0].includes('改过的批注'), true)
-  check('chain: tray emptied after write', booted.runtime.getSnapshot().annotations.length, 0)
+  check('chain: the written notes stay in the tray', booted.runtime.getSnapshot().annotations.length, 3)
+  check('chain: every surviving note is marked written', booted.runtime.getSnapshot().annotations.every((item) => item.written === true), true)
 
   // 7. send one, straight away.
   check('chain: send passage captured', capture('引用五'), true)
@@ -2192,7 +2389,7 @@ const durable = (type, seq, data) => ({ type: 'event', event: { type, seq, time:
   check('chain: send accepted', booted.runtime.sendAnnotations(), true)
   check('chain: one prompt delivered', booted.calls.prompt.length, 1)
   check('chain: prompt carries the passage', booted.calls.prompt[0].request.content[0].text.includes('引用五'), true)
-  check('chain: tray emptied after send', booted.runtime.getSnapshot().annotations.length, 0)
+  check('chain: sending takes only the pending note', booted.runtime.getSnapshot().annotations.length, 3)
   check('chain: waiting after send', booted.runtime.getSnapshot().phase, 'waiting')
 
   // 8. Esc closes the card.
@@ -2572,7 +2769,8 @@ function hostStub({ store } = {}) {
   check('restore: delivery mode comes back', booted.runtime.effectiveDelivery(), 'followup')
   check('restore: the authored preset comes back', state.presets[0]?.text, '恢复正文')
   check('restore: the chosen preset comes back', state.presetId, 'custom-9')
-  check('restore: the window position comes back', state.pos?.x, 12)
+  check('restore: the window comes back collapsed', state.collapsed, true)
+  check('restore: the window position comes back on its side', state.pos?.x, 16)
   check('restore: the page storage is refilled', booted.localStorage.getItem('dsh-nudge:quick'), '1')
   check('restore: the record is read over the Host route', host.calls[0]?.url, '/dsh-nudge/store')
 }
@@ -2622,6 +2820,7 @@ function hostStub({ store } = {}) {
   }
   check('no Host half: settings still work', threw, false)
 }
+
 
 console.log(failures === 0 ? '\nclient checks: all passed' : `\nclient checks: ${failures} failure(s)`)
 process.exit(failures === 0 ? 0 : 1)

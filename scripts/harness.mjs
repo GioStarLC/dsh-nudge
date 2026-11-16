@@ -112,7 +112,11 @@ export function storageStub() {
 
 /**
  * Boot one bundle instance.
- * @param options - `{ bindings, promptResult, language, innerWidth, innerHeight, chunks }`.
+ *
+ * Every launch paints the collapsed pill, but almost every check drives the
+ * card, so the boot opens it through the window's own click path by default.
+ * A check about the launch itself passes `expanded: false` and sees the pill.
+ * @param options - `{ bindings, promptResult, language, innerWidth, innerHeight, chunks, expanded }`.
  * @returns the sandbox handles used by the checks and the preview renderer.
  */
 export async function boot(options = {}) {
@@ -219,6 +223,17 @@ export async function boot(options = {}) {
   // Host half and adopts the durable record on boot, exactly as in the browser.
   if (typeof options.fetch === 'function') sandbox.fetch = options.fetch
   sandbox.window = sandbox
+  // Only when a check asks for it: the CSS Custom Highlight API the annotation
+  // marks are painted with. Without the registry the bundle's repaint returns
+  // early, exactly as it does in a browser that has no such API.
+  if (options.highlights === true) {
+    sandbox.CSS = { highlights: new Map() }
+    sandbox.Highlight = class Highlight {
+      constructor(...ranges) {
+        this.ranges = ranges
+      }
+    }
+  }
   /**
    * Package-local chunks (`require.async('./client.<name>.js')`) are fetched from
    * the repository, next to the bundle, and registered exactly as the browser
@@ -252,6 +267,14 @@ export async function boot(options = {}) {
   vm.createContext(sandbox)
   vm.runInContext(source, sandbox, { filename: 'client.js' })
   sandbox.__module.apply(ctx)
+  if (options.expanded !== false) {
+    // Opening the card writes the window geometry; a check about the launch
+    // itself must still see the storage the launch wrote, so put it back.
+    const before = localStorage.getItem('dsh-nudge:ui')
+    sandbox.__dshNudge?.setCollapsed(false)
+    if (before === null) localStorage.removeItem('dsh-nudge:ui')
+    else localStorage.setItem('dsh-nudge:ui', before)
+  }
   /** Fire one recorded document listener pass, like a capture-phase browser event. */
   const dispatch = (type, event) => {
     let handled = false
