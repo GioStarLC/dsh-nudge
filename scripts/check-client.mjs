@@ -8,7 +8,9 @@
  *
  * Run: node scripts/check-client.mjs
  */
-import { readFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import {
   source,
   sleep,
@@ -1270,12 +1272,26 @@ function composerFocus() {
   await tick()
   booted.runtime.setAnnotationExpanded(true)
   const View = booted.registrations.find((item) => item.entry.name === 'shell.overlay').Component
-  const hint = findByClass(View(), 'dsh-nudge-annotation-hint')
+  const tree = View()
+  const hint = findByClass(tree, 'dsh-nudge-annotation-hint')
   check(
     'annotation: the off state explains itself',
     hint?.children?.[0],
     '快速批注已关闭；打开批注栏的开关才能从选中文字添加批注。',
   )
+  // The tray keeps one height whether or not it holds notes: the empty state
+  // lives inside the list box, and the action row is always there (disabled).
+  check('annotation: the empty tray keeps its list box', Boolean(findByClass(tree, 'dsh-nudge-annotation-list')), true)
+  const actions = findByClass(tree, 'dsh-nudge-annotation-actions')
+  check('annotation: the action row keeps its place', Boolean(actions), true)
+  check(
+    'annotation: both actions stay off while nothing is pending',
+    (actions?.children ?? []).every((button) => button?.props?.disabled === true),
+    true,
+  )
+  const stylesheet = String(findAllByTag(tree, 'style')?.[0]?.children?.[0] ?? '')
+  const trayRule = (stylesheet.match(/\.dsh-nudge-annotation-tray\{[^}]*\}/) ?? [''])[0]
+  check('annotation: the tray is one fixed height', trayRule.includes('height:216px'), true)
 }
 
 {
@@ -1616,6 +1632,7 @@ function flowItemStub(key, text, children = []) {
   // beside-selection card instead of a box inside the window.
   const booted = await boot({})
   booted.runtime.setQuick(true)
+  booted.runtime.setAnnotationExpanded(true)
   const View = booted.registrations.find((item) => item.entry.name === 'shell.overlay').Component
   const hint = findByClass(View(), 'dsh-nudge-annotation-hint')
   includes('annotation: repository explains the gesture', hint?.children?.[0], '选中对话里的文字')
@@ -1661,6 +1678,67 @@ function flowItemStub(key, text, children = []) {
     'translateY(-100%)',
   )
   check('annotation: window keeps no compose box', findByClass(tree, 'dsh-nudge-annotation-compose'), null)
+}
+
+{
+  // The in-place editor: a painted passage (or a tray row) opens the note card
+  // over the very box that was clicked. The window itself stays as it was.
+  const booted = await boot({})
+  booted.runtime.setQuick(true)
+  booted.sandbox.getSelection = selectionStub('要改的那段原文', { nodeType: 1, closest: () => null })
+  booted.runtime.captureSelection()
+  booted.runtime.addAnnotation('原来的批注')
+  const View = booted.registrations.find((item) => item.entry.name === 'shell.overlay').Component
+  const id = booted.runtime.getSnapshot().annotations[0].id
+  const rect = { left: 120, top: 300, right: 420, bottom: 322, width: 300, height: 22 }
+  check('edit: opening accepted', booted.runtime.startEditAnnotation(id, rect), true)
+  let tree = View()
+  let popup = findByClass(tree, 'dsh-nudge-edit-popup')
+  check('edit: the bubble opens over the passage', Boolean(popup), true)
+  check('edit: the window leaves its tray folded', findByClass(tree, 'dsh-nudge-annotation-tray'), null)
+  check('edit: the passage is quoted', findByClass(popup, 'dsh-nudge-edit-quote')?.children?.[0], '要改的那段原文')
+  check('edit: the field holds the stored note', findByClass(popup, 'dsh-nudge-edit-input')?.props?.value, '原来的批注')
+  check('edit: the field starts two lines tall', findByClass(popup, 'dsh-nudge-edit-input')?.props?.rows, 2)
+  check('edit: it hangs above the passage', popup?.props?.style?.top, '290px')
+  check('edit: it is centred on the passage', popup?.props?.style?.left, '100px')
+  check('edit: it opens upwards', popup?.props?.style?.transform, 'translateY(-100%)')
+  check(
+    'edit: the field explains its own keys',
+    findByClass(popup, 'dsh-nudge-popup-hint')?.children?.[0]?.children?.[0],
+    'Enter 保存 · Shift+Enter 换行 · Esc 取消',
+  )
+  check('edit: it offers removal', findByClass(popup, 'dsh-nudge-edit-delete')?.children?.[0], '取消高亮')
+  check('edit: it offers saving', findByClass(popup, 'dsh-nudge-popup-save')?.children?.[0], '保存')
+
+  // Clicking the same mark again only moves the bubble: a half-typed note stays
+  // in the field.
+  booted.runtime.setAnnotationNote('改到一半')
+  booted.runtime.startEditAnnotation(id, { left: 120, top: 500, right: 420, bottom: 522, width: 300, height: 22 })
+  check('edit: a second click keeps the typing', booted.runtime.getSnapshot().annotationNote, '改到一半')
+  check('edit: a second click moves the bubble', booted.runtime.editPopupPosition().top, '490px')
+
+  check('edit: save accepted', booted.runtime.saveEditedAnnotation(), true)
+  check('edit: the note is stored', booted.runtime.getSnapshot().annotations[0].note, '改到一半')
+  check('edit: the bubble closes on save', findByClass(View(), 'dsh-nudge-edit-popup'), null)
+
+  // A new capture owns the screen; the editor must not lurk behind it.
+  booted.runtime.startEditAnnotation(id, rect)
+  booted.sandbox.getSelection = selectionStub('另一段', { nodeType: 1, closest: () => null })
+  check('edit: a new capture lands', booted.runtime.captureSelection(), true)
+  check('edit: the editor steps aside for it', findByClass(View(), 'dsh-nudge-edit-popup'), null)
+
+  // The tray row opens the same bubble, hung off its own box.
+  booted.runtime.setAnnotationExpanded(true)
+  tree = View()
+  const row = findByClass(tree, 'dsh-nudge-annotation-open')
+  row?.props?.onClick?.({
+    currentTarget: {
+      getBoundingClientRect: () => ({ left: 40, top: 600, right: 300, bottom: 652, width: 260, height: 52 }),
+    },
+  })
+  popup = findByClass(View(), 'dsh-nudge-edit-popup')
+  check('edit: the tray row opens the same bubble', Boolean(popup), true)
+  check('edit: it hangs off the row', popup?.props?.style?.top, '590px')
 }
 
 {
@@ -1777,7 +1855,7 @@ function flowItemStub(key, text, children = []) {
   const booted = await boot({ expanded: false })
   const state = booted.runtime.getSnapshot()
   check('launch: the window starts collapsed', state.collapsed, true)
-  check('launch: the pill sits on a side', state.pos.x, 1440 - 104 - 16)
+  check('launch: the pill sits on a side', state.pos.x, 1440 - 36 - 16)
   check('launch: the pill sits above the composer', state.pos.y, 56)
   const pill = findByClass(
     booted.registrations.find((item) => item.entry.name === 'shell.overlay').Component(),
@@ -1787,16 +1865,43 @@ function flowItemStub(key, text, children = []) {
 }
 
 {
+  // The collapsed window is a round button carrying the window's own mark: no
+  // label, no capsule.
+  const booted = await boot({ expanded: false })
+  const overlay = booted.registrations.find((item) => item.entry.name === 'shell.overlay')
+  const tree = overlay.Component()
+  const pill = findByClass(tree, 'dsh-nudge-pill')
+  check('pill: it is the expand control', pill?.props?.title, '展开 dsh-nudge 窗口')
+  check('pill: it carries the window mark', Boolean(findByClass(pill, 'dsh-nudge-mark')), true)
+  const texts = []
+  const collect = (node) => {
+    if (typeof node === 'string') texts.push(node)
+    else if (node && typeof node === 'object') (node.children ?? []).forEach(collect)
+  }
+  collect(pill)
+  check('pill: no text label is left in it', texts.length, 0)
+  const stylesheet = String(findAllByTag(tree, 'style')?.[0]?.children?.[0] ?? '')
+  const rule = (stylesheet.match(/\.dsh-nudge-pill\{[^}]*\}/) ?? [''])[0]
+  check('pill: it is a square box', rule.includes('width:36px;height:36px'), true)
+  check('pill: it rounds into a circle', rule.includes('border-radius:50%'), true)
+  check(
+    'pill: the border setting still lands on it',
+    rule.includes('border:var(--dn-frame) solid var(--dn-accent-edge)'),
+    true,
+  )
+}
+
+{
   // A restart lands on a new loopback port: the durable record is the only
   // thing the launch has, and it must still come back as a pinned pill.
   const host = hostStub({
-    store: { version: 1, ui: { collapsed: false, pos: { x: 700, y: 240 } } },
+    store: { version: 1, ui: { collapsed: false, pos: { x: 900, y: 240 } } },
   })
   const booted = await boot({ storage: storageStub(), fetch: host.fetch, expanded: false })
   await sleep(20)
   const state = booted.runtime.getSnapshot()
   check('launch: a restored window comes back collapsed', state.collapsed, true)
-  check('launch: a restored window comes back on its side', state.pos.x, 1440 - 104 - 16)
+  check('launch: a restored window comes back on its side', state.pos.x, 1440 - 36 - 16)
   check('launch: the vertical spot survives', state.pos.y, 240)
 }
 
@@ -1969,7 +2074,7 @@ const durable = (type, seq, data) => ({ type: 'event', event: { type, seq, time:
   booted.sandbox.getSelection = selectionStub('第一段', { nodeType: 1, closest: () => null })
   check('annotation: first note captured', booted.runtime.captureSelection(), true)
   booted.runtime.addAnnotation()
-  check('annotation: tray opens after adding', booted.runtime.getSnapshot().annotationExpanded, true)
+  check('annotation: adding a note leaves the tray folded', booted.runtime.getSnapshot().annotationExpanded, false)
   booted.sandbox.getSelection = selectionStub('第二段', { nodeType: 1, closest: () => null })
   check('annotation: a second capture is accepted', booted.runtime.captureSelection(), true)
   booted.runtime.addAnnotation()
@@ -2086,6 +2191,7 @@ const durable = (type, seq, data) => ({ type: 'event', event: { type, seq, time:
   booted.runtime.addAnnotation('同意')
   booted.runtime.attachComposer({ readDraft: () => '', setDraft: () => {} })
   check('tray: write accepted before the tag shows', booted.runtime.writeAnnotations(), true)
+  booted.runtime.setAnnotationExpanded(true)
   const View = booted.registrations.find((item) => item.entry.name === 'shell.overlay').Component
   const tree = View()
   check('tray: a written note carries its tag', Boolean(findByClass(tree, 'dsh-nudge-annotation-written')), true)
@@ -2094,7 +2200,13 @@ const durable = (type, seq, data) => ({ type: 'event', event: { type, seq, time:
     findByClass(tree, 'dsh-nudge-annotation-hint')?.children?.[0],
     '点对话里的高亮，可以改批注或取消高亮。',
   )
-  check('tray: a written note is no longer offered for writing', findByClass(tree, 'dsh-nudge-annotation-actions'), null)
+  const actions = findByClass(tree, 'dsh-nudge-annotation-actions')
+  check('tray: the action row keeps its place', Boolean(actions), true)
+  check(
+    'tray: a written note is no longer offered for writing',
+    (actions?.children ?? []).slice(0, 2).every((button) => button?.props?.disabled === true),
+    true,
+  )
 }
 // --- composer typing must stay untouched by the annotation path --------
 
@@ -2795,15 +2907,15 @@ function hostStub({ store } = {}) {
 }
 
 {
-  // Same origin restarted: the page is fresher than the file, so the file is
-  // refreshed from it instead of clobbering what the user just changed.
+  // Same origin restarted: the page is fresher for the fields it holds, so the
+  // file is refreshed from it — and it adopts the fields the page never set.
   const storage = storageStub()
   storage.setItem('dsh-nudge:quick', '1')
   const host = hostStub({ store: { version: 1, delivery: 'queue' } })
   const booted = await boot({ storage, fetch: host.fetch })
   await sleep(400)
   check('restart: the local record still wins', booted.runtime.getSnapshot().quick, true)
-  check('restart: the delivery default is kept', booted.runtime.effectiveDelivery(), 'steer')
+  check('restart: a field the page never set comes back', booted.runtime.effectiveDelivery(), 'followup')
   check('restart: the local record is pushed up', host.calls.some((call) => call.init?.method === 'POST'), true)
 }
 
@@ -2821,6 +2933,230 @@ function hostStub({ store } = {}) {
   check('no Host half: settings still work', threw, false)
 }
 
+
+// --- the annotation lifecycle: one surface, one resting state -------------
+//
+// The card, the in-place editor and the tray share one state. Whichever path
+// ends one of them has to leave the other fields at rest, so these checks drive
+// every closing path through the runtime and compare the whole surface.
+
+{
+  const REST = {
+    annotationDraft: null,
+    annotationCardHidden: false,
+    annotationNote: '',
+    annotationEditingId: null,
+    annotationEditRect: null,
+  }
+  const surface = (state) => {
+    const off = Object.keys(REST).filter((key) => state[key] !== REST[key])
+    return off.length === 0 ? 'at rest' : off.join(',')
+  }
+
+  /**
+   * One stored note, then an open draft with a half-typed note over it.
+   * `withComposer` attaches the write target, so a write can be accepted.
+   */
+  async function openEverything(booted, withComposer = true) {
+    booted.sessionsList.set({ ids: ['A'], byId: { A: { title: '会话', retainedBy: { mainView: 1 } } } })
+    await tick()
+    booted.runtime.setQuick(true)
+    if (withComposer) booted.runtime.attachComposer({ readDraft: () => '', setDraft: () => {} })
+    booted.sandbox.getSelection = selectionStub('第一段原文', { nodeType: 1, closest: () => null })
+    booted.runtime.captureSelection()
+    booted.runtime.setAnnotationNote('已经写好的批注')
+    booted.runtime.addAnnotation()
+    const id = booted.runtime.getSnapshot().annotations[0]?.id
+    booted.sandbox.getSelection = selectionStub('第二段原文', { nodeType: 1, closest: () => null })
+    booted.runtime.captureSelection()
+    booted.runtime.setAnnotationNote('写到一半')
+    return id
+  }
+
+  const closers = [
+    ['dismissing the draft', (runtime) => runtime.dismissAnnotationDraft()],
+    ['cancelling the edit', (runtime) => runtime.cancelAnnotationEdit()],
+    ['adding the note', (runtime) => runtime.addAnnotation()],
+    ['writing into the draft', (runtime) => runtime.writeAnnotations()],
+    ['sending', (runtime) => runtime.sendAnnotations()],
+    ['switching quick notes off', (runtime) => runtime.setQuick(false)],
+  ]
+  for (const [label, close] of closers) {
+    const booted = await boot({})
+    await openEverything(booted)
+    close(booted.runtime)
+    check(`lifecycle: ${label} leaves the surface at rest`, surface(booted.runtime.getSnapshot()), 'at rest')
+  }
+
+  {
+    // A refused write must not throw the passage away: the surface stays.
+    const booted = await boot({})
+    await openEverything(booted, false)
+    check('lifecycle: a write with no composer is refused', booted.runtime.writeAnnotations(), false)
+    check('lifecycle: the draft survives a refused write', Boolean(booted.runtime.getSnapshot().annotationDraft), true)
+  }
+
+  {
+    // A card and an editor never coexist: opening one closes the other.
+    const booted = await boot({})
+    const id = await openEverything(booted)
+    booted.runtime.startEditAnnotation(id, null)
+    check('lifecycle: the editor closes the draft', booted.runtime.getSnapshot().annotationDraft, null)
+    booted.sandbox.getSelection = selectionStub('第三段原文', { nodeType: 1, closest: () => null })
+    booted.runtime.captureSelection()
+    check('lifecycle: a new draft closes the editor', booted.runtime.getSnapshot().annotationEditingId, null)
+  }
+
+  {
+    // Removing the note under the editor closes it; removing any other note
+    // leaves the editor and what was typed in it alone.
+    const booted = await boot({})
+    const id = await openEverything(booted)
+    booted.runtime.addAnnotation()
+    booted.runtime.startEditAnnotation(id, null)
+    const other = booted.runtime.getSnapshot().annotations.find((item) => item.id !== id)?.id
+    booted.runtime.removeAnnotation(other)
+    check('lifecycle: removing another note keeps the editor', booted.runtime.getSnapshot().annotationEditingId, id)
+    booted.runtime.removeAnnotation(id)
+    check('lifecycle: removing the edited note leaves the surface at rest', surface(booted.runtime.getSnapshot()), 'at rest')
+  }
+}
+
+{
+  // The focus retry asks the runtime instead of reading a constant the view
+  // cannot see: that is what made the retry throw the moment it was needed.
+  const booted = await boot({})
+  check('focus retry: a node inside the window is ours', booted.runtime.isSelfNode({ closest: () => ({}) }), true)
+  check('focus retry: a node on the page is not', booted.runtime.isSelfNode({ closest: () => null }), false)
+  check('focus retry: no node is not ours', booted.runtime.isSelfNode(null), false)
+  booted.sandbox.getSelection = selectionStub('待发送的一段', { nodeType: 1, closest: () => null })
+  booted.runtime.captureSelection()
+  booted.runtime.addAnnotation()
+  check('tray: one derivation of the pending notes', booted.runtime.pendingAnnotations().length, 1)
+  check('tray: a note with no text is still one note', booted.runtime.getSnapshot().annotations.length, 1)
+}
+
+// --- the bridge: the shipped client against the real Host half -----------
+//
+// The halves used to be checked apart — a fetch stub on one side, a record
+// written by hand on the other — which is how the delivery mode drifted and
+// stopped surviving a restart. These checks mount the real route handler over a
+// real file in a temporary profile, so the seam itself is what gets tested.
+
+{
+  const home = await mkdtemp(join(tmpdir(), 'dsh-nudge-bridge-'))
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = home
+  const hostModule = await import('../index.js')
+
+  /**
+   * The Host half, mounted on a stub server context, behind a fetch that goes
+   * through the real handler. `getDelayMs` models a slow read.
+   */
+  function mountHost(options = {}) {
+    const calls = []
+    let handler
+    hostModule.apply({
+      effect: (fn) => {
+        fn()
+        return () => {}
+      },
+      webServer: {
+        register: (route) => {
+          handler = route.handler
+          return () => {}
+        },
+      },
+      get: () => undefined,
+    })
+    const fetch = (url, init) =>
+      new Promise((resolve) => {
+        calls.push({ url, init })
+        const respond = () => {
+          const body = typeof init?.body === 'string' ? init.body : undefined
+          const req = {
+            method: init?.method ?? 'GET',
+            url,
+            socket: { remoteAddress: '127.0.0.1' },
+            async *[Symbol.asyncIterator]() {
+              if (body !== undefined) yield Buffer.from(body)
+            },
+          }
+          const res = {
+            status: 200,
+            writeHead(status) {
+              this.status = status
+            },
+            end(text) {
+              let json
+              try {
+                json = typeof text === 'string' ? JSON.parse(text) : undefined
+              } catch {
+                json = undefined
+              }
+              resolve({ ok: this.status < 400, status: this.status, json: () => Promise.resolve(json) })
+            },
+          }
+          Promise.resolve(handler(req, res)).catch(() =>
+            resolve({ ok: false, status: 500, json: () => Promise.resolve(undefined) }),
+          )
+        }
+        if ((init?.method ?? 'GET') === 'GET' && options.getDelayMs) setTimeout(respond, options.getDelayMs)
+        else respond()
+      })
+    return { calls, fetch }
+  }
+
+  {
+    // The queued mode: the client stores `followup`, the record says `queue`.
+    // One translation in the settings table keeps them apart no longer.
+    const first = mountHost()
+    const a = await boot({ storage: storageStub(), fetch: first.fetch })
+    await sleep(20)
+    a.runtime.setDelivery('followup')
+    a.runtime.setTurbo(true)
+    await sleep(400)
+    const record = hostModule.readStore({}).store
+    check('bridge: the record names the queued mode', record?.delivery, 'queue')
+    check('bridge: the record keeps the switch', record?.turbo, true)
+    const b = await boot({ storage: storageStub(), fetch: mountHost().fetch })
+    await sleep(60)
+    check('bridge: the queued mode comes back', b.runtime.effectiveDelivery(), 'followup')
+    check('bridge: the switch comes back', b.runtime.getSnapshot().turbo, true)
+  }
+
+  {
+    // A page that writes before the record arrives still adopts it. Writing
+    // first used to replace the file with one window position.
+    hostModule.writeStore({}, {
+      version: 1,
+      quick: true,
+      preset: 'custom-9',
+      presets: [{ id: 'custom-9', label: '恢复的口径', text: '恢复正文' }],
+    })
+    const slow = mountHost({ getDelayMs: 150 })
+    const a = await boot({ storage: storageStub(), fetch: slow.fetch, expanded: false })
+    a.runtime.setCollapsed(false)
+    await sleep(700)
+    check('bridge: an early write does not hide the record', a.runtime.getSnapshot().quick, true)
+    check('bridge: the early write does not erase it', hostModule.readStore({}).store?.presets?.[0]?.text, '恢复正文')
+  }
+
+  {
+    // Adoption is per field: what the page already holds stays, and what it
+    // never set comes back from the record.
+    hostModule.writeStore({}, { version: 1, frame: 0, tips: ['恢复的一句'] })
+    const storage = storageStub()
+    storage.setItem('dsh-nudge:frame', '1')
+    const a = await boot({ storage, fetch: mountHost({ getDelayMs: 30 }).fetch })
+    await sleep(140)
+    check('bridge: a field the page holds keeps its value', a.runtime.getSnapshot().frame, 1)
+    check('bridge: a field the page lacks is adopted', a.runtime.getSnapshot().tips.join('|'), '恢复的一句')
+  }
+
+  process.env.DSH_HOME = previousHome
+  await rm(home, { recursive: true, force: true })
+}
 
 console.log(failures === 0 ? '\nclient checks: all passed' : `\nclient checks: ${failures} failure(s)`)
 process.exit(failures === 0 ? 0 : 1)

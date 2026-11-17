@@ -45,6 +45,12 @@ window.__ModuleLoader__.load({
     const NOTES_KEY = 'dsh-nudge:notes'
     /** Flow item attribute the shell uses for stable transcript anchors. */
     const ANCHOR_SELECTOR = '[data-chat-anchor-key]'
+    /**
+     * The plugin's own chrome — the card, the pill and the in-place bubble.
+     * Factory scope because the view needs it too: a focus retry asks whether
+     * the node that took the caret is one of ours.
+     */
+    const SELF_SELECTOR = '.dsh-nudge-card, .dsh-nudge-pill, .dsh-nudge-popup'
     /** Registry name for the annotated-passage highlight. */
     const HIGHLIGHT_NAME = 'dsh-nudge-notes'
     /** Registry name for the passage currently being annotated. */
@@ -136,7 +142,11 @@ window.__ModuleLoader__.load({
     const MAX_TIP_LENGTH = 60
 
     const CARD_WIDTH = 320
-    const PILL_WIDTH = 104
+    /**
+     * The collapsed window is one round button: the mark icon alone, no label.
+     * Geometry below treats it as a square, so the circle stays fully on screen.
+     */
+    const PILL_SIZE = 36
     const EDGE = 16
     const DOCK_TOP = 56
     const COMPOSER_RESERVE = 152
@@ -178,6 +188,7 @@ window.__ModuleLoader__.load({
       addAnnotation: '添加批注',
       dismissAnnotation: '取消',
       deleteAnnotation: '取消高亮',
+      editNoteHint: 'Enter 保存 · Shift+Enter 换行 · Esc 取消',
       writeAnnotations: '写入输入框',
     writtenTag: '已写入',
       sendAnnotations: '发送',
@@ -228,7 +239,7 @@ window.__ModuleLoader__.load({
       again: '再问一次',
       collapse: '收起',
       collapseHint: '拖动可移动',
-      foldHint: '点击收起为胶囊',
+      foldHint: '点击收起为圆形按钮',
       expand: '展开 dsh-nudge 窗口',
       statusIdle: '未询问',
       statusWaiting: '等待中',
@@ -345,6 +356,7 @@ window.__ModuleLoader__.load({
       addAnnotation: 'Add note',
       dismissAnnotation: 'Cancel',
       deleteAnnotation: 'Remove highlight',
+      editNoteHint: 'Enter saves · Shift+Enter starts a new line · Esc cancels',
       writeAnnotations: 'Write to input',
     writtenTag: 'Written',
       sendAnnotations: 'Send',
@@ -395,7 +407,7 @@ window.__ModuleLoader__.load({
       again: 'Ask again',
       collapse: 'Collapse',
       collapseHint: 'Drag to move',
-      foldHint: 'Click to fold into the pill',
+      foldHint: 'Click to fold into a round button',
       expand: 'Expand the dsh-nudge window',
       statusIdle: 'Not asked',
       statusWaiting: 'Waiting',
@@ -724,11 +736,11 @@ window.__ModuleLoader__.load({
           getItem: (key) => raw.getItem(key),
           setItem: (key, value) => {
             raw.setItem(key, value)
-            scheduleStoreSync()
+            noteSettingsWrite()
           },
           removeItem: (key) => {
             raw.removeItem(key)
-            scheduleStoreSync()
+            noteSettingsWrite()
           },
         }
         return storageFacade
@@ -737,12 +749,33 @@ window.__ModuleLoader__.load({
       }
     }
 
+    /** One stored string, or null when the key is absent (never throws). */
+    function readRaw(key) {
+      try {
+        const value = storage()?.getItem(key)
+        return value === null || value === undefined ? null : String(value)
+      } catch {
+        return null
+      }
+    }
+
+    /** Store one string; `undefined` removes the key. Never throws. */
+    function writeRaw(key, value) {
+      try {
+        if (value === undefined) storage()?.removeItem(key)
+        else storage()?.setItem(key, String(value))
+        return true
+      } catch {
+        return false
+      }
+    }
+
     /** Read one JSON object; never throws. */
     function readJson(key) {
+      const raw = readRaw(key)
+      if (raw === null || raw === '') return undefined
       try {
-        const text = storage()?.getItem(key)
-        if (typeof text !== 'string' || text.length === 0) return undefined
-        const value = JSON.parse(text)
+        const value = JSON.parse(raw)
         return value !== null && typeof value === 'object' ? value : undefined
       } catch {
         return undefined
@@ -752,37 +785,206 @@ window.__ModuleLoader__.load({
     /** Persist one JSON object; never throws. */
     function writeJson(key, value) {
       try {
-        storage()?.setItem(key, JSON.stringify(value))
+        return writeRaw(key, JSON.stringify(value))
       } catch {
-        /* storage full or disabled: position memory is best-effort */
+        /* a value that cannot be serialized is not worth a crash */
+        return false
       }
+    }
+
+    /**
+     * One on/off setting: stored as '1', absent when off.
+     * @param name - the state field, and the field the Host record carries.
+     * @param key - the storage key.
+     * @param read - the reader that turns the stored string into the state value.
+     */
+    function switchSetting(name, key, read) {
+      return {
+        name,
+        field: name,
+        key,
+        decode: () => read(),
+        encode: (on) => (on === true ? '1' : undefined),
+        toWire: () => (readRaw(key) === '1' ? true : undefined),
+        fromWire: (value) => value === true && writeRaw(key, '1'),
+      }
+    }
+
+    /**
+     * Every setting this build persists, one row each.
+     *
+     * A row knows the three shapes one setting takes — the string in the page
+     * storage, the value in the runtime state, and the field in the Host record
+     * — and the translations between them. The launch state, the reload after a
+     * Host restore, the mirror payload and the restore itself are all read from
+     * this table, so a new setting is one row plus its control, not six copies
+     * a later change can leave out of step.
+     *
+     * - `decode(raw, env)`  stored string → state value
+     * - `encode(value, env)` state value → stored string; `undefined` drops the key
+     * - `toWire()`         the field the Host record carries, read from the page
+     * - `fromWire(value)`  adopt one record field into the page; true when it landed
+     * - `persist(value, env)` only where a write is not a plain `encode`: the
+     *   annotation tray is stored per Session, so its state value is one
+     *   Session's list while its storage value is the whole store
+     */
+    const SETTINGS = [
+      switchSetting('turbo', TURBO_KEY, readTurbo),
+      switchSetting('quick', QUICK_KEY, readQuick),
+      switchSetting('autoPaste', AUTOPASTE_KEY, readAutoPaste),
+      {
+        name: 'delivery',
+        field: 'deliveryOverride',
+        key: DELIVERY_KEY,
+        decode: () => readDeliveryOverride(),
+        encode: (mode) => (isDelivery(mode) ? mode : undefined),
+        // The record says "queue" — how that mode reads in the settings page —
+        // while the state machine calls the same mode `followup`. The two halves
+        // disagreeing here is what used to drop this setting on every restart,
+        // so the translation lives in this one pair of functions.
+        toWire: () => {
+          const mode = readRaw(DELIVERY_KEY)
+          if (!isDelivery(mode)) return undefined
+          return mode === 'followup' ? 'queue' : mode
+        },
+        fromWire: (value) => {
+          const mode = value === 'queue' ? 'followup' : isDelivery(value) ? value : undefined
+          return mode !== undefined && writeRaw(DELIVERY_KEY, mode)
+        },
+      },
+      {
+        name: 'frame',
+        field: 'frame',
+        key: FRAME_KEY,
+        decode: () => readFrame(),
+        // The default is not stored: an absent key reads as the default, and a
+        // page that never touched the setting must not look configured — only a
+        // page that holds nothing adopts the Host record.
+        encode: (width) => (isFrameWidth(width) && width !== DEFAULT_FRAME ? String(width) : undefined),
+        toWire: () => {
+          const raw = readRaw(FRAME_KEY)
+          if (raw === null) return undefined
+          const width = Number(raw)
+          return isFrameWidth(width) ? width : undefined
+        },
+        fromWire: (value) => isFrameWidth(value) && writeRaw(FRAME_KEY, String(value)),
+      },
+      {
+        name: 'preset',
+        field: null,
+        key: PRESET_KEY,
+        encode: (id) => (typeof id === 'string' && id !== '' ? id : undefined),
+        toWire: () => {
+          const id = readRaw(PRESET_KEY)
+          return id === null || id === '' ? undefined : id
+        },
+        fromWire: (value) => typeof value === 'string' && value !== '' && writeRaw(PRESET_KEY, value),
+      },
+      {
+        name: 'presets',
+        field: 'presets',
+        key: PRESETS_KEY,
+        // The reader stays the one owner of "legacy shape, normalized once".
+        decode: (raw, env) => readPresets(env.lang),
+        encode: (list) => JSON.stringify(list),
+        toWire: () => readJson(PRESETS_KEY),
+        fromWire: (value) => Array.isArray(value) && writeJson(PRESETS_KEY, value),
+      },
+      {
+        name: 'tips',
+        field: 'tips',
+        key: TIPS_KEY,
+        decode: (raw, env) => readTips(env.lang),
+        encode: (list) => JSON.stringify(list),
+        toWire: () => {
+          const stored = readJson(TIPS_KEY)
+          return Array.isArray(stored) ? stored : undefined
+        },
+        fromWire: (value) => Array.isArray(value) && writeJson(TIPS_KEY, value),
+      },
+      {
+        name: 'stats',
+        field: 'stats',
+        key: STATS_KEY,
+        decode: () => readStats(),
+        encode: (stats) => JSON.stringify(stats),
+        toWire: () => readJson(STATS_KEY),
+        fromWire: (value) =>
+          value !== null && typeof value === 'object' && !Array.isArray(value) && writeJson(STATS_KEY, value),
+      },
+      {
+        name: 'notes',
+        field: 'annotations',
+        key: NOTES_KEY,
+        decode: (raw, env) => notesOfSession(env.sessionId),
+        persist: (list, env) => saveNotesOfSession(env.sessionId, list),
+        toWire: () => readJson(NOTES_KEY),
+        fromWire: (value) =>
+          value !== null && typeof value === 'object' && !Array.isArray(value) && writeJson(NOTES_KEY, value),
+      },
+      {
+        // The window geometry lives beside the diagnostic samples, so it has no
+        // state field of its own: the position is derived from it on read.
+        name: 'ui',
+        field: null,
+        key: UI_KEY,
+        toWire: () => readJson(UI_KEY),
+        fromWire: (value) =>
+          value !== null && typeof value === 'object' && !Array.isArray(value) && writeJson(UI_KEY, value),
+      },
+    ]
+
+    /** The row for one setting, or undefined for a name this build does not keep. */
+    function settingRow(name) {
+      for (const row of SETTINGS) {
+        if (row.name === name) return row
+      }
+      return undefined
+    }
+
+    /**
+     * Every persisted setting as one state patch.
+     * `env` carries what the readers need beyond storage: the active language,
+     * and the Session whose annotation tray is loaded.
+     */
+    function readSettings(env) {
+      const patch = {}
+      for (const row of SETTINGS) {
+        if (typeof row.field !== 'string') continue
+        patch[row.field] = row.decode(readRaw(row.key), env)
+      }
+      // The chosen prompt is the one cross-row rule: an id that no longer names
+      // an enabled prompt falls back to the first one that does.
+      patch.presetId = readPresetId(patch.presets)
+      return patch
+    }
+
+    /** Write one setting; the write also arms the Host mirror. */
+    function persistSetting(name, value, env) {
+      const row = settingRow(name)
+      if (row === undefined) return false
+      if (typeof row.persist === 'function') {
+        row.persist(value, env)
+        return true
+      }
+      if (typeof row.encode !== 'function') return false
+      return writeRaw(row.key, row.encode(value, env))
+    }
+
+    /** Drop one setting: the next read falls back to its default. */
+    function clearSetting(name) {
+      const row = settingRow(name)
+      return row === undefined ? false : writeRaw(row.key, undefined)
     }
 
     /** The settings, in the shape the Host half keeps them. */
     function settingsSnapshot() {
-      const store = storage()
-      if (store === undefined) return undefined
+      if (storage() === undefined) return undefined
       const snapshot = { version: STORE_VERSION }
-      const ui = readJson(UI_KEY)
-      if (ui !== undefined) snapshot.ui = ui
-      const delivery = store.getItem(DELIVERY_KEY)
-      if (isDelivery(delivery)) snapshot.delivery = delivery
-      if (store.getItem(TURBO_KEY) === '1') snapshot.turbo = true
-      if (store.getItem(QUICK_KEY) === '1') snapshot.quick = true
-      if (store.getItem(AUTOPASTE_KEY) === '1') snapshot.autoPaste = true
-      const frameText = store.getItem(FRAME_KEY)
-      const frame = frameText === null || frameText === undefined ? NaN : Number(frameText)
-      if (isFrameWidth(frame)) snapshot.frame = frame
-      const preset = store.getItem(PRESET_KEY)
-      if (typeof preset === 'string' && preset !== '') snapshot.preset = preset
-      const presets = readJson(PRESETS_KEY)
-      if (presets !== undefined) snapshot.presets = presets
-      const tips = readJson(TIPS_KEY)
-      if (Array.isArray(tips)) snapshot.tips = tips
-      const stats = readJson(STATS_KEY)
-      if (stats !== undefined) snapshot.stats = stats
-      const notes = readJson(NOTES_KEY)
-      if (notes !== undefined) snapshot.notes = notes
+      for (const row of SETTINGS) {
+        const value = row.toWire()
+        if (value !== undefined) snapshot[row.name] = value
+      }
       return snapshot
     }
 
@@ -793,82 +995,143 @@ window.__ModuleLoader__.load({
 
     /**
      * Write a Host-supplied record into the page storage.
-     * @returns true when at least one known key was adopted.
+     *
+     * `merge` adopts only the fields the page does not hold yet: a field that
+     * is already here is the fresher copy — the user changed it on this origin,
+     * or a previous session here wrote it. That is decided per field rather than
+     * per record because the page can hold a few settings before the record has
+     * even been read: the window geometry is written on the first collapse, and
+     * a page holding only geometry must still adopt the presets in the record.
+     *
+     * @param value - the Host record.
+     * @param options - `{ merge }` keeps the fields the page already holds.
+     * @returns true when at least one known field was adopted.
      */
-    function applySettingsStore(value) {
+    function applySettingsStore(value, options) {
       if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
-      const store = storage()
-      if (store === undefined) return false
-      try {
-        if (value.ui !== null && typeof value.ui === 'object' && !Array.isArray(value.ui)) {
-          store.setItem(UI_KEY, JSON.stringify(value.ui))
+      if (storage() === undefined) return false
+      const merge = options !== null && typeof options === 'object' && options.merge === true
+      let adopted = false
+      for (const row of SETTINGS) {
+        const field = value[row.name]
+        if (field === undefined) continue
+        if (merge && readRaw(row.key) !== null) continue
+        try {
+          if (row.fromWire(field) === true) adopted = true
+        } catch {
+          /* one unusable field must not stop the rest */
         }
-        // The stored shape says "queue" (how it reads in the UI); the state
-        // machine only knows `followup`. Normalise so an old record still lands.
-        if (value.delivery === 'queue') store.setItem(DELIVERY_KEY, 'followup')
-        else if (isDelivery(value.delivery)) store.setItem(DELIVERY_KEY, value.delivery)
-        if (value.turbo === true) store.setItem(TURBO_KEY, '1')
-        if (value.quick === true) store.setItem(QUICK_KEY, '1')
-        if (value.autoPaste === true) store.setItem(AUTOPASTE_KEY, '1')
-        const frame = value.frame
-        if (isFrameWidth(frame)) store.setItem(FRAME_KEY, String(frame))
-        if (typeof value.preset === 'string' && value.preset !== '') store.setItem(PRESET_KEY, value.preset)
-        if (Array.isArray(value.presets)) store.setItem(PRESETS_KEY, JSON.stringify(value.presets))
-        if (Array.isArray(value.tips)) store.setItem(TIPS_KEY, JSON.stringify(value.tips))
-        if (value.stats !== null && typeof value.stats === 'object' && !Array.isArray(value.stats)) {
-          store.setItem(STATS_KEY, JSON.stringify(value.stats))
-        }
-        if (value.notes !== null && typeof value.notes === 'object' && !Array.isArray(value.notes)) {
-          store.setItem(NOTES_KEY, JSON.stringify(value.notes))
-        }
-        return true
-      } catch {
-        return false
       }
+      return adopted
     }
 
-    let storeSyncTimer
+    // --- the durable mirror ----------------------------------------------
+    //
+    // The page is the writer and the Host record is the copy. Three rules keep
+    // the copy honest:
+    //
+    //  - one write per burst of edits: a switch, a drag and a form save are one
+    //    POST, not three;
+    //  - nothing is posted before the record has been read, because a POST
+    //    replaces the whole file — an early write would erase the settings this
+    //    origin has not seen yet, which is exactly the record a restart on a
+    //    fresh loopback port is meant to come back from;
+    //  - a record that was just adopted is not posted back, because the page
+    //    then holds what the file already says.
 
-    /** Mirror the settings to the Host half once a burst of edits settles. */
-    function scheduleStoreSync() {
-      if (typeof fetch !== 'function') return
+    /** True once the Host record has been read (or found absent). */
+    let mirrorReady = false
+    /** True while the page holds settings the Host record does not. */
+    let mirrorDirty = false
+    /** True while a Host record is being adopted: its writes are not news. */
+    let mirrorAdopting = false
+    let mirrorTimer
+
+    /** Note one settings write and arm the mirror. */
+    function noteSettingsWrite() {
+      if (mirrorAdopting) return
+      mirrorDirty = true
+      armSettingsMirror()
+    }
+
+    /** Arm (or re-arm) the write; a mirror that has not read the record waits. */
+    function armSettingsMirror() {
+      if (!mirrorReady || !mirrorDirty || typeof fetch !== 'function') return
       try {
-        if (storeSyncTimer !== undefined) clearTimeout(storeSyncTimer)
+        if (mirrorTimer !== undefined) clearTimeout(mirrorTimer)
       } catch {
         /* no timers */
       }
       try {
-        storeSyncTimer = setTimeout(commitSettingsToHost, STORE_SYNC_MS)
+        mirrorTimer = setTimeout(commitSettingsToHost, STORE_SYNC_MS)
       } catch {
-        storeSyncTimer = undefined
+        mirrorTimer = undefined
       }
     }
 
-    /** Drop a pending settings mirror; used when the window unmounts. */
-    function cancelStoreSync() {
+    /** The Host record has been read: the copy may be written from now on. */
+    function markSettingsRead() {
+      mirrorReady = true
+      armSettingsMirror()
+    }
+
+    /** Run `apply` while its writes are known to come from the record itself. */
+    function adoptFromHost(apply) {
+      mirrorAdopting = true
       try {
-        if (storeSyncTimer !== undefined) clearTimeout(storeSyncTimer)
+        return apply()
+      } finally {
+        mirrorAdopting = false
+      }
+    }
+
+    /** The page holds something the record does not: post it once it is safe. */
+    function markSettingsDirty() {
+      mirrorDirty = true
+      armSettingsMirror()
+    }
+
+    /** The page and the record agree again: nothing left to post. */
+    function markSettingsSynced() {
+      mirrorDirty = false
+    }
+
+    /** Drop a pending write. */
+    function cancelSettingsMirror() {
+      try {
+        if (mirrorTimer !== undefined) clearTimeout(mirrorTimer)
       } catch {
         /* no timers */
       }
-      storeSyncTimer = undefined
+      mirrorTimer = undefined
     }
 
-    /** Send the current settings to the Host half; a missing Host half is fine. */    function commitSettingsToHost() {
-      storeSyncTimer = undefined
+    /** Send the current settings to the Host half; a missing Host half is fine. */
+    function commitSettingsToHost() {
+      mirrorTimer = undefined
       const snapshot = settingsSnapshot()
       if (snapshot === undefined || typeof fetch !== 'function') return
+      mirrorDirty = false
       try {
         Promise.resolve(
           fetch(STORE_ROUTE, {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
             body: JSON.stringify({ store: snapshot }),
+            // Survives a page that closes while the request is in flight.
+            keepalive: true,
           }),
         ).catch(() => {})
       } catch {
         /* preview page or check harness: nothing to sync to */
       }
+    }
+
+    /** Write the record now: an unmount must not swallow the last edit. */
+    function flushSettingsMirror() {
+      cancelSettingsMirror()
+      if (!mirrorReady || !mirrorDirty) return
+      commitSettingsToHost()
     }
 
     /** The Host half's durable record, or undefined when it has none. */
@@ -994,7 +1257,7 @@ window.__ModuleLoader__.load({
       const raw = presetListOf(stored)
       if (raw === undefined) return builtinPresets(lang)
       const list = normalizePresetList(raw, lang)
-      if (!Array.isArray(stored)) writePresets(list)
+      if (!Array.isArray(stored)) persistSetting('presets', list)
       return list
     }
 
@@ -1015,11 +1278,6 @@ window.__ModuleLoader__.load({
         /* storage unavailable */
       }
       return firstEnabled?.id ?? presets[0]?.id ?? DEFAULT_PRESET
-    }
-
-    /** Persist one preset list; a storage failure keeps the in-memory list usable. */
-    function writePresets(presets) {
-      writeJson(PRESETS_KEY, presets)
     }
 
     /** Read the browser delivery override; an invalid stored value is ignored with a warning. */
@@ -1112,11 +1370,6 @@ window.__ModuleLoader__.load({
       return normalizeTipList(readJson(TIPS_KEY), lang)
     }
 
-    /** Persist the idle lines. */
-    function writeTips(tips) {
-      writeJson(TIPS_KEY, tips)
-    }
-
     /** Local calendar day, the bucket the counters roll over on. */
     function dayKey(date = new Date()) {
       const month = String(date.getMonth() + 1).padStart(2, '0')
@@ -1180,11 +1433,6 @@ window.__ModuleLoader__.load({
     /** Read the daily counters; an absent or malformed record reads as empty. */
     function readStats() {
       return normalizeStats(readJson(STATS_KEY))
-    }
-
-    /** Persist the daily counters. */
-    function writeStats(stats) {
-      writeJson(STATS_KEY, stats)
     }
 
     /** Every stored annotation set, keyed by Session id. */
@@ -1381,8 +1629,8 @@ window.__ModuleLoader__.load({
     /** First-run dock position: right, above the composer, clear of the right sidebar. */
     function dockPosition(collapsed) {
       const vp = viewport()
-      const width = collapsed ? PILL_WIDTH : CARD_WIDTH
-      const height = collapsed ? 36 : 220
+      const width = collapsed ? PILL_SIZE : CARD_WIDTH
+      const height = collapsed ? PILL_SIZE : 220
       return {
         x: Math.round(clamp(vp.width - width - rightInset(), 8, Math.max(8, vp.width - width - 8))),
         y: Math.round(clamp(DOCK_TOP, 8, Math.max(8, vp.height - height - 8))),
@@ -1392,8 +1640,8 @@ window.__ModuleLoader__.load({
     /** Clamp one stored position into the current viewport. */
     function clampPoint(point, collapsed) {
       const vp = viewport()
-      const width = collapsed ? PILL_WIDTH : CARD_WIDTH
-      const height = collapsed ? 36 : Math.min(360, Math.max(180, vp.height - COMPOSER_RESERVE - 16))
+      const width = collapsed ? PILL_SIZE : CARD_WIDTH
+      const height = collapsed ? PILL_SIZE : Math.min(360, Math.max(180, vp.height - COMPOSER_RESERVE - 16))
       const maxY = collapsed
         ? Math.max(8, vp.height - height - 8)
         : Math.max(8, vp.height - height - COMPOSER_RESERVE)
@@ -1406,7 +1654,7 @@ window.__ModuleLoader__.load({
     /** Whether the window sits closer to the left edge than to the right one. */
     function nearestEdge(point, collapsed) {
       const vp = viewport()
-      const width = collapsed ? PILL_WIDTH : CARD_WIDTH
+      const width = collapsed ? PILL_SIZE : CARD_WIDTH
       return point.x + width / 2 <= vp.width / 2 ? 'left' : 'right'
     }
 
@@ -1419,7 +1667,7 @@ window.__ModuleLoader__.load({
      */
     function snapToEdge(point, collapsed) {
       const vp = viewport()
-      const width = collapsed ? PILL_WIDTH : CARD_WIDTH
+      const width = collapsed ? PILL_SIZE : CARD_WIDTH
       const edge = nearestEdge(point, collapsed)
       const x = edge === 'left' ? EDGE : vp.width - width - rightInset()
       return clampPoint({ x, y: point.y }, collapsed)
@@ -1433,6 +1681,24 @@ window.__ModuleLoader__.load({
         Number.isFinite(point.x) &&
         Number.isFinite(point.y)
       )
+    }
+
+    /**
+     * A DOMRect-like box as plain numbers, or null when it is not a usable box.
+     * The in-place editor keeps one of these instead of a live DOMRect, so a
+     * re-render never reads geometry off a detached node.
+     */
+    function rectValue(box) {
+      if (box === null || typeof box !== 'object') return null
+      const left = Number(box.left)
+      const top = Number(box.top)
+      const right = Number(box.right)
+      const bottom = Number(box.bottom)
+      const width = Number.isFinite(Number(box.width)) ? Number(box.width) : right - left
+      const height = Number.isFinite(Number(box.height)) ? Number(box.height) : bottom - top
+      const values = [left, top, right, bottom, width, height]
+      if (values.some((value) => Number.isFinite(value) === false)) return null
+      return { left, top, right, bottom, width, height }
     }
 
     // ---------------------------------------------------------------------
@@ -1450,8 +1716,24 @@ window.__ModuleLoader__.load({
     function createRuntime(ctx) {
       const saved = readJson(UI_KEY) ?? {}
       const language = readLang(ctx)
-      const presets = readPresets(language)
       const initialTarget = resolveTarget(ctx)
+      // Every persisted preference comes from the settings table, so the launch
+      // state and a later restore cannot drift apart.
+      const savedSettings = readSettings({ lang: language, sessionId: initialTarget?.sessionId })
+
+      /**
+       * The annotation surface at rest: no draft, nothing stowed, no editor, no
+       * half-typed note. The launch state and every closing transition spread
+       * this instead of listing the fields again, so a field added to the
+       * surface is reset in one place.
+       */
+      const IDLE_ANNOTATION = {
+        annotationDraft: null,
+        annotationCardHidden: false,
+        annotationNote: '',
+        annotationEditingId: null,
+        annotationEditRect: null,
+      }
 
       let state = {
         phase: 'idle',
@@ -1469,10 +1751,13 @@ window.__ModuleLoader__.load({
         // expanding returns it to the same spot. The stored record only says
         // how far down it sat and which side it was on.
         pos: isPoint(saved.pos) ? snapToEdge(saved.pos, true) : dockPosition(true),
-        deliveryOverride: readDeliveryOverride(),
-        turbo: readTurbo(),
-        presets,
-        presetId: readPresetId(presets),
+        /**
+         * Every persisted preference — the three switches, the delivery mode,
+         * the border width, the prompts and the chosen one, the idle lines, the
+         * counters and the collected notes — arrives from the settings table by
+         * field name, so the launch state cannot miss a row.
+         */
+        ...savedSettings,
         /** Ids whose body is expanded in the settings list. */
         presetOpen: [],
         /** The preset opened in the settings editor, or null. */
@@ -1481,32 +1766,16 @@ window.__ModuleLoader__.load({
         pendingQuestion: false,
         /** True while the conversation composer is mounted and holds the caret. */
         composerFocused: false,
-        /** Quick annotation master switch (the title-bar button). */
-        quick: readQuick(),
-        /** Auto-paste switch: pending notes flow into the composer on focus. */
-        autoPaste: readAutoPaste(),
-        /** Border width of the floating window, in px (the settings chips). */
-        frame: readFrame(),
-        /** Idle lines for the status row, and which one is showing. */
-        tips: readTips(language),
+        /** Which idle line is showing; not persisted, so the launch restarts at the first. */
         tipIndex: 0,
-        /** Per-day usage counters for the settings summary. */
-        stats: readStats(),
         /** The idle line opened in its editor, or null. */
         tipEditingIndex: null,
-        /** Collected quote + note blocks waiting to be delivered. */
-        annotations: notesOfSession(initialTarget?.sessionId),
-        /** The selection currently being annotated, or null. */
-        annotationDraft: null,
         /**
-         * True while the card is stowed: a scroll hides it, but the draft (and
-         * its anchor) stays so a following Shift+press can still extend it.
+         * The annotation surface: the selection being annotated, whether its
+         * card is stowed, the note being written, and the collected note opened
+         * in the editor. A card and an editor never coexist.
          */
-        annotationCardHidden: false,
-        /** The note being written for `annotationDraft`. */
-        annotationNote: '',
-        /** The collected annotation being edited, or null. */
-        annotationEditingId: null,
+        ...IDLE_ANNOTATION,
         /** Whether the annotation module shows its body (row summary when false). */
         annotationExpanded: false,
         /** Whether the nudge module (prompts / mode / primary) shows its body. */
@@ -1882,7 +2151,6 @@ window.__ModuleLoader__.load({
       /** A field being edited, a modal, and this window are never quoted. */
       const EDITABLE_SELECTOR = 'input, textarea, select, [contenteditable="true"], [contenteditable=""]'
       const MODAL_SELECTOR = '[role="dialog"][aria-modal="true"], [data-shortcut-modal]'
-      const SELF_SELECTOR = '.dsh-nudge-card, .dsh-nudge-pill, .dsh-nudge-popup'
 
       /** Trim only the trailing whitespace a selection picks up. */
       function tidyQuote(value) {
@@ -1900,6 +2168,48 @@ window.__ModuleLoader__.load({
       /** The annotations still waiting to be written into a message. */
       function pendingAnnotations() {
         return state.annotations.filter((item) => item.written !== true)
+      }
+
+      // --- the annotation lifecycle ---------------------------------------
+      //
+      // Three surfaces share one state: the selection card (a draft), the
+      // in-place editor (one stored note) and the tray (the Session's notes). A
+      // card and an editor never coexist, and every path that ends one of them
+      // returns the same fields to rest — so the resting surface is written
+      // down once here, and a tray change is persisted and repainted in one
+      // step, instead of each transition spelling out its own subset.
+
+      /** One surface change: show it, then repaint the marks it implies. */
+      function settleAnnotation(patch) {
+        setState(patch)
+        repaintHighlights()
+      }
+
+      /** Return the surface to rest; the tray list is left as it is. */
+      function closeAnnotationSurface(extra) {
+        settleAnnotation({ ...IDLE_ANNOTATION, ...(extra ?? {}) })
+        return true
+      }
+
+      /**
+       * Replace the tray: persist it, show it, repaint its marks. A mark belongs
+       * to the conversation rather than to a draft, so the list and its painting
+       * can never drift apart.
+       */
+      function commitAnnotations(next, extra) {
+        persistNotes(next)
+        settleAnnotation({ annotations: next, ...IDLE_ANNOTATION, ...(extra ?? {}) })
+        return next
+      }
+
+      /** Whether one DOM node belongs to this window rather than to the page. */
+      function isSelfNode(node) {
+        if (!node || typeof node.closest !== 'function') return false
+        try {
+          return node.closest(SELF_SELECTOR) !== null
+        } catch {
+          return false
+        }
       }
 
       /** One write or send batch as one message body. */
@@ -2106,7 +2416,8 @@ window.__ModuleLoader__.load({
         } catch {
           anchor = null
         }
-        setState({
+        settleAnnotation({
+          ...IDLE_ANNOTATION,
           annotationDraft: {
             quote: selection.quote,
             anchor,
@@ -2127,13 +2438,9 @@ window.__ModuleLoader__.load({
               : null,
             pointer,
           },
-          annotationNote: '',
-          annotationEditingId: null,
-          annotationCardHidden: false,
           note: '',
           error: '',
         })
-        repaintHighlights()
         return true
       }
 
@@ -2153,26 +2460,13 @@ window.__ModuleLoader__.load({
       /** Quick-annotation master switch. */
       function setQuick(value) {
         const next = value === true
-        try {
-          if (next) storage()?.setItem(QUICK_KEY, '1')
-          else storage()?.removeItem(QUICK_KEY)
-        } catch {
-          /* best effort */
-        }
-        setState({
+        persistSetting('quick', next)
+        settleAnnotation({
           quick: next,
-          ...(next
-            ? { annotationExpanded: true }
-            : {
-                annotationDraft: null,
-                annotationCardHidden: false,
-                annotationEditingId: null,
-                annotationNote: '',
-                annotationExpanded: false,
-              }),
+          // The switch no longer unfolds the tray (its open state belongs to the
+          // user); turning it off still drops whatever the tray was holding.
+          ...(next ? null : { ...IDLE_ANNOTATION, annotationExpanded: false }),
         })
-        if (next) repaintHighlights()
-        else repaintHighlights()
         notify(next ? text('quickOn') : text('quickOff'))
         return true
       }
@@ -2180,12 +2474,7 @@ window.__ModuleLoader__.load({
       /** Auto-paste switch: when on, pending notes flow into the composer on focus. */
       function setAutoPaste(value) {
         const next = value === true
-        try {
-          if (next) storage()?.setItem(AUTOPASTE_KEY, '1')
-          else storage()?.removeItem(AUTOPASTE_KEY)
-        } catch {
-          /* best effort */
-        }
+        persistSetting('autoPaste', next)
         setState({ autoPaste: next })
         notify(next ? text('autoPasteOn') : text('autoPasteOff'))
         return true
@@ -2221,12 +2510,7 @@ window.__ModuleLoader__.load({
       function setFrame(value) {
         const width = Number(value)
         if (!isFrameWidth(width)) return false
-        try {
-          if (width === DEFAULT_FRAME) storage()?.removeItem(FRAME_KEY)
-          else storage()?.setItem(FRAME_KEY, String(width))
-        } catch {
-          /* best effort */
-        }
+        persistSetting('frame', width)
         setState({ frame: width })
         notify(`${text('frameTitle')}：${text(frameLabelKey(width))}`)
         return true
@@ -2288,23 +2572,10 @@ window.__ModuleLoader__.load({
           anchor,
         }
         const next = [...state.annotations, annotation]
-        persistNotes(next)
         clearNativeSelection(draft.quote)
-        // Keep the compose box in place for the next passage; only the text
-        // clears. Window size stays stable while annotating several passages.
-        setState({
-          annotations: next,
-          annotationDraft: null,
-          annotationCardHidden: false,
-          annotationNote: '',
-          annotationEditingId: null,
-          note: '',
-          error: '',
-          // A note just landed: open the tray so the count and the actions are
-          // visible without a second click (the compose box stays expanded).
-          annotationExpanded: true,
-        })
-        repaintHighlights()
+        // Only the text clears. A note landing never opens or resizes the tray:
+        // the window keeps its shape while several passages are annotated.
+        commitAnnotations(next, { note: '', error: '' })
         countStat('annotation')
         return true
       }
@@ -2321,25 +2592,34 @@ window.__ModuleLoader__.load({
 
       /** Drop the pending annotation draft without adding it. */
       function dismissAnnotationDraft() {
-        setState({ annotationDraft: null, annotationCardHidden: false, annotationNote: '' })
-        repaintHighlights()
+        return closeAnnotationSurface()
       }
 
-      /** Open one collected annotation for editing. */
-      function startEditAnnotation(id) {
+      /**
+       * Open one collected annotation in the in-place bubble.
+       *
+       * `rect` is the viewport box the bubble hangs off: the clicked passage,
+       * or the tray row that was clicked. The window itself is left alone —
+       * editing a mark must never resize or unfold it.
+       */
+      function startEditAnnotation(id, rect = null) {
         const item = state.annotations.find((candidate) => candidate.id === id)
         if (item === undefined) return false
-        setState({
+        const box = rectValue(rect)
+        if (state.annotationEditingId === id) {
+          // Clicking the same mark again only moves the bubble: whatever is
+          // already typed stays in the field.
+          settleAnnotation({ annotationEditRect: box })
+          return true
+        }
+        settleAnnotation({
+          ...IDLE_ANNOTATION,
           annotationEditingId: id,
+          annotationEditRect: box,
           annotationNote: typeof item.note === 'string' ? item.note : '',
-          annotationDraft: null,
-          annotationCardHidden: false,
-          annotationExpanded: true,
-          nudgeExpanded: false,
           note: '',
           error: '',
         })
-        repaintHighlights()
         pulse()
         return true
       }
@@ -2351,28 +2631,24 @@ window.__ModuleLoader__.load({
         const next = state.annotations.map((item) =>
           item.id === state.annotationEditingId ? { ...item, note } : item,
         )
-        persistNotes(next)
-        setState({ annotations: next, annotationEditingId: null, annotationNote: '', note: '', error: '' })
-        repaintHighlights()
+        commitAnnotations(next, { note: '', error: '' })
         return true
       }
 
       /** Leave the edit without saving. */
       function cancelAnnotationEdit() {
-        setState({ annotationEditingId: null, annotationNote: '' })
+        return closeAnnotationSurface()
       }
 
       /** Remove one collected annotation (also used from the edit body). */
       function removeAnnotation(id) {
         const next = state.annotations.filter((item) => item.id !== id)
         if (next.length === state.annotations.length) return false
+        // Removing the note under the editor closes it; removing any other note
+        // leaves the editor and whatever was typed in it alone.
         persistNotes(next)
-        setState({
-          annotations: next,
-          annotationEditingId: state.annotationEditingId === id ? null : state.annotationEditingId,
-          annotationNote: state.annotationEditingId === id ? '' : state.annotationNote,
-        })
-        repaintHighlights()
+        if (state.annotationEditingId === id) closeAnnotationSurface({ annotations: next })
+        else settleAnnotation({ annotations: next })
         return true
       }
 
@@ -2548,7 +2824,10 @@ window.__ModuleLoader__.load({
         }, 120)
       }
 
-      /** The annotated passage under a viewport point, or null. */
+      /**
+       * The annotated passage under a viewport point and the box the point hit,
+       * or null. The box is what the in-place editor hangs off.
+       */
       function noteAtPoint(x, y) {
         for (let index = highlighted.length - 1; index >= 0; index -= 1) {
           const entry = highlighted[index]
@@ -2561,7 +2840,7 @@ window.__ModuleLoader__.load({
           for (const rect of rects) {
             if (rect.width === 0 && rect.height === 0) continue
             if (x >= rect.left - 2 && x <= rect.right + 2 && y >= rect.top - 2 && y <= rect.bottom + 2) {
-              return entry.note
+              return { note: entry.note, rect: rectValue(rect) }
             }
           }
         }
@@ -2586,9 +2865,9 @@ window.__ModuleLoader__.load({
         } catch {
           /* no selection object */
         }
-        const note = noteAtPoint(event.clientX, event.clientY)
-        if (note === null) return
-        startEditAnnotation(note.id)
+        const hit = noteAtPoint(event.clientX, event.clientY)
+        if (hit === null) return
+        startEditAnnotation(hit.note.id, hit.rect)
       }
 
       /**
@@ -2628,13 +2907,6 @@ window.__ModuleLoader__.load({
         const vh = viewport().height
         const boxWidth = Math.min(width, vw - margin * 2)
         const rect = draft?.rect ?? null
-        // A stored quote box may lack width (an older draft); NaN here would
-        // invalidate `left` and leave the card at the overlay's origin.
-        const rectWidth = rect
-          ? Number.isFinite(rect.width)
-            ? rect.width
-            : rect.right - rect.left
-          : 0
         const pointer = pointerNearRect(draft?.pointer, rect) ? draft.pointer : null
         const clampX = (value) => Math.max(margin, Math.min(value, vw - boxWidth - margin))
         if (pointer) {
@@ -2653,6 +2925,22 @@ window.__ModuleLoader__.load({
             transform: 'translateY(-100%)',
           }
         }
+        return placeOverRect(rect, approxHeight)
+      }
+
+      /**
+       * Place a 340-wide card over one viewport box: centred on it, above when
+       * there is room, otherwise below and clamped into the viewport. Without a
+       * box it parks in the top-right corner.
+       */
+      function placeOverRect(rect, approxHeight) {
+        const width = 340
+        const margin = 8
+        const gap = 10
+        const vw = viewport().width
+        const vh = viewport().height
+        const boxWidth = Math.min(width, vw - margin * 2)
+        const clampX = (value) => Math.max(margin, Math.min(value, vw - boxWidth - margin))
         if (!rect) {
           return {
             left: `${Math.max(margin, vw - boxWidth - margin)}px`,
@@ -2660,6 +2948,9 @@ window.__ModuleLoader__.load({
             transform: 'none',
           }
         }
+        // A stored quote box may lack width (an older draft); NaN here would
+        // invalidate `left` and leave the card at the overlay's origin.
+        const rectWidth = Number.isFinite(rect.width) ? rect.width : rect.right - rect.left
         const left = clampX(rect.left + rectWidth / 2 - boxWidth / 2)
         if (rect.top - gap - approxHeight >= margin) {
           return {
@@ -2671,6 +2962,11 @@ window.__ModuleLoader__.load({
         const below = rect.bottom + gap
         const top = Math.min(below, Math.max(margin, vh - approxHeight - margin))
         return { left: `${Math.round(left)}px`, top: `${Math.round(top)}px`, transform: 'none' }
+      }
+
+      /** Where the in-place note editor hangs: over the box that opened it. */
+      function editPopupPosition() {
+        return placeOverRect(state.annotationEditRect, 220)
       }
 
       /**
@@ -2688,14 +2984,7 @@ window.__ModuleLoader__.load({
             /* nothing focused */
           }
         }
-        setState({
-          annotationDraft: null,
-          annotationNote: '',
-          annotationEditingId: null,
-          annotationCardHidden: false,
-        })
-        repaintHighlights()
-        return true
+        return closeAnnotationSurface()
       }
 
       /**
@@ -2804,7 +3093,8 @@ window.__ModuleLoader__.load({
         } catch {
           anchor = null
         }
-        setState({
+        // Only the draft changes: the note already typed and the editor stay.
+        settleAnnotation({
           annotationDraft: {
             quote,
             anchor,
@@ -2826,7 +3116,6 @@ window.__ModuleLoader__.load({
           },
           annotationCardHidden: false,
         })
-        repaintHighlights()
         return true
       }
 
@@ -2914,6 +3203,11 @@ window.__ModuleLoader__.load({
           closePopup()
           return
         }
+        if (event?.key === 'Escape' && state.annotationEditingId !== null) {
+          event.preventDefault()
+          cancelAnnotationEdit()
+          return
+        }
         if (!copyShortcutActive(event)) return
         if (fieldHasSelection()) return
         // Focusing the note field drops the editor's native selection, so the
@@ -2976,18 +3270,7 @@ window.__ModuleLoader__.load({
         const marked = state.annotations.map((item) =>
           ids.has(item.id) ? { ...item, written: true } : item,
         )
-        persistNotes(marked)
-        setState({
-          annotations: marked,
-          annotationDraft: null,
-          annotationCardHidden: false,
-          annotationNote: '',
-          annotationEditingId: null,
-          annotationExpanded: true,
-          note: '',
-          error: '',
-        })
-        repaintHighlights()
+        commitAnnotations(marked, { note: '', error: '' })
         return true
       }
 
@@ -3003,16 +3286,7 @@ window.__ModuleLoader__.load({
         // written into the draft keep their marks.
         const ids = new Set(pending.map((item) => item.id))
         const next = state.annotations.filter((item) => !ids.has(item.id))
-        persistNotes(next)
-        setState({
-          annotations: next,
-          annotationDraft: null,
-          annotationCardHidden: false,
-          annotationNote: '',
-          annotationEditingId: null,
-          annotationExpanded: next.length > 0,
-        })
-        repaintHighlights()
+        commitAnnotations(next)
         return true
       }
 
@@ -3172,11 +3446,7 @@ window.__ModuleLoader__.load({
       /** Switch the delivery mode for this browser and remember it. */
       function setDelivery(value) {
         if (!isDelivery(value)) return false
-        try {
-          storage()?.setItem(DELIVERY_KEY, value)
-        } catch {
-          /* best effort */
-        }
+        persistSetting('delivery', value)
         setState({ deliveryOverride: value })
         notify(`${text('mode')}：${value === 'steer' ? text('steer') : text('queue')}`)
         return true
@@ -3191,12 +3461,7 @@ window.__ModuleLoader__.load({
       /** Turbo mode: hide the primary button and run a prompt on double-click. */
       function setTurbo(value) {
         const next = value === true
-        try {
-          if (next) storage()?.setItem(TURBO_KEY, '1')
-          else storage()?.removeItem(TURBO_KEY)
-        } catch {
-          /* best effort */
-        }
+        persistSetting('turbo', next)
         setState({ turbo: next })
         notify(`${text('turboTitle')}：${next ? text('switchOn') : text('switchOff')}`)
         return true
@@ -3205,11 +3470,7 @@ window.__ModuleLoader__.load({
       /** Switch the probe preset for this browser and remember it. */
       function setPreset(value) {
         if (presetOf(state.presets, value) === undefined) return false
-        try {
-          storage()?.setItem(PRESET_KEY, value)
-        } catch {
-          /* best effort */
-        }
+        persistSetting('preset', value)
         setState({ presetId: value })
         return true
       }
@@ -3217,17 +3478,13 @@ window.__ModuleLoader__.load({
       /** Store one preset list, keeping the selection on an enabled preset. */
       function commitPresets(next, preferredId) {
         const list = normalizePresetList(next, state.lang)
-        writePresets(list)
+        persistSetting('presets', list)
         let presetId = preferredId ?? state.presetId
         const chosen = presetOf(list, presetId)
         if (chosen === undefined || chosen.enabled === false) {
           presetId = list.find((preset) => preset.enabled !== false)?.id ?? list[0]?.id ?? DEFAULT_PRESET
         }
-        try {
-          storage()?.setItem(PRESET_KEY, presetId)
-        } catch {
-          /* best effort */
-        }
+        persistSetting('preset', presetId)
         setState({ presets: list, presetId })
       }
 
@@ -3471,23 +3728,18 @@ window.__ModuleLoader__.load({
 
       /** Restore the built-in presets (and forget the settings storage). */
       function resetPresets() {
-        try {
-          storage()?.removeItem(PRESETS_KEY)
-        } catch {
-          /* best effort */
-        }
+        clearSetting('presets')
         commitPresets(builtinPresets(state.lang), DEFAULT_PRESET)
         setState({ presetOpen: [], presetEditingId: null })
       }
 
       // --- idle lines ------------------------------------------------------
 
-      /** Commit one idle-line list: storage, state, Host mirror, back to the first line. */
+      /** Commit one idle-line list: storage, state, back to the first line. */
       function commitTips(list) {
         const next = normalizeTipList(list, state.lang)
-        writeTips(next)
+        persistSetting('tips', next)
         setState({ tips: next, tipIndex: 0 })
-        scheduleStoreSync()
         return next
       }
 
@@ -3605,13 +3857,8 @@ window.__ModuleLoader__.load({
 
       /** Restore the built-in idle lines. */
       function resetTips() {
-        try {
-          storage()?.removeItem(TIPS_KEY)
-        } catch {
-          /* best effort */
-        }
+        clearSetting('tips')
         setState({ tips: builtinTips(state.lang), tipIndex: 0 })
-        scheduleStoreSync()
       }
 
       /** Show the next idle line; the status row calls this on a timer. */
@@ -3651,58 +3898,59 @@ window.__ModuleLoader__.load({
       function saveUi() {
         // Keep keys this build does not own (an older record may carry more).
         writeJson(UI_KEY, { ...(readJson(UI_KEY) ?? {}), collapsed: state.collapsed, pos: state.pos })
-        // Geometry is a setting like the others: without the mirror, a restart
-        // on a fresh loopback port has no spot to come back to.
-        scheduleStoreSync()
       }
 
       // --- durable settings (Host half) -----------------------------------
 
       /**
-       * Adopt the Host half's durable record when this origin has no settings
-       * of its own — the state a restart on a fresh loopback port starts from.
-       * When the page does have settings they are the fresher copy (the user
-       * just changed them), so the Host record is refreshed from them instead
-       * of overwriting them.
+       * Read the Host half's durable record once per launch — and only then let
+       * the mirror write. The two are ordered here and nowhere else: a POST
+       * replaces the whole file, so writing before the read would erase the
+       * very settings a restart is supposed to come back from.
        * @returns true when a restored record changed the state.
        */
       function hydrateFromHost() {
-        return loadStoreFromHost().then((remote) => {
-          const local = settingsSnapshot()
-          if (
-            remote !== null &&
-            remote !== undefined &&
-            typeof remote === 'object' &&
-            !hasStoredSettings(local)
-          ) {
-            if (!applySettingsStore(remote)) return false
-            reloadFromStorage()
-            return true
-          }
-          if (hasStoredSettings(local)) scheduleStoreSync()
-          return false
-        })
+        return loadStoreFromHost()
+          .then((remote) => {
+            const adopted = adoptRemoteRecord(remote)
+            markSettingsRead()
+            return adopted
+          })
+          .catch(() => {
+            // No Host half (preview page, plain harness): the page is the copy.
+            markSettingsRead()
+            return false
+          })
       }
 
-      /** Re-derive every persisted preference from the storage record. */
+      /**
+       * Adopt the fields of a record the page does not hold — per field, so a
+       * page that already wrote its own geometry still gets the presets, and a
+       * page that holds everything keeps its own copy (the user just changed
+       * it) while the mirror refreshes the record from it.
+       */
+      function adoptRemoteRecord(remote) {
+        if (remote === null || remote === undefined || typeof remote !== 'object') return false
+        const pageHeldSomething = hasStoredSettings(settingsSnapshot())
+        const adopted = adoptFromHost(() => applySettingsStore(remote, { merge: true }))
+        if (!adopted) return false
+        reloadFromStorage()
+        // A page that held nothing is now exactly the record. A page that held
+        // some fields holds the union, so the record is brought up to date.
+        if (pageHeldSomething) markSettingsDirty()
+        else markSettingsSynced()
+        return true
+      }
+
+      /** Re-derive every persisted preference from the page storage. */
       function reloadFromStorage() {
-        const presets = readPresets(state.lang)
         const saved = readJson(UI_KEY) ?? {}
         // The tray comes back from storage; the marks a write left behind in a
         // draft do not, because the draft they pointed at may be gone too.
         resolvedAnchors.clear()
         setState({
-          presets,
-          presetId: readPresetId(presets),
-          deliveryOverride: readDeliveryOverride(),
-          turbo: readTurbo(),
-          quick: readQuick(),
-          autoPaste: readAutoPaste(),
-          frame: readFrame(),
-          tips: readTips(state.lang),
+          ...readSettings({ lang: state.lang, sessionId: state.target?.sessionId }),
           tipIndex: 0,
-          stats: readStats(),
-          annotations: notesOfSession(state.target?.sessionId),
           // The restore follows the same launch rule as the first paint.
           collapsed: true,
           pos: isPoint(saved.pos) ? snapToEdge(saved.pos, true) : dockPosition(true),
@@ -3735,7 +3983,7 @@ window.__ModuleLoader__.load({
         }
         days[key] = today
         const next = normalizeStats({ days })
-        writeStats(next)
+        persistSetting('stats', next)
         setState({ stats: next })
         return true
       }
@@ -3908,22 +4156,18 @@ window.__ModuleLoader__.load({
           if (waiting !== null) endWaiting()
           // The tray belongs to the conversation it quotes: load that Session's
           // saved notes and drop any half-written one.
-          setState({
+          settleAnnotation({
             target,
             pendingQuestion,
             note: '',
             error: '',
             phase: 'idle',
             annotations: notesOfSession(targetId),
-            annotationDraft: null,
-            annotationCardHidden: false,
-            annotationNote: '',
-            annotationEditingId: null,
+            ...IDLE_ANNOTATION,
             annotationExpanded: false,
             nudgeExpanded: true,
             attentionAt: 0,
           })
-          repaintHighlights()
           return
         }
         setState({ target, pendingQuestion })
@@ -3999,7 +4243,7 @@ window.__ModuleLoader__.load({
 
       /** Release every subscription and in-flight request. */
       function dispose() {
-        cancelStoreSync()
+        flushSettingsMirror()
         cancelPendingCapture()
         pointerHeld = false
         endWaiting()
@@ -4101,7 +4345,10 @@ window.__ModuleLoader__.load({
         detachComposer,
         /** Annotation tray. */
         captureSelection,
+        /** The notes still waiting to be written into a message. */
+        pendingAnnotations,
         popupPosition,
+        editPopupPosition,
         setQuick,
         setAutoPaste,
         setFrame,
@@ -4118,6 +4365,8 @@ window.__ModuleLoader__.load({
         setAnnotationExpanded,
         setNudgeExpanded,
         setAnnotationNote,
+        /** Whether one DOM node belongs to this window's own chrome. */
+        isSelfNode,
         showTip,
         hideTip,
         addAnnotation,
@@ -4213,8 +4462,6 @@ window.__ModuleLoader__.load({
 .dsh-nudge-ask:active{transform:translateY(1px)}
 .dsh-nudge-ask:disabled{opacity:.55;cursor:default;box-shadow:none;filter:none}
 .dsh-nudge-ask:focus-visible{outline:2px solid var(--dn-accent-line);outline-offset:2px}
-.dsh-nudge-annotation-compose{display:flex;flex-direction:column;gap:8px;padding:10px;border-radius:12px;border:1px solid var(--dn-accent-line);background:var(--dn-accent-soft)}
-.dsh-nudge-annotation-compose .dsh-nudge-annotation-quote{min-height:34px;-webkit-line-clamp:2}
 .dsh-nudge-annotation-quote{font-size:11.5px;line-height:1.5;color:var(--dsw-alias-label-secondary,#5a5a66);white-space:pre-wrap;word-break:break-word;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
 .dsh-nudge-annotation-hint{font-size:11px;line-height:1.5;color:var(--dsw-alias-label-secondary,#5a5a66)}
 .dsh-nudge-popup{position:fixed;z-index:${Z_INDEX + 1};box-sizing:border-box;width:340px;max-width:calc(100vw - 16px);display:flex;flex-direction:column;gap:8px;padding:10px;border-radius:12px;border:1px solid var(--dn-line);background:var(--dsw-alias-bg-layer-1,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);box-shadow:0 10px 30px rgba(0,0,0,.16),0 2px 8px rgba(0,0,0,.08);font:13px/1.45 ui-sans-serif,system-ui,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;pointer-events:auto;opacity:.72;transition:opacity .22s ease;animation:dsh-nudge-popup-in .18s ease-out}
@@ -4243,13 +4490,26 @@ window.__ModuleLoader__.load({
 .dsh-nudge-popup-copy[data-copied="true"]{border-color:var(--dn-accent-line);background:var(--dn-accent-soft)}
 .dsh-nudge-popup-hint{display:flex;justify-content:space-between;gap:8px;font-size:11px;line-height:1.5;color:var(--dsw-alias-label-secondary,#5a5a66)}
 .dsh-nudge-popup-hint kbd{font:inherit;padding:0 3px;border:1px solid var(--dn-line);border-radius:4px;background:color-mix(in srgb,var(--dsw-alias-label-primary,#1a1a1a) 4%,transparent)}
+/* The in-place note editor: the capture card's shape, hung off the passage.
+   It sits fully opaque because it holds a field the user types into, and its
+   field starts two lines tall so a stored note is readable at a glance. */
+.dsh-nudge-edit-popup{opacity:1;animation:none}
+.dsh-nudge-edit-quote{max-height:34px;-webkit-line-clamp:2;min-height:0}
+.dsh-nudge-edit-popup .dsh-nudge-annotation-input{min-height:56px;resize:none}
+.dsh-nudge-popup-row .dsh-nudge-edit-delete{margin-right:auto;border-color:transparent;background:transparent;color:var(--dsw-alias-state-error-primary,#c8433c)}
+.dsh-nudge-popup-row .dsh-nudge-edit-delete:hover{background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#c8433c) 10%,transparent)}
 .dsh-nudge-annotation-input{width:100%;box-sizing:border-box;min-height:34px;field-sizing:content;max-height:132px;overflow-y:auto;border:1px solid var(--dn-line);border-radius:8px;background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);font:inherit;font-size:13px;line-height:20px;padding:7px 10px}
 .dsh-nudge-annotation-input:disabled{opacity:.6;cursor:not-allowed}
 .dsh-nudge-btn:disabled{opacity:.45;cursor:default}
 .dsh-nudge-annotation-input:focus{outline:none;border-color:var(--dn-accent-line);box-shadow:0 0 0 3px var(--dn-accent-soft)}
 .dsh-nudge-annotation-actions{display:flex;justify-content:flex-end;gap:8px}
 .dsh-nudge-annotations-count{min-width:16px;height:16px;padding:0 5px;border-radius:999px;background:var(--dn-accent-soft);color:var(--dn-accent);font-size:10px;line-height:16px;text-align:center}
-.dsh-nudge-annotation-list{display:flex;flex-direction:column;gap:6px;max-height:180px;overflow-y:auto}
+/* One fixed-height tray: rows scroll inside it, so adding a note never grows
+   the floating window. The guide line and the action row keep their own rows. */
+.dsh-nudge-annotation-tray{display:flex;flex-direction:column;gap:8px;height:216px}
+.dsh-nudge-annotation-list{flex:1 1 auto;min-height:0;display:flex;flex-direction:column;gap:6px;overflow-y:auto;scrollbar-gutter:stable}
+.dsh-nudge-annotation-empty{display:flex;align-items:center;justify-content:center;box-sizing:border-box;height:100%;padding:0 10px;border:1px dashed var(--dn-line);border-radius:12px;color:var(--dsw-alias-label-secondary,#8a8a8a);text-align:center}
+.dsh-nudge-annotation-guide{flex:0 0 auto;min-height:16px;max-height:33px;overflow:hidden}
 .dsh-nudge-annotation-item{display:flex;flex-direction:column;gap:3px;padding:7px 8px;border-radius:9px;background:color-mix(in srgb,var(--dsw-alias-label-primary,#1a1a1a) 5%,transparent)}
 .dsh-nudge-annotation-item-head{display:flex;align-items:flex-start;gap:6px}
 .dsh-nudge-annotation-item-head .dsh-nudge-annotation-quote{flex:1 1 auto;min-width:0;-webkit-line-clamp:2}
@@ -4284,11 +4544,11 @@ window.__ModuleLoader__.load({
    focusing the note field collapses the real selection before it can be kept.
    --dsh-nudge-capture-bg / -fg stay overridable for other platforms/themes. */
 ::highlight(dsh-nudge-capture){background:var(--dsh-nudge-capture-bg,#3367d1);color:var(--dsh-nudge-capture-fg,#fff)}
-.dsh-nudge-pill{position:fixed;z-index:${Z_INDEX};display:inline-flex;align-items:center;gap:8px;height:34px;padding:0 14px;border-radius:999px;border:var(--dn-frame) solid var(--dn-accent-edge);background:var(--dsw-alias-bg-layer-1,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);box-shadow:0 1px 2px rgba(15,23,42,.04),0 10px 26px -14px rgba(15,23,42,.3);font:600 12px/1 ui-sans-serif,system-ui,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;cursor:grab;pointer-events:auto;touch-action:none;user-select:none;transition:transform .15s ease,box-shadow .15s ease;animation:dsh-nudge-in .18s ease-out}
+.dsh-nudge-pill{position:fixed;z-index:${Z_INDEX};display:inline-flex;align-items:center;justify-content:center;width:36px;height:36px;padding:0;border-radius:50%;border:var(--dn-frame) solid var(--dn-accent-edge);background:var(--dsw-alias-bg-layer-1,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);box-shadow:0 1px 2px rgba(15,23,42,.04),0 10px 26px -14px rgba(15,23,42,.3);font:600 12px/1 ui-sans-serif,system-ui,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;cursor:grab;pointer-events:auto;touch-action:none;user-select:none;transition:transform .15s ease,box-shadow .15s ease;animation:dsh-nudge-in .18s ease-out}
 .dsh-nudge-pill:active{cursor:grabbing}
 .dsh-nudge-pill:hover{transform:translateY(-1px);box-shadow:0 1px 2px rgba(15,23,42,.04),0 14px 30px -14px rgba(15,23,42,.35)}
 .dsh-nudge-pill:focus-visible{outline:2px solid var(--dn-accent-line);outline-offset:2px}
-.dsh-nudge-unread{width:6px;height:6px;border-radius:50%;background:var(--dn-accent);flex:0 0 auto;box-shadow:0 0 0 3px var(--dn-accent-soft)}
+.dsh-nudge-unread{position:absolute;top:5px;right:5px;width:6px;height:6px;border-radius:50%;background:var(--dn-accent);box-shadow:0 0 0 3px var(--dn-accent-soft)}
 .dsh-nudge-settings{display:flex;flex-direction:column;gap:14px;font:inherit;color:var(--dsw-alias-label-primary,#1a1a1a)}
 /* The shell Settings panel caps the body at 800px and scrolls it. While this
    section is mounted, let the panel grow with the section instead (never
@@ -4482,23 +4742,11 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
         const suppressPillClick = React.useRef(false)
         /** A drag that moved must not also collapse the window from its title. */
         const suppressTitleClick = React.useRef(false)
-        const noteInputRef = React.useRef(null)
         const popupInputRef = React.useRef(null)
+        /** The in-place note editor's field, and the tray list it may scroll. */
+        const editInputRef = React.useRef(null)
+        const noteListRef = React.useRef(null)
         const quickAddInputRef = React.useRef(null)
-        // Only the repository edit box takes the caret here. The selection card
-        // focuses its own note field in the effect below, then restores the
-        // native selection so the passage can still be extended.
-        React.useEffect(() => {
-          if (state.annotationEditingId === null) return
-          const node = noteInputRef.current
-          if (node && typeof node.focus === 'function') {
-            try {
-              node.focus()
-            } catch {
-              /* unfocusable */
-            }
-          }
-        }, [state.annotationEditingId])
         // The selection card is a writing box: opening it puts the caret straight
         // into the note field so the user can type without clicking first.
         //
@@ -4527,11 +4775,34 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
           const frame = window.requestAnimationFrame(() => {
             const active = document.activeElement
             if (active === node) return
-            if (active && typeof active.closest === 'function' && active.closest(SELF_SELECTOR)) return
+            if (runtime.isSelfNode(active)) return
             focus()
           })
           return () => window.cancelAnimationFrame(frame)
         }, [state.annotationDraft, state.annotationCardHidden])
+        // The in-place editor is a writing box too: opening it puts the caret at
+        // the end of the stored note, so typing appends instead of replacing.
+        useLayoutFocus(() => {
+          if (state.annotationEditingId === null) return
+          const node = editInputRef.current
+          if (!node || typeof node.focus !== 'function') return
+          try {
+            node.focus({ preventScroll: true })
+            if (typeof node.setSelectionRange === 'function') {
+              const end = typeof node.value === 'string' ? node.value.length : 0
+              node.setSelectionRange(end, end)
+            }
+          } catch {
+            /* unfocusable */
+          }
+        }, [state.annotationEditingId])
+        // The tray keeps one height, so a note landing in a scrolled list must
+        // bring the list to its bottom: that is the only movement allowed.
+        React.useEffect(() => {
+          const node = noteListRef.current
+          if (!node || typeof node.scrollTo !== 'function') return
+          node.scrollTo({ top: node.scrollHeight })
+        }, [state.annotations.length])
         // Opening the in-window prompt form puts the caret in the title field.
         React.useEffect(() => {
           if (state.nudgeDraftOpen !== true) return
@@ -4689,6 +4960,98 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
                 ),
               )
             : null
+        /** The note the in-place editor is about, or null. */
+        const editingItem =
+          state.annotationEditingId === null
+            ? null
+            : (state.annotations.find((item) => item.id === state.annotationEditingId) ?? null)
+        /**
+         * The in-place editor for one collected note: the same card as the
+         * capture bubble, hung off the passage (or tray row) that was clicked.
+         * It owns the edit, so the window never has to unfold or grow for it.
+         */
+        const editPopup =
+          state.annotationDraft === null && editingItem !== null
+            ? h(
+                'div',
+                {
+                  key: 'edit-popup',
+                  className: 'dsh-nudge-popup dsh-nudge-edit-popup',
+                  style: runtime.editPopupPosition(),
+                  role: 'dialog',
+                  'aria-label': t('annotationsTitle'),
+                },
+                h(
+                  'button',
+                  {
+                    key: 'close',
+                    type: 'button',
+                    className: 'dsh-nudge-popup-close',
+                    title: `${t('dismissAnnotation')} (Esc)`,
+                    'aria-label': t('dismissAnnotation'),
+                    onClick: () => runtime.cancelAnnotationEdit(),
+                  },
+                  '×',
+                ),
+                h(
+                  'div',
+                  { key: 'quote', className: 'dsh-nudge-annotation-quote dsh-nudge-edit-quote' },
+                  editingItem.quote,
+                ),
+                h('textarea', {
+                  key: 'note',
+                  ref: editInputRef,
+                  rows: 2,
+                  className: 'dsh-nudge-annotation-input dsh-nudge-edit-input',
+                  value: state.annotationNote,
+                  placeholder: t('annotationPlaceholder'),
+                  'aria-label': t('annotationPlaceholder'),
+                  onChange: (event) => runtime.setAnnotationNote(event.target.value),
+                  onKeyDown: (event) => {
+                    if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+                      event.preventDefault()
+                      runtime.saveEditedAnnotation()
+                    } else if (event.key === 'Escape') {
+                      event.preventDefault()
+                      runtime.cancelAnnotationEdit()
+                    }
+                  },
+                }),
+                h(
+                  'div',
+                  { key: 'actions', className: 'dsh-nudge-popup-row' },
+                  h(
+                    'button',
+                    {
+                      type: 'button',
+                      className: 'dsh-nudge-edit-delete',
+                      onClick: () => runtime.removeAnnotation(editingItem.id),
+                    },
+                    t('deleteAnnotation'),
+                  ),
+                  h(
+                    'button',
+                    { type: 'button', onClick: () => runtime.cancelAnnotationEdit() },
+                    t('dismissAnnotation'),
+                  ),
+                  h(
+                    'button',
+                    {
+                      type: 'button',
+                      className: 'dsh-nudge-popup-save',
+                      title: `${t('saveAnnotation')} (Enter)`,
+                      onClick: () => runtime.saveEditedAnnotation(),
+                    },
+                    t('saveAnnotation'),
+                  ),
+                ),
+                h(
+                  'div',
+                  { key: 'hint', className: 'dsh-nudge-popup-hint' },
+                  h('span', null, t('editNoteHint')),
+                ),
+              )
+            : null
 
         const dotClass =
           state.phase === 'waiting' ? 'waiting' : state.phase === 'error' ? 'error' : state.phase === 'done' ? 'done' : ''
@@ -4696,6 +5059,8 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
         const turbo = state.turbo === true
         /** Disabled prompts stay in settings but leave the window row. */
         const livePresets = state.presets.filter((preset) => preset.enabled !== false)
+        /** Notes still waiting to be written into the draft. */
+        const pendingNotes = runtime.pendingAnnotations().length
         const attention = state.attentionAt > 0
         const statusLabel =
           state.phase === 'waiting'
@@ -4877,10 +5242,10 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
                 onPointerCancel: onPillPointerUp,
               },
               markIcon,
-              h('span', null, t('title')),
               state.unread ? h('span', { className: 'dsh-nudge-unread', title: t('newResult') }) : null,
             ),
             popup,
+            editPopup,
           )
         }
 
@@ -5198,124 +5563,106 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
                 ? h(
                     'div',
                     { className: 'dsh-nudge-module-body' },
-                    state.annotationEditingId !== null
-                      ? h(
-                          'div',
-                          { key: 'annotation-compose', className: 'dsh-nudge-annotation-compose' },
-                          h(
-                            'div',
-                            { className: 'dsh-nudge-annotation-quote' },
-                            state.annotations.find((item) => item.id === state.annotationEditingId)?.quote ?? '',
-                          ),
-                          h('textarea', {
-                            className: 'dsh-nudge-annotation-input',
-                            ref: noteInputRef,
-                            value: state.annotationNote,
-                            placeholder: t('annotationPlaceholder'),
-                            'aria-label': t('annotationPlaceholder'),
-                            onChange: (event) => runtime.setAnnotationNote(event.target.value),
-                            onKeyDown: (event) => {
-                              if (event.key === 'Enter' && !event.shiftKey) {
-                                event.preventDefault()
-                                runtime.saveEditedAnnotation()
-                              } else if (event.key === 'Escape') {
-                                event.preventDefault()
-                                runtime.cancelAnnotationEdit()
-                              }
-                            },
-                          }),
-                          h(
-                            'div',
-                            { className: 'dsh-nudge-annotation-actions' },
-                            h(
-                              'button',
-                              {
-                                type: 'button',
-                                className: 'dsh-nudge-btn danger',
-                                onClick: () => runtime.removeAnnotation(state.annotationEditingId),
-                              },
-                              t('deleteAnnotation'),
-                            ),
-                            h(
-                              'button',
-                              { type: 'button', className: 'dsh-nudge-btn', onClick: () => runtime.cancelAnnotationEdit() },
-                              t('dismissAnnotation'),
-                            ),
-                            h(
-                              'button',
-                              {
-                                type: 'button',
-                                className: 'dsh-nudge-btn primary',
-                                onClick: () => runtime.saveEditedAnnotation(),
-                              },
-                              t('saveAnnotation'),
-                            ),
-                          ),
-                        )
-                      : state.annotations.length === 0
-                        ? h(
-                            'div',
-                            { key: 'annotation-empty', className: 'dsh-nudge-annotation-hint' },
-                            state.quick ? t('annotationsHint') : t('annotationsOffHint'),
-                          )
-                        : null,
-                    state.annotations.length > 0
-                      ? h(
-                          'div',
-                          { key: 'annotation-list', className: 'dsh-nudge-annotation-list' },
-                          ...state.annotations.map((item) =>
-                            h(
-                              'div',
-                              { key: item.id, className: 'dsh-nudge-annotation-item' },
+                    // One fixed-height tray. Rows scroll inside the list, and the
+                    // guide line and the actions keep their rows, so a note
+                    // landing never changes the window's own size.
+                    h(
+                      'div',
+                      { key: 'annotation-tray', className: 'dsh-nudge-annotation-tray' },
+                      h(
+                        'div',
+                        { key: 'annotation-list', className: 'dsh-nudge-annotation-list', ref: noteListRef },
+                        ...(state.annotations.length === 0
+                          ? [
                               h(
                                 'div',
-                                { className: 'dsh-nudge-annotation-item-head' },
+                                {
+                                  key: 'annotation-empty',
+                                  className: 'dsh-nudge-annotation-hint dsh-nudge-annotation-empty',
+                                },
+                                state.quick ? t('annotationsHint') : t('annotationsOffHint'),
+                              ),
+                            ]
+                          : state.annotations.map((item) =>
+                              h(
+                                'div',
+                                { key: item.id, className: 'dsh-nudge-annotation-item' },
                                 h(
-                                  'button',
-                                  {
-                                    type: 'button',
-                                    className: 'dsh-nudge-annotation-open',
-                                    onClick: () => runtime.startEditAnnotation(item.id),
-                                  },
-                                  h('span', { className: 'dsh-nudge-annotation-quote', title: item.quote }, item.quote),
-                                  item.note !== ''
-                                    ? h('span', { className: 'dsh-nudge-annotation-note' }, item.note)
-                                    : null,
-                                  item.written === true
-                                    ? h('span', { className: 'dsh-nudge-annotation-written' }, t('writtenTag'))
-                                    : null,
-                                ),
-                                h(
-                                  'button',
-                                  {
-                                    type: 'button',
-                                    className: 'dsh-nudge-annotation-remove',
-                                    title: t('deleteAnnotation'),
-                                    'aria-label': t('deleteAnnotation'),
-                                    onClick: () => runtime.removeAnnotation(item.id),
-                                  },
-                                  '×',
+                                  'div',
+                                  { className: 'dsh-nudge-annotation-item-head' },
+                                  h(
+                                    'button',
+                                    {
+                                      type: 'button',
+                                      className: 'dsh-nudge-annotation-open',
+                                      onClick: (event) =>
+                                        runtime.startEditAnnotation(
+                                          item.id,
+                                          event?.currentTarget?.getBoundingClientRect?.(),
+                                        ),
+                                    },
+                                    h('span', { className: 'dsh-nudge-annotation-quote', title: item.quote }, item.quote),
+                                    item.note !== ''
+                                      ? h('span', { className: 'dsh-nudge-annotation-note' }, item.note)
+                                      : null,
+                                    item.written === true
+                                      ? h('span', { className: 'dsh-nudge-annotation-written' }, t('writtenTag'))
+                                      : null,
+                                  ),
+                                  h(
+                                    'button',
+                                    {
+                                      type: 'button',
+                                      className: 'dsh-nudge-annotation-remove',
+                                      title: t('deleteAnnotation'),
+                                      'aria-label': t('deleteAnnotation'),
+                                      onClick: () => runtime.removeAnnotation(item.id),
+                                    },
+                                    '×',
+                                  ),
                                 ),
                               ),
-                            ),
-                          ),
-                        )
-                      : null,
-                    state.annotations.length > 0
-                      ? h(
-                          'div',
-                          { key: 'annotation-hint', className: 'dsh-nudge-annotation-hint' },
-                          t('highlightHint'),
-                        )
-                      : null,
-                    state.annotations.some((item) => item.written !== true)
-                      ? h(
-                          'div',
-                          { key: 'annotation-actions', className: 'dsh-nudge-annotation-actions' },
-                          h('button', { type: 'button', className: 'dsh-nudge-btn', onClick: () => runtime.writeAnnotations() }, t('writeAnnotations')),
-                          h('button', { type: 'button', className: 'dsh-nudge-btn primary', onClick: () => runtime.sendAnnotations() }, t('sendAnnotations')),
-                        )
-                      : null,
+                            )),
+                      ),
+                      // Always mounted: the guidance line keeps its height when
+                      // the first note arrives, so nothing below it moves.
+                      h(
+                        'div',
+                        {
+                          key: 'annotation-hint',
+                          className: 'dsh-nudge-annotation-hint dsh-nudge-annotation-guide',
+                        },
+                        // Only a painted mark can be clicked, so the hint waits
+                        // for the quick-notes switch.
+                        state.annotations.length > 0 && state.quick ? t('highlightHint') : '',
+                      ),
+                      // Always mounted too; both buttons simply have nothing to
+                      // do until a note is waiting.
+                      h(
+                        'div',
+                        { key: 'annotation-actions', className: 'dsh-nudge-annotation-actions' },
+                        h(
+                          'button',
+                          {
+                            type: 'button',
+                            className: 'dsh-nudge-btn',
+                            disabled: pendingNotes === 0,
+                            onClick: () => runtime.writeAnnotations(),
+                          },
+                          t('writeAnnotations'),
+                        ),
+                        h(
+                          'button',
+                          {
+                            type: 'button',
+                            className: 'dsh-nudge-btn primary',
+                            disabled: pendingNotes === 0,
+                            onClick: () => runtime.sendAnnotations(),
+                          },
+                          t('sendAnnotations'),
+                        ),
+                      ),
+                    ),
                   )
                 : null,
             ),
@@ -5529,6 +5876,7 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
             ),
           ),
           popup,
+          editPopup,
           tipSpec !== null && tipStyle !== null
             ? h(
                 'div',

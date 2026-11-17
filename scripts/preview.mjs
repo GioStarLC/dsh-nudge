@@ -164,6 +164,63 @@ const SCENES = {
       return { view: 'shell.overlay', width: 720, height: 460 }
     },
   },
+  'annotation-edit': {
+    bg: '#f6f7f9',
+    drive: async (b) => {
+      b.runtime.setQuick(true)
+      b.sandbox.getSelection = () => ({
+        rangeCount: 1,
+        isCollapsed: false,
+        toString: () => '这是被选中的原文内容',
+        getRangeAt: () => ({
+          commonAncestorContainer: { nodeType: 1, closest: () => null },
+          getBoundingClientRect: () => ({ left: 120, top: 300, right: 420, bottom: 322, width: 300, height: 22 }),
+        }),
+      })
+      b.runtime.captureSelection()
+      b.runtime.addAnnotation('第一版批注')
+      const id = b.runtime.getSnapshot().annotations[0].id
+      b.runtime.startEditAnnotation(id, { left: 120, top: 300, right: 420, bottom: 322, width: 300, height: 22 })
+      b.runtime.setAnnotationNote('把这里改成直接说结论，把过程和取舍挪到后面。')
+      await tick()
+      return { view: 'shell.overlay', width: 720, height: 460 }
+    },
+  },
+  // The tray holds one fixed height: rows scroll inside it, the guide line and
+  // the actions keep their rows. Three notes and none look the same size.
+  'annotation-tray': {
+    bg: '#f6f7f9',
+    drive: async (b) => {
+      b.runtime.setQuick(true)
+      const passages = ['这是被选中的第一段原文', '第二段要核对的结论', '第三段需要补一句出处']
+      for (const passage of passages) {
+        b.sandbox.getSelection = () => ({
+          rangeCount: 1,
+          isCollapsed: false,
+          toString: () => passage,
+          getRangeAt: () => ({
+            commonAncestorContainer: { nodeType: 1, closest: () => null },
+            getBoundingClientRect: () => ({ left: 120, top: 300, right: 420, bottom: 322, width: 300, height: 22 }),
+          }),
+        })
+        b.runtime.captureSelection()
+        b.runtime.addAnnotation(passage === '第二段要核对的结论' ? '这里补一个数据，别只给结论。' : '同意')
+      }
+      b.runtime.setAnnotationExpanded(true)
+      b.runtime.dismissAnnotationDraft()
+      await tick()
+      return { view: 'shell.overlay', width: 520, height: 640 }
+    },
+  },
+  'annotation-empty': {
+    bg: '#f6f7f9',
+    drive: async (b) => {
+      b.runtime.setQuick(true)
+      b.runtime.setAnnotationExpanded(true)
+      await tick()
+      return { view: 'shell.overlay', width: 520, height: 640 }
+    },
+  },
   'settings-panel': {
     bg: '#f6f7f9',
     storage: statsPreviewStorage,
@@ -197,8 +254,14 @@ function pageHtml(inner, { width, height, background, dark }) {
        font-family:"PingFang SC","Microsoft YaHei",system-ui,sans-serif;--dn-preview:1;${themeVars}}
   /* keep fixed-position plugin chrome visually centered inside the capture box */
   #dn-stage{position:relative;width:100%;height:100%}
-  #dn-stage .dsh-nudge-card,#dn-stage .dsh-nudge-pill,#dn-stage .dsh-nudge-popup,#dn-stage .dsh-nudge-settings{
+  #dn-stage .dsh-nudge-card,#dn-stage .dsh-nudge-pill,#dn-stage .dsh-nudge-settings{
     position:relative !important;left:auto !important;top:auto !important;transform:none !important;margin:0 auto;
+  }
+  /* The popups really are position:fixed (they hang off a selection or a
+     passage, not off the window), and the window clips its own children. Keep
+     them floating over the staged card so the capture shows the real thing. */
+  #dn-stage .dsh-nudge-popup{
+    position:fixed !important;left:50% !important;top:50% !important;transform:translate(-50%,-50%) !important;margin:0;
   }
   /* neutralize entry animations so a single screenshot is the settled frame */
   *{animation:none !important;transition:none !important}
