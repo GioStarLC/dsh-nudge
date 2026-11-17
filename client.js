@@ -6385,7 +6385,9 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
       return function NudgeSettings() {
         const state = useSyncExternalStore(runtime.subscribe, runtime.getSnapshot, runtime.getSnapshot)
         const [error, setError] = React.useState('')
-        const [note, setNote] = React.useState('')
+        /** What the last paste into each list did, shown under that list's own box. */
+        const [presetNote, setPresetNote] = React.useState('')
+        const [tipNote, setTipNote] = React.useState('')
         const [draftLabel, setDraftLabel] = React.useState('')
         const [draftText, setDraftText] = React.useState('')
         const [draftTip, setDraftTip] = React.useState('')
@@ -6510,13 +6512,13 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
           const result = runtime.addTips(raw)
           if (!result.ok) {
             setError(result.error)
-            setNote('')
+            setTipNote('')
             return false
           }
           const parts = [fill(t('tipsAdded'), result.added)]
           if (result.skipped > 0) parts.push(fill(t('tipsSkipped'), result.skipped))
           setError('')
-          setNote(parts.join('，'))
+          setTipNote(parts.join('，'))
           setDraftTip('')
           return true
         }
@@ -6530,13 +6532,13 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
           const result = runtime.importPresets(raw)
           if (!result.ok) {
             setError(result.error)
-            setNote('')
+            setPresetNote('')
             return false
           }
           const parts = [fill(t('importAdded'), result.added)]
           if (result.skipped > 0) parts.push(fill(t('importSkipped'), result.skipped))
           setError('')
-          setNote(parts.join('，'))
+          setPresetNote(parts.join('，'))
           setDraftImport('')
           return true
         }
@@ -6960,6 +6962,7 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
                         onClick: () => {
                           setImportOpen(false)
                           setDraftImport('')
+                          setPresetNote('')
                           setError('')
                         },
                       },
@@ -6967,6 +6970,11 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
                     ),
                   ),
                 )
+              : null,
+            // The import count belongs under the import box, not under the
+            // idle-line box further down the page.
+            presetNote.length > 0
+              ? h('div', { key: 'preset-import-note', className: 'dsh-nudge-settings-note' }, presetNote)
               : null,
             h(
               'div',
@@ -6978,6 +6986,7 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
                   className: 'dsh-nudge-btn',
                   onClick: () => {
                     runtime.resetPresets()
+                    setPresetNote('')
                     setError('')
                   },
                 },
@@ -7077,7 +7086,7 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
                 }),
                 h('button', { type: 'button', className: 'dsh-nudge-btn primary', onClick: addTipLine }, t('addTip')),
               ),
-              note.length > 0 ? h('div', { key: 'tips-note', className: 'dsh-nudge-settings-note' }, note) : null,
+              tipNote.length > 0 ? h('div', { key: 'tips-note', className: 'dsh-nudge-settings-note' }, tipNote) : null,
               // Keyed by the line (the list holds no duplicates), not by the slot:
               // a row that moves keeps its own half-typed text instead of handing
               // it to whichever line lands where it used to be.
@@ -7101,7 +7110,7 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
                     onClick: () => {
                       runtime.resetTips()
                       setError('')
-                      setNote('')
+                      setTipNote('')
                     },
                   },
                   t('resetTips'),

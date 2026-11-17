@@ -3034,6 +3034,79 @@ function hostStub({ store } = {}) {
   check('page leave: an unread record is never overwritten', posts.length, 0)
 }
 
+// --- settings: each list reports under its own box ------------------------
+
+/**
+ * Render a settings section whose own `useState` slots persist between passes,
+ * so a click's effect on the section's state shows in the next render. Only the
+ * section's own body is stateful; the rows it renders stay on the plain stub.
+ */
+function statefulSection(Component) {
+  const slots = []
+  return function render() {
+    const original = ReactStub.useState
+    let cursor = 0
+    ReactStub.useState = (initial) => {
+      const at = cursor
+      cursor += 1
+      if (!(at in slots)) slots[at] = typeof initial === 'function' ? initial() : initial
+      return [
+        slots[at],
+        (next) => {
+          slots[at] = typeof next === 'function' ? next(slots[at]) : next
+        },
+      ]
+    }
+    let root
+    try {
+      root = Component()
+    } finally {
+      ReactStub.useState = original
+    }
+    return expandTree(root)
+  }
+}
+
+{
+  // Both lists used to share one note, rendered only under the idle lines, so
+  // the import count of the prompts showed up a whole section further down.
+  const booted = await boot({})
+  const Settings = booted.registrations.find((item) => item.entry.name === 'settings.section').Component
+  const render = statefulSection(Settings)
+  const buttonNamed = (node, label) =>
+    (findAllByClass(node, 'dsh-nudge-btn') ?? []).find((button) => button.children?.[0] === label)
+  const notesIn = (node) =>
+    (findAllByClass(node, 'dsh-nudge-settings-note') ?? []).map((note) => note.children?.[0]).filter(Boolean)
+  const sectionsOf = (tree) => {
+    const sections = findAllByClass(tree, 'dsh-nudge-settings-section') ?? []
+    return {
+      presets: sections.find((section) => buttonNamed(section, '批量导入') !== undefined),
+      tips: sections.find((section) => findByClass(section, 'dsh-nudge-tip-draft') !== null),
+    }
+  }
+
+  let tree = render()
+  buttonNamed(tree, '批量导入')?.props?.onClick?.()
+  tree = render()
+  const box = findByClass(tree, 'dsh-nudge-preset-import')
+  check('notes: the import box opens', box !== null, true)
+  findAllByTag(box, 'textarea')[0]?.props?.onChange?.({ target: { value: '新口径甲\n正文甲\n\n\n\n新口径乙\n正文乙' } })
+  tree = render()
+  buttonNamed(findByClass(tree, 'dsh-nudge-preset-import'), '导入')?.props?.onClick?.()
+  tree = render()
+  let sections = sectionsOf(tree)
+  check('notes: the two lists sit in different sections', Boolean(sections.presets && sections.tips && sections.presets !== sections.tips), true)
+  check('notes: the import count shows with the prompts', notesIn(sections.presets).join('|'), '已导入 2 条')
+  check('notes: the idle-line box stays quiet', notesIn(sections.tips).length, 0)
+
+  const pasteBox = findAllByTag(findByClass(tree, 'dsh-nudge-tip-draft'), 'textarea')[0]
+  pasteBox?.props?.onPaste?.({ clipboardData: { getData: () => '新的一句\n又一句' }, preventDefault() {} })
+  tree = render()
+  sections = sectionsOf(tree)
+  check('notes: the paste count shows under the idle-line box', notesIn(sections.tips).join('|'), '已添加 2 句')
+  check('notes: the import count stays with the prompts', notesIn(sections.presets).join('|'), '已导入 2 条')
+}
+
 // --- the annotation lifecycle: one surface, one resting state -------------
 //
 // The card, the in-place editor and the tray share one state. Whichever path
