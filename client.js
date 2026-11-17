@@ -4138,6 +4138,22 @@ window.__ModuleLoader__.load({
         onPopupDismiss()
       }
 
+      /**
+       * Leaving the page writes the pending settings now. The mirror waits
+       * `STORE_SYNC_MS` for a burst of edits to settle, and a window closed in
+       * that gap would otherwise drop the last change — on the very restart the
+       * Host record exists for. The request carries `keepalive`, so it survives
+       * the page that sent it.
+       */
+      function onPageHide() {
+        flushSettingsMirror()
+      }
+
+      /** A page that goes to the background may never come back: write now. */
+      function onVisibilityChange() {
+        if (typeof document !== 'undefined' && document.visibilityState === 'hidden') flushSettingsMirror()
+      }
+
       // --- world subscriptions -------------------------------------------
 
       /** Refresh target/pending facts from the Client stores. */
@@ -4192,10 +4208,12 @@ window.__ModuleLoader__.load({
         /* locale absent */
       }
       window.addEventListener('resize', onResize)
+      window.addEventListener('pagehide', onPageHide)
       // The primary button follows the caret: entering or leaving the composer
       // flips the write mode without polling.
       try {
         if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+          document.addEventListener('visibilitychange', onVisibilityChange)
           document.addEventListener('focusin', syncComposerFocus, true)
           document.addEventListener('focusout', syncComposerFocus, true)
           // Selection capture and painted-passage clicks.
@@ -4258,8 +4276,10 @@ window.__ModuleLoader__.load({
         offs.length = 0
         stopSettingsWait()
         window.removeEventListener('resize', onResize)
+        window.removeEventListener('pagehide', onPageHide)
         try {
           if (typeof document !== 'undefined' && typeof document.removeEventListener === 'function') {
+            document.removeEventListener('visibilitychange', onVisibilityChange)
             document.removeEventListener('focusin', syncComposerFocus, true)
             document.removeEventListener('focusout', syncComposerFocus, true)
             document.removeEventListener('pointerdown', onPointerGestureDown, true)

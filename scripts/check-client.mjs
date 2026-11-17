@@ -2989,6 +2989,51 @@ function hostStub({ store } = {}) {
   check('tips move: a moved row keeps its identity', keyOf(), keyBefore)
 }
 
+// --- leaving the page writes the pending settings -------------------------
+
+{
+  // The mirror waits for a burst of edits to settle; a window closed in that
+  // gap used to drop the last change.
+  const host = hostStub({ store: null })
+  const booted = await boot({ storage: storageStub(), fetch: host.fetch })
+  await sleep(20)
+  const posts = () => host.calls.filter((call) => call.init?.method === 'POST')
+  booted.runtime.setQuick(true)
+  check('page leave: nothing is written mid-burst', posts().length, 0)
+  booted.dispatchWindow('pagehide', {})
+  check('page leave: closing the page writes at once', posts().length, 1)
+  check('page leave: the write carries the last edit', JSON.parse(posts()[0]?.init?.body ?? '{}').store?.quick, true)
+  await sleep(400)
+  check('page leave: the settled write does not repeat it', posts().length, 1)
+
+  booted.runtime.setTurbo(true)
+  booted.document.visibilityState = 'visible'
+  booted.dispatch('visibilitychange', {})
+  check('page leave: a visible page keeps waiting', posts().length, 1)
+  booted.document.visibilityState = 'hidden'
+  booted.dispatch('visibilitychange', {})
+  check('page leave: a hidden page writes at once', posts().length, 2)
+  booted.dispatchWindow('pagehide', {})
+  check('page leave: with nothing pending, nothing is written', posts().length, 2)
+}
+
+{
+  // Before the record has been read, leaving must still not post: a POST
+  // replaces the whole file, and this page has not seen it yet.
+  const posts = []
+  const fetch = (url, init) => {
+    if (init?.method === 'POST') {
+      posts.push(init)
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ ok: true }) })
+    }
+    return new Promise(() => {})
+  }
+  const booted = await boot({ storage: storageStub(), fetch })
+  booted.runtime.setQuick(true)
+  booted.dispatchWindow('pagehide', {})
+  check('page leave: an unread record is never overwritten', posts.length, 0)
+}
+
 // --- the annotation lifecycle: one surface, one resting state -------------
 //
 // The card, the in-place editor and the tray share one state. Whichever path
