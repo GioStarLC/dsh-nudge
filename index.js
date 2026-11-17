@@ -49,8 +49,14 @@ const STORE_VERSION = 1
 /** Upper bound on a settings payload, in bytes. */
 const BODY_LIMIT_BYTES = 256 * 1024
 
-/** Every key the browser half may persist; anything else is dropped. */
-const STORE_KEYS = ['ui', 'delivery', 'turbo', 'quick', 'autoPaste', 'frame', 'preset', 'presets', 'tips', 'notes', 'stats']
+/**
+ * Every key the browser half may persist; anything else is dropped.
+ *
+ * This is the allowlist the picker below implements, written down once so a
+ * check can hold the two together: a key added to the picker but not here (or
+ * the other way round) fails `scripts/check-host.mjs`.
+ */
+export const STORE_KEYS = ['ui', 'delivery', 'turbo', 'quick', 'autoPaste', 'frame', 'preset', 'presets', 'tips', 'notes', 'stats']
 
 /** Cap on the idle lines a record may carry, in entries. */
 const MAX_STORE_TIPS = 50
@@ -152,7 +158,7 @@ function pickStore(value) {
   for (const key of ['turbo', 'quick', 'autoPaste']) {
     if (source[key] === true) store[key] = true
   }
-  // The floating-window border width, in px; the browser half offers 1–3.
+  // The floating-window border width, in px; the browser half offers 0–3.
   if (Number.isInteger(source.frame) && source.frame >= 0 && source.frame <= 3) store.frame = source.frame
   if (typeof source.preset === 'string' && source.preset !== '') store.preset = source.preset
   if (Array.isArray(source.presets)) store.presets = source.presets

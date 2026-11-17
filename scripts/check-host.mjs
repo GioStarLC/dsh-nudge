@@ -15,6 +15,7 @@ import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 const host = await import(new URL('../index.js', import.meta.url).href)
+const { STORE_KEYS } = host
 const pkg = JSON.parse(
   await (await import('node:fs/promises')).readFile(new URL('../package.json', import.meta.url), 'utf8'),
 )
@@ -229,6 +230,34 @@ check('read: no-store cache header', reloaded.json !== undefined, true)
 const invalid = await call(makeReq({ method: 'POST', body: { store: { presets: [] } } }))
 check('write: minimal record accepted', invalid.status, 200)
 check('write: minimal record keeps version', invalid.json?.store?.version, 1)
+
+// The allowlist and the picker describe the same record: every declared key
+// survives a round trip, and nothing else does.
+const declared = {
+  ui: { collapsed: true, pos: { x: 4, y: 5 } },
+  delivery: 'steer',
+  turbo: true,
+  quick: true,
+  autoPaste: true,
+  frame: 1,
+  preset: 'custom-2',
+  presets: [{ id: 'custom-2', label: '口径', text: '正文' }],
+  tips: ['一句'],
+  notes: { s1: [{ id: 'n1', quote: '原文' }] },
+  stats: { days: { '2026-01-02': { send: 1 } } },
+}
+const allowed = await call(makeReq({ method: 'POST', body: { store: { ...declared, token: 'secret' } } }))
+const keptKeys = Object.keys(allowed.json?.store ?? {})
+check(
+  'write: every declared key is kept',
+  STORE_KEYS.filter((key) => keptKeys.includes(key) === false).join(','),
+  '',
+)
+check(
+  'write: no undeclared key is kept',
+  keptKeys.filter((key) => key !== 'version' && key !== 'savedAt' && STORE_KEYS.includes(key) === false).join(','),
+  '',
+)
 
 // ── safety rules ─────────────────────────────────────────────────────────────
 
