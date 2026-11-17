@@ -2934,6 +2934,61 @@ function hostStub({ store } = {}) {
 }
 
 
+// --- idle lines: the editor stays on its line through any move -----------
+
+{
+  // Editing the second of four lines while the first was dragged to the end
+  // used to leave the editor on a neighbour, and a save then overwrote it.
+  const booted = await boot({})
+  const { runtime } = booted
+  runtime.addTip('第四句')
+  const tips = [...runtime.getSnapshot().tips]
+  check('tips move: four lines to move', tips.length, 4)
+  const editedLine = () => runtime.getSnapshot().tips[runtime.getSnapshot().tipEditingIndex]
+
+  runtime.startTipEdit(1)
+  runtime.moveTipTo(0, 3)
+  check('tips move: dragging the first line to the end keeps the editor on its line', editedLine(), tips[1])
+
+  // Every drag, from every slot to every slot, with the editor on every line.
+  let dragDrift = 0
+  for (let from = 0; from < 4; from += 1) {
+    for (let to = 0; to < 4; to += 1) {
+      for (let at = 0; at < 4; at += 1) {
+        if (from === to) continue
+        runtime.startTipEdit(at)
+        const before = editedLine()
+        runtime.moveTipTo(from, to)
+        if (editedLine() !== before) dragDrift += 1
+      }
+    }
+  }
+  check('tips move: no drag moves the editor off its line', dragDrift, 0)
+
+  // The arrow keys move one step; the editor follows the same way.
+  let stepDrift = 0
+  for (let index = 0; index < 4; index += 1) {
+    for (const delta of [-1, 1]) {
+      for (let at = 0; at < 4; at += 1) {
+        runtime.startTipEdit(at)
+        const before = editedLine()
+        runtime.moveTip(index, delta)
+        if (editedLine() !== before) stepDrift += 1
+      }
+    }
+  }
+  check('tips move: no arrow step moves the editor off its line', stepDrift, 0)
+
+  // The row is keyed by its line, so a moved row keeps its half-typed text.
+  const Settings = booted.registrations.find((item) => item.entry.name === 'settings.section').Component
+  const line = runtime.getSnapshot().tips[1]
+  const keyOf = () => findByProp(Settings(), 'value', line)?.props?.key
+  const keyBefore = keyOf()
+  check('tips move: every row carries a key', typeof keyBefore, 'string')
+  runtime.moveTipTo(1, 3)
+  check('tips move: a moved row keeps its identity', keyOf(), keyBefore)
+}
+
 // --- the annotation lifecycle: one surface, one resting state -------------
 //
 // The card, the in-place editor and the tray share one state. Whichever path

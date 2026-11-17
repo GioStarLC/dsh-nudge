@@ -3827,14 +3827,9 @@ window.__ModuleLoader__.load({
       /** Move one idle line up (`delta` -1) or down (+1); order is persisted. */
       function moveTip(index, delta) {
         const count = state.tips.length
-        const from = index
-        const to = from + (delta < 0 ? -1 : 1)
-        if (from < 0 || from >= count || to < 0 || to >= count || from === to) return false
-        const next = [...state.tips]
-        const [line] = next.splice(from, 1)
-        next.splice(to, 0, line)
-        commitTips(next)
-        return true
+        const to = index + (delta < 0 ? -1 : 1)
+        if (index < 0 || index >= count || to < 0 || to >= count) return false
+        return moveTipTo(index, to)
       }
 
       /** Move one idle line to an absolute slot (drag and drop). */
@@ -3847,11 +3842,17 @@ window.__ModuleLoader__.load({
         const next = [...state.tips]
         const [line] = next.splice(from, 1)
         next.splice(to, 0, line)
-        commitTips(next)
+        // The editor is keyed by position, so it has to move with its line:
+        // the moved line lands on `to`, and every line between the two slots
+        // shifts one step toward `from`. Missing the middle case leaves the
+        // editor on a neighbour, and a save would overwrite that neighbour.
         const editing = state.tipEditingIndex
-        if (editing !== null) {
-          setState({ tipEditingIndex: editing === from ? to : editing === to ? (to > from ? editing - 1 : editing + 1) : editing })
-        }
+        let editingNext = editing
+        if (editing === from) editingNext = to
+        else if (editing !== null && from < to && editing > from && editing <= to) editingNext = editing - 1
+        else if (editing !== null && from > to && editing >= to && editing < from) editingNext = editing + 1
+        commitTips(next)
+        if (editingNext !== editing) setState({ tipEditingIndex: editingNext })
         return true
       }
 
@@ -7057,9 +7058,12 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
                 h('button', { type: 'button', className: 'dsh-nudge-btn primary', onClick: addTipLine }, t('addTip')),
               ),
               note.length > 0 ? h('div', { key: 'tips-note', className: 'dsh-nudge-settings-note' }, note) : null,
+              // Keyed by the line (the list holds no duplicates), not by the slot:
+              // a row that moves keeps its own half-typed text instead of handing
+              // it to whichever line lands where it used to be.
               ...state.tips.map((line, index) =>
                 h(TipRow, {
-                  key: `tip-${index}`,
+                  key: `tip:${line}`,
                   value: line,
                   t,
                   onError: setError,
