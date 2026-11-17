@@ -1,6 +1,6 @@
 # AGENTS.md
 
-dsh-nudge 是一个 DSH Web 插件：在悬浮窗里选一个问法，让 agent 汇报当前状态，回答直接落在对话里。改 `client.js` 前先读它头部的扩展点清单；发版流程见 [docs/RELEASE.md](docs/RELEASE.md)。
+dsh-nudge 是一个 DSH Web 插件：在悬浮窗里选一条快捷输入，让 agent 汇报当前状态，回答直接落在对话里。改 `client.js` 前先读它头部的扩展点清单；发版流程见 [docs/RELEASE.md](docs/RELEASE.md)。
 
 ## 仓库布局
 
@@ -10,7 +10,7 @@ client.js                       浏览器半部：悬浮窗、设置面板、输
 client.settings-jump.js         按需加载的 chunk：跳转到设置页
 cordis.patch.yml                bundle patch：一行插件注册，零配置
 locale/{en,zh}.json             插件元数据文案
-scripts/check-client.mjs        浏览器半部校验（VM + stub loader/React）
+scripts/check-client.mjs        浏览器半部校验（VM + stub React；含与宿主半部的桥接检查）
 scripts/check-host.mjs          宿主半部校验（临时 profile 目录）
 scripts/check-graph.mjs         代码图校验：project root 必须解析成仓库根
 scripts/harness.mjs             共享 VM harness（check 与 preview 共用）
@@ -53,33 +53,33 @@ uv run --with "graphifyy[mcp]==0.9.57" graphify update "$(cygpath -w "$PWD")"
 
 项目根有 `graphify-out/`，但它是 gitignored——新 clone 或换机器时不存在，先按上面「命令」建图，别默默退回归 grep。
 
-- **回答架构或代码库问题前，先读 `graphify-out/GRAPH_REPORT.md`**（约 130 行：枢纽节点、17 个社区的成员清单）。比一次 `query_graph` 便宜，也基本就是本仓库缺的那张模块地图。
+- **回答架构或代码库问题前，先读 `graphify-out/GRAPH_REPORT.md`**（枢纽节点 + 各社区的成员清单）。比一次 `query_graph` 便宜，也基本就是本仓库缺的那张模块地图。
 - **存在 `graphify-out/wiki/index.md` 时先看它**，但结论仍回源码确认（本仓库当前没有 wiki）。
-- **本会话改过代码后，跑一次**「命令」里那条 `graphify update`（AST-only，不花 API）；`graphify` 本身不在 PATH 上，别直接敲 `graphify update`，也别把路径写成 `.`（原因见那条命令上方的注释）。
+- **改过代码就重建图**：「命令」里那条 `graphify update`，AST-only、不花 API。
 - **报告会落后于图。** `update` 只重写 `graph.json`，不重画 `GRAPH_REPORT.md`；要新的社区结构就补一次 `graphify cluster-only`。行号与边以 `graph.json` 为准。
 
 ## 查代码：grep 定位符号，graphify 看结构
 
-`client.js` 是一个 5,300 行的单文件，grep 能定位符号，但答不出"这块功能散在哪、改这里会波及谁"。这类问题用图（`graphify_*`），逐符号定位用 grep。
+`client.js` 是一个七千多行的单文件，grep 能定位符号，但答不出"这块功能散在哪、改这里会波及谁"。这类问题用图（`graphify_*`），逐符号定位用 grep。
 
 - **什么时候上图。** "某功能散在哪些函数/模块""谁调用 X、X 又调了谁""改这里波及谁""两条链路怎么串起来"→ 先读 `GRAPH_REPORT.md`（见上），要精确边和行号再 `query_graph`（BFS 铺面、DFS 追线）、`god_nodes`、`get_neighbors`、`shortest_path`。只找定义、精确字符串、改文案、单点符号 → `grep`/读源码，一次就中，别绕路。**别用仓库级宽 grep 开场**（`"批注|annotation"` 一把梭）；查询词用代码里的词，不是界面的中文词。
 - **调用一律带 `project_path`**（仓库根绝对路径）。不传时用的是 MCP 启动时缓存的 project root；`npm run check:graph` 守的就是这个不变量。
 - **`HEALTHY` 不等于查得动。** `graphify_status` 报绿只说明 graph.json 在、不新，它不做真实查询。查询报错先补 `project_path` 重试一次；仍失败再说明图不可用，别默默退回归 grep。
 - **过期图不算证据。** 报 `STALE` 就先重建（命令见「命令」）；拿着过期图写下"这个函数不存在"式的判断，比不查图更糟。工作区本来就脏时，"Working tree changed" 是常态。
-- **INFERRED 边是推测。** 图里约 13% 的边是推断出来的（例如 `createRuntime()` → `syncComposerFocus` 的 `indirect_call`，实际是 `addEventListener` 的参数）。把它当线索，不当结论；写进汇报前用 `get_neighbors` 加读源码确认。
-- **社区有名字，导航仍靠枢纽。** 社区按枢纽节点命名（`Community 4 — createRuntime`，94 个节点带文件标签），`get_community` 可用；常用入口还是 `createRuntime()`、`factory()`、`setState()`、`makeView()`、`makeSettingsView()` 这些 hub 节点及其邻居。
+- **INFERRED 边是推测。** 图里有一部分边是推断出来的（例如 `createRuntime()` → `syncComposerFocus` 的 `indirect_call`，实际是 `addEventListener` 的参数）。把它当线索，不当结论；写进汇报前用 `get_neighbors` 加读源码确认。
+- **社区有名字，导航仍靠枢纽。** 社区按枢纽节点命名（例如 `createRuntime` 那个社区），`get_community` 可用；常用入口还是 `createRuntime()`、`factory()`、`setState()`、`makeView()`、`makeSettingsView()` 这些 hub 节点及其邻居。
 - **图与源码冲突，以源码为准**，并在结论里注明引用了哪个节点，方便别人复核。
 
 ## 约定
 
 - **手写单文件就是产物**：`client.js` 由 `window.__ModuleLoader__.load({ id, factory(require) })` 加载，peer 依赖只能 `require(...)`。不改成 ESM `import`、不拆模块、不加 bundler 或 TypeScript。`client.settings-jump.js` 同样受 chunk 契约约束：与 `client.js` 同目录、名字匹配 `client.<name>.js`、注册为 `<owner id>/client.<name>.js`、导出纯函数（无 React、无插件状态）。
-- **设置有两份**：`localStorage` 的 `dsh-nudge:*` 是同步缓存；`index.js` 落在 profile 目录的 `nudge-store.json` 是跨重启、跨端口的真副本（`DSH_HOME` 可覆盖）。新增一个设置键必须同时改三处——client 的 key 常量、`index.js` 的 `STORE_KEYS`、host 的读取逻辑。
+- **设置有两份**：`localStorage` 的 `dsh-nudge:*` 是同步缓存；`index.js` 落在 profile 目录的 `nudge-store.json` 是跨重启、跨端口的真副本（`DSH_HOME` 可覆盖）。client 侧每个设置项都在 `client.js` 的 `SETTINGS` 表里登记（存储键 / 解码 / 编码 / 线上名 / 回灌），启动态、回灌和镜像负载都从这张表派生，所以新增一项 = 表里加一行 + 界面。镜像有两步不可省：只在读到记录之后才写（`mirrorReady`），刚回灌的记录不回写。
 - **host 安全不变量不可放宽**：只答 loopback；只保留 `STORE_KEYS` 内的键并校验结构（`pickStore`）；body ≤ 256KB；临时文件 + `rename` 原子写。
 - **client 不解析回答**：回答只属于对话，插件不重复、不改写、不朗读。
 - **校验是行为校验**：加断言用 `check(label, actual, expected)`，走真实渲染树或真实 HTTP 往返，不 mock 内部函数、不测实现细节。
 - **CHANGELOG.md 是生成物**：要改措辞就写 `scripts/release-notes/<tag>.md`，再 `npm run changelog:write`。
 - **提交是 Conventional Commits**：`feat(client): ...`、`fix: ...` 等，否则整条落进日志的「其他」分类。一条提交一件事，拆分依据是用户能感知的变化，不是文件。
-- **文案**：用户可见文案是中文，术语跟界面一致（悬浮窗、批注、快捷问法），不自创新词；`locale/en.json` 与 `locale/zh.json` 键集保持同步。
+- **文案**：用户可见文案是中文，术语跟界面一致（悬浮窗、批注、快捷输入），不自创新词；`locale/en.json` 与 `locale/zh.json` 键集保持同步。
 - **不引依赖**：`package.json` 没有 dependencies 与 devDependencies，脚本保持 node 原生。确需引入时先说明为什么现有的不够。
 
 ## 反模式
@@ -88,11 +88,11 @@ uv run --with "graphifyy[mcp]==0.9.57" graphify update "$(cygpath -w "$PWD")"
 | --- | --- |
 | 想装 jest / vitest 补测试 | 在 `scripts/check-*.mjs` 加 `check(...)` |
 | 把 `client.js` 改成 ESM 或拆多模块 | 保持单文件 + `__ModuleLoader__` factory |
-| 加设置键只改 client | 三处一起改：key 常量 / `STORE_KEYS` / 读取逻辑 |
+| 加设置项只改界面 | 先在 client.js 的 `SETTINGS` 表加一行；Host 侧出现新形状再补 `pickStore`（`check-host` 核对 `STORE_KEYS`） |
 | 手改 CHANGELOG.md | 改 release note，再 `changelog:write` |
 | `git commit --no-verify` 跳过守卫 | 先修 `npm run check` |
 | `git add -A` 一把梭 | 按"一件事"拆提交，见 `docs/RELEASE.md` |
-| 加一个 `Config` schema 让宿主配置预置问法 | 预置问法属于窗口，宿主不持有（`check-host` 会拒） |
+| 加一个 `Config` schema 让宿主配置快捷输入 | 快捷输入属于窗口，宿主不持有（`check-host` 会拒） |
 
 ## 编辑本文件
 
