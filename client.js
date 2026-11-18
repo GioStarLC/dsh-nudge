@@ -66,6 +66,12 @@ window.__ModuleLoader__.load({
     const MAX_NOTE_SESSIONS = 40
     /** Upper bound on painted quote candidates per anchor. */
     const MAX_OCCURRENCES = 40
+    /**
+     * How long a note whose row is gone waits before the transcript is searched
+     * again, in ms. A new, removed or re-keyed row searches immediately; this is
+     * the backstop for a passage that moves without one.
+     */
+    const MISS_RESCAN_MS = 1500
     /** Samples kept per diagnostic list in the persisted UI record. */
     const DIAG_SAMPLES = 5
     const PRESET_KEY = 'dsh-nudge:preset'
@@ -534,13 +540,10 @@ window.__ModuleLoader__.load({
 
     /** Whitespace-free projection both sides of an anchor are compared on. */
     function packedText(value) {
-      let out = ''
-      const text = typeof value === 'string' ? value : ''
-      for (let index = 0; index < text.length; index += 1) {
-        const ch = text.charAt(index)
-        if (ch.trim() !== '') out += ch
-      }
-      return out
+      // The per-character `trim()` test this replaces kept exactly the
+      // non-whitespace code units; one regular expression is much cheaper on
+      // the long quotes and long rows this runs over.
+      return (typeof value === 'string' ? value : '').replace(/\s+/g, '')
     }
 
     /** Every visible kept character under a root, with its (node, offset) pair. */
@@ -2287,8 +2290,29 @@ window.__ModuleLoader__.load({
        * instead of re-walking every flow item again.
        */
       const resolvedAnchors = new Map()
+      /**
+       * Bumped when flow items are added, removed or re-keyed.
+       *
+       * A note whose stored row is gone can only find its passage again after
+       * one of those, so the whole-transcript search waits for this to change
+       * instead of running on every repaint of a streaming turn.
+       */
+      let anchorEpoch = 0
+      /** Flow-item generation of the last search, and when it ran. */
+      let searchEpoch = -1
+      let searchAt = 0
+      /** Quote → `{ anchor, epoch, at }` for notes that carry no anchor of their own. */
+      const quoteAnchors = new Map()
       /** True while a pointer gesture is down, so no card opens mid-drag. */
       let pointerHeld = false
+
+      /** Forget every recovered anchor; the next repaint starts from the stored ones. */
+      function resetAnchorRecovery() {
+        resolvedAnchors.clear()
+        quoteAnchors.clear()
+        searchEpoch = -1
+        searchAt = 0
+      }
 
       /** Cancel a capture that has not fired yet (a new press is starting). */
       function cancelPendingCapture() {
@@ -2679,6 +2703,70 @@ window.__ModuleLoader__.load({
       // --- painted highlights ---------------------------------------------
 
 
+      /**
+       * Whether this pass may search the whole transcript for a passage whose
+       * row is gone.
+       *
+       * The transcript re-renders per token, so a repaint runs every 120 ms
+       * while the agent streams. Searching every flow item's text on each one
+       * is what made a long conversation stutter: the search is allowed once
+       * per generation of flow items, and at most once per MISS_RESCAN_MS.
+       */
+      function canSearchAnchors(now) {
+        return anchorEpoch !== searchEpoch || now - searchAt >= MISS_RESCAN_MS
+      }
+
+      /** Record that this pass searched; later passes wait for the next change. */
+      function noteAnchorSearch(now) {
+        searchEpoch = anchorEpoch
+        searchAt = now
+      }
+
+      /**
+       * The anchor of a note that carries none of its own, resolved by quote.
+       * Cached per flow-item generation, so a passage that is still absent is
+       * not looked for again on every repaint.
+       */
+      function anchorOfQuote(quote, canSearch, now) {
+        const cached = quoteAnchors.get(quote)
+        // A result is good for one flow-item generation, and no longer than the
+        // retry window: the passage can appear inside a row that already exists.
+        const fresh =
+          cached !== undefined && cached.epoch === anchorEpoch && now - cached.at < MISS_RESCAN_MS
+        if (fresh) return cached.anchor
+        if (!canSearch) return cached === undefined ? null : cached.anchor
+        const anchor = anchorFromQuote(quote)
+        quoteAnchors.set(quote, { anchor, epoch: anchorEpoch, at: now })
+        noteAnchorSearch(now)
+        return anchor
+      }
+
+      /**
+       * Paint a note whose stored offsets went stale while its text still sits
+       * in the same row. Only an unambiguous passage is painted here; an
+       * ambiguous one falls through to the recovery pass, which can prove the
+       * row is the only carrier.
+       */
+      function rangeWithinElement(entry, key, full) {
+        const packed = packedText(entry.anchor.quote)
+        if (packed === '') return null
+        const at = full.packed.indexOf(packed)
+        if (at === -1) return null
+        if (full.packed.indexOf(packed, at + 1) !== -1) return null
+        const range = rangeFromPacked(full, at, at + packed.length)
+        if (range === null) return null
+        if (entry.note !== null && typeof entry.note?.id === 'string') {
+          resolvedAnchors.set(entry.note.id, {
+            key,
+            quote: packed,
+            prefix: full.packed.slice(Math.max(0, at - CONTEXT_CHARS), at),
+            suffix: full.packed.slice(at + packed.length, at + packed.length + CONTEXT_CHARS),
+            index: at,
+          })
+        }
+        return range
+      }
+
       /** Recompute which spans carry a note and repaint the CSS highlight. */
       function repaintHighlights() {
         highlighted = []
@@ -2695,6 +2783,8 @@ window.__ModuleLoader__.load({
             return
           }
           const byKey = new Map()
+          const now = Date.now()
+          const canSearch = canSearchAnchors(now)
           // Notes saved before this build (or while the page was mid-stream) can
           // carry no anchor. The quote still identifies the passage, so resolve
           // it once per distinct quote and never draw a guess.
@@ -2703,10 +2793,13 @@ window.__ModuleLoader__.load({
             let anchor = resolvedAnchors.get(note.id) ?? note.anchor
             if (typeof anchor?.key !== 'string') {
               const quote = typeof note.quote === 'string' ? note.quote : ''
-              if (!recovered.has(quote)) recovered.set(quote, anchorFromQuote(quote))
+              if (!recovered.has(quote)) recovered.set(quote, anchorOfQuote(quote, canSearch, now))
               anchor = recovered.get(quote)
             }
             if (anchor === null || typeof anchor !== 'object' || typeof anchor.key !== 'string') continue
+            // A note without an anchor of its own keeps the one found here, so
+            // the next repaint takes the direct path instead of asking again.
+            if (typeof note.id === 'string') resolvedAnchors.set(note.id, anchor)
             if (!byKey.has(anchor.key)) byKey.set(anchor.key, [])
             byKey.get(anchor.key).push({ note, anchor, capture: false })
           }
@@ -2745,7 +2838,10 @@ window.__ModuleLoader__.load({
             }
             for (const entry of wanted) {
               const span = locateAnchor(full, entry.anchor)
-              const range = span === null ? null : rangeFromPacked(full, span.start, span.end)
+              let range = span === null ? null : rangeFromPacked(full, span.start, span.end)
+              // The row is here but the stored offsets drifted: the passage is
+              // still inside it, so heal it without searching the transcript.
+              if (range === null) range = rangeWithinElement(entry, key, full)
               if (range === null) {
                 misses.push({ entry, quote: entry.anchor.quote })
                 continue
@@ -2766,7 +2862,11 @@ window.__ModuleLoader__.load({
             if (maps.has(key)) continue
             for (const entry of wanted) misses.push({ entry, quote: entry.anchor.quote })
           }
-          for (const miss of misses) {
+          // The search is the expensive pass: one per flow-item generation (or
+          // per retry window), never once per repaint.
+          if (canSearch && misses.length > 0) noteAnchorSearch(now)
+          const searchable = canSearch ? misses : []
+          for (const miss of searchable) {
             const packed = packedText(miss.quote)
             if (packed === '') continue
             const holders = []
@@ -2823,6 +2923,9 @@ window.__ModuleLoader__.load({
       /** Coalesce repaint triggers into one frame-ish task. */
       function scheduleRepaint() {
         if (repaintTimer !== undefined || state.quick !== true) return
+        // Nothing painted and nothing being captured: a streaming transcript
+        // mutates the DOM constantly, and this runs on every mutation.
+        if (state.annotations.length === 0 && state.annotationDraft === null) return
         repaintTimer = setTimeout(() => {
           repaintTimer = undefined
           repaintHighlights()
@@ -3953,7 +4056,7 @@ window.__ModuleLoader__.load({
         const saved = readJson(UI_KEY) ?? {}
         // The tray comes back from storage; the marks a write left behind in a
         // draft do not, because the draft they pointed at may be gone too.
-        resolvedAnchors.clear()
+        resetAnchorRecovery()
         setState({
           ...readSettings({ lang: state.lang, sessionId: state.target?.sessionId }),
           tipIndex: 0,
@@ -4172,7 +4275,7 @@ window.__ModuleLoader__.load({
         if (targetId !== lastTargetId) {
           lastTargetId = targetId
           // The marks belong to the conversation that quoted them.
-          resolvedAnchors.clear()
+          resetAnchorRecovery()
           // The ask is bound to the conversation it was clicked in (1.2); a
           // different conversation must not inherit its status or its wait.
           if (waiting !== null) endWaiting()
@@ -4244,12 +4347,40 @@ window.__ModuleLoader__.load({
       } catch {
         /* no document (checks drive the runtime directly) */
       }
+      /**
+       * Whether one mutation batch touched a flow item: added one, removed one
+       * or re-keyed it. Only those can bring back a passage whose row is gone,
+       * so only they raise the generation the recovery search waits for.
+       */
+      function flowAnchorsChanged(records) {
+        for (const record of records) {
+          if (record?.type === 'attributes') return true
+          for (const list of [record?.addedNodes, record?.removedNodes]) {
+            if (!list) continue
+            for (const node of list) {
+              if (node?.nodeType !== 1) continue
+              if (node.matches?.(ANCHOR_SELECTOR) === true) return true
+              if (typeof node.querySelector === 'function' && node.querySelector(ANCHOR_SELECTOR) !== null) {
+                return true
+              }
+            }
+          }
+        }
+        return false
+      }
+
       try {
         if (typeof MutationObserver === 'function' && typeof document !== 'undefined') {
-          highlightObserver = new MutationObserver(() => scheduleRepaint())
+          highlightObserver = new MutationObserver((records) => {
+            if (flowAnchorsChanged(records)) anchorEpoch += 1
+            scheduleRepaint()
+          })
           highlightObserver.observe(document.documentElement ?? document.body, {
             childList: true,
             subtree: true,
+            // Rows are re-keyed in place when a turn stops streaming.
+            attributes: true,
+            attributeFilter: ['data-chat-anchor-key'],
           })
         }
       } catch {
@@ -4321,7 +4452,7 @@ window.__ModuleLoader__.load({
           /* no highlight registry */
         }
         highlighted = []
-        resolvedAnchors.clear()
+        resetAnchorRecovery()
         listeners.clear()
       }
 

@@ -1369,6 +1369,7 @@ function flowItemStub(key, text, children = []) {
     // Only the anchor selector matches: a flow item is not a field, a modal or
     // this plugin's own card, so the selection must survive readSelection().
     closest: (selector) => (selector === '[data-chat-anchor-key]' ? element : null),
+    matches: (selector) => selector === '[data-chat-anchor-key]',
     contains: (other) => other === element || children.some((child) => child.contains(other)),
     childNodes: [],
   }
@@ -1648,6 +1649,110 @@ function flowItemStub(key, text, children = []) {
   booted.dispatchWindow('scroll', {})
   await sleep(200)
   check('recovered mark: a gone key still paints its quote', registry.get('dsh-nudge-notes')?.ranges.length, 1)
+}
+
+/**
+ * One flow item that counts how often its text is projected, so a check can
+ * tell "searched the transcript again" from "reused the last answer".
+ */
+function countedFlowItem(key, text, counter) {
+  const element = flowItemStub(key, text)
+  const nodes = element.childNodes
+  Object.defineProperty(element, 'childNodes', {
+    get() {
+      counter.walks += 1
+      return nodes
+    },
+  })
+  return element
+}
+
+{
+  // A note whose row is gone must not re-search the whole transcript on every
+  // repaint: a streaming turn re-renders constantly, and that search is the
+  // expensive half. The first pass after the row is replaced searches once; a
+  // repaint inside the retry window reuses the answer; after the window the
+  // search tries again.
+  const booted = await boot({ highlights: true })
+  const original = flowItemStub('turn-20', '这里是一段会消失的原文')
+  booted.sandbox.document.querySelectorAll = (selector) =>
+    selector === '[data-chat-anchor-key]' ? [original] : []
+  booted.sandbox.document.createRange = () => ({
+    setStart() {},
+    setEnd() {},
+    getClientRects: () => [],
+    getBoundingClientRect: () => ({ left: 100, top: 300, right: 300, bottom: 320 }),
+  })
+  booted.runtime.setQuick(true)
+  booted.sandbox.getSelection = selectionStub('会消失的原文', original)
+  check('stale note: captured', booted.runtime.captureSelection(), true)
+  booted.runtime.addAnnotation('同意')
+  const registry = booted.sandbox.CSS.highlights
+  check('stale note: painted while its row is here', registry.get('dsh-nudge-notes')?.ranges.length, 1)
+
+  // The row is replaced by two unrelated rows: the passage is nowhere.
+  const counter = { walks: 0 }
+  const left = countedFlowItem('turn-21', '第一段别的文字', counter)
+  const right = countedFlowItem('turn-22', '第二段别的文字', counter)
+  booted.sandbox.document.querySelectorAll = (selector) =>
+    selector === '[data-chat-anchor-key]' ? [left, right] : []
+  booted.dispatchWindow('scroll', {})
+  await sleep(200)
+  check('stale note: the first miss searches every row', counter.walks, 2)
+  check('stale note: nothing is painted on a guess', registry.has('dsh-nudge-notes'), false)
+
+  booted.dispatchWindow('scroll', {})
+  await sleep(200)
+  check('stale note: a repaint inside the window reuses the answer', counter.walks, 2)
+
+  await sleep(1600)
+  booted.dispatchWindow('scroll', {})
+  await sleep(200)
+  check('stale note: the search retries after the window', counter.walks, 4)
+}
+
+{
+  // A new flow item is the one thing that can bring a lost passage back: the
+  // observer raises the generation, so the next repaint searches at once
+  // instead of waiting out the retry window.
+  const booted = await boot({ highlights: true, observer: true })
+  const original = flowItemStub('turn-30', '这里是一段会回来的原文')
+  booted.sandbox.document.querySelectorAll = (selector) =>
+    selector === '[data-chat-anchor-key]' ? [original] : []
+  booted.sandbox.document.createRange = () => ({
+    setStart() {},
+    setEnd() {},
+    getClientRects: () => [],
+    getBoundingClientRect: () => ({ left: 100, top: 300, right: 300, bottom: 320 }),
+  })
+  booted.runtime.setQuick(true)
+  booted.sandbox.getSelection = selectionStub('会回来的原文', original)
+  booted.runtime.captureSelection()
+  booted.runtime.addAnnotation('同意')
+  const registry = booted.sandbox.CSS.highlights
+  check('new row: painted while its row is here', registry.get('dsh-nudge-notes')?.ranges.length, 1)
+
+  // The row disappears: the buffered search runs once and finds nothing.
+  const other = flowItemStub('turn-31', '别的文字')
+  booted.sandbox.document.querySelectorAll = (selector) =>
+    selector === '[data-chat-anchor-key]' ? [other] : []
+  booted.dispatchWindow('scroll', {})
+  await sleep(200)
+  check('new row: the lost passage is not painted', registry.has('dsh-nudge-notes'), false)
+
+  // A new row carries the passage back. Even though the retry window has not
+  // elapsed, the record batch says a flow item appeared, so the search runs on
+  // the very next repaint.
+  const fresh = flowItemStub('turn-32', '这里是一段会回来的原文')
+  booted.sandbox.document.querySelectorAll = (selector) =>
+    selector === '[data-chat-anchor-key]' ? [other, fresh] : []
+  booted.observers[0].callback([{ type: 'childList', addedNodes: [fresh], removedNodes: [] }])
+  await sleep(200)
+  check(
+    'new row: the search runs without waiting out the window',
+    registry.get('dsh-nudge-notes')?.ranges.length,
+    1,
+  )
 }
 
 {

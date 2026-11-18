@@ -187,6 +187,12 @@ export async function boot(options = {}) {
    * way a browser does.
    */
   const winListeners = new Map()
+  /**
+   * Mutation observers, when a check asks for them: the bundle then watches the
+   * transcript exactly as it does in the browser, and the check drives one
+   * record batch by calling the callback itself.
+   */
+  const observers = []
   const documentStub = {
     querySelector: () => null,
     querySelectorAll: () => [],
@@ -238,6 +244,19 @@ export async function boot(options = {}) {
       constructor(...ranges) {
         this.ranges = ranges
       }
+    }
+  }
+  // Only when a check asks for it: the bundle observes the transcript and the
+  // check feeds one record batch in, so the "a row changed" path is testable
+  // without a DOM implementation.
+  if (options.observer === true) {
+    sandbox.MutationObserver = class MutationObserver {
+      constructor(callback) {
+        this.callback = callback
+        observers.push(this)
+      }
+      observe() {}
+      disconnect() {}
     }
   }
   /**
@@ -307,6 +326,7 @@ export async function boot(options = {}) {
     document: documentStub,
     docListeners,
     winListeners,
+    observers,
     calls,
     injects,
     registrations,
