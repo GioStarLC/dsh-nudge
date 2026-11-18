@@ -1756,6 +1756,89 @@ function countedFlowItem(key, text, counter) {
 }
 
 {
+  // A painted mark is a live range over the transcript's text nodes. When the
+  // shell re-renders that row with fresh nodes, the range collapses; a broken
+  // mark is repainted in the observer callback, which runs before the browser
+  // paints. Only changes inside the transcript repaint at all, and an
+  // unchanged set of ranges keeps its Highlight, so the page is not repainted
+  // for nothing on every keystroke elsewhere.
+  const booted = await boot({ highlights: true, observer: true })
+  const item = flowItemStub('turn-20', '这里是一段会被重新渲染的原文')
+  item.childNodes[0].isConnected = true
+  item.textContent = item.childNodes[0].data
+  /** Every repaint scans the transcript rows once; this counts the scans. */
+  let scans = 0
+  booted.sandbox.document.querySelectorAll = (selector) => {
+    if (selector !== '[data-chat-anchor-key]') return []
+    scans += 1
+    return [item]
+  }
+  booted.sandbox.document.createRange = () => ({
+    collapsed: false,
+    startContainer: null,
+    startOffset: 0,
+    endContainer: null,
+    endOffset: 0,
+    setStart(node, offset) {
+      this.startContainer = node
+      this.startOffset = offset
+    },
+    setEnd(node, offset) {
+      this.endContainer = node
+      this.endOffset = offset
+    },
+    getClientRects: () => [],
+    getBoundingClientRect: () => ({ left: 100, top: 300, right: 300, bottom: 320 }),
+  })
+  booted.runtime.setQuick(true)
+  booted.sandbox.getSelection = selectionStub('会被重新渲染', item)
+  booted.runtime.captureSelection()
+  booted.runtime.addAnnotation('同意')
+  const registry = booted.sandbox.CSS.highlights
+  const painted = registry.get('dsh-nudge-notes')
+  check('re-render: the passage is painted', painted?.ranges.length, 1)
+  check('re-render: the page is observed', booted.mutate([]), 1)
+
+  /** One mutation record whose target sits inside (or outside) the transcript. */
+  const inside = { type: 'childList', target: item, addedNodes: [], removedNodes: [] }
+  const outside = { type: 'childList', target: { nodeType: 1, closest: () => null }, addedNodes: [], removedNodes: [] }
+
+  // A change outside every flow item (this window, the shell's chrome) cannot
+  // move a mark: nothing is repainted, not even after the debounce.
+  const scansBefore = scans
+  booted.mutate([outside])
+  await sleep(200)
+  check('re-render: churn outside the transcript never repaints', scans, scansBefore)
+  check('re-render: the mark is left as it was', registry.get('dsh-nudge-notes') === painted, true)
+
+  // A change inside the transcript repaints after the debounce; the ranges are
+  // the same, so the painted Highlight is kept instead of being replaced.
+  booted.mutate([inside])
+  check('re-render: transcript churn does not repaint at once', registry.get('dsh-nudge-notes') === painted, true)
+  await sleep(200)
+  check('re-render: an unchanged set keeps its highlight', registry.get('dsh-nudge-notes') === painted, true)
+
+  // The row re-renders: same text, fresh node, the painted range is orphaned.
+  const fresh = { nodeType: 3, data: item.childNodes[0].data, textContent: item.childNodes[0].data, parentElement: item, isConnected: true }
+  item.childNodes[0].isConnected = false
+  item.childNodes[0] = fresh
+  booted.mutate([inside])
+  const repaired = registry.get('dsh-nudge-notes')
+  check('re-render: a replaced row is repainted in the same turn', repaired !== painted, true)
+  check('re-render: the mark moves onto the fresh text', repaired?.ranges[0]?.startContainer === fresh, true)
+
+  // The same holds for a range the browser collapsed in place.
+  repaired.ranges[0].collapsed = true
+  booted.mutate([inside])
+  check('re-render: a collapsed mark is repainted in the same turn', registry.get('dsh-nudge-notes') !== repaired, true)
+
+  // With quick notes off nothing is painted, so nothing is repaired.
+  booted.runtime.setQuick(false)
+  booted.mutate([inside])
+  check('re-render: quick notes off paints nothing', registry.has('dsh-nudge-notes'), false)
+}
+
+{
   // The repository advertises the selection gesture, and a capture opens the
   // beside-selection card instead of a box inside the window.
   const booted = await boot({})

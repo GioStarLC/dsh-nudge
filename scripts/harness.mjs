@@ -235,6 +235,21 @@ export async function boot(options = {}) {
   // Host half and adopts the durable record on boot, exactly as in the browser.
   if (typeof options.fetch === 'function') sandbox.fetch = options.fetch
   sandbox.window = sandbox
+  // Only when a check asks for it: a MutationObserver whose callbacks the check
+  // fires itself with `mutate()`, standing in for the shell changing the page.
+  if (options.observer === true) {
+    sandbox.MutationObserver = class MutationObserver {
+      constructor(callback) {
+        this.callback = callback
+        observers.push(this)
+      }
+      observe() {}
+      disconnect() {
+        const index = observers.indexOf(this)
+        if (index >= 0) observers.splice(index, 1)
+      }
+    }
+  }
   // Only when a check asks for it: the CSS Custom Highlight API the annotation
   // marks are painted with. Without the registry the bundle's repaint returns
   // early, exactly as it does in a browser that has no such API.
@@ -244,19 +259,13 @@ export async function boot(options = {}) {
       constructor(...ranges) {
         this.ranges = ranges
       }
-    }
-  }
-  // Only when a check asks for it: the bundle observes the transcript and the
-  // check feeds one record batch in, so the "a row changed" path is testable
-  // without a DOM implementation.
-  if (options.observer === true) {
-    sandbox.MutationObserver = class MutationObserver {
-      constructor(callback) {
-        this.callback = callback
-        observers.push(this)
+      // The real Highlight is set-like: it has a size and iterates its ranges.
+      get size() {
+        return this.ranges.length
       }
-      observe() {}
-      disconnect() {}
+      [Symbol.iterator]() {
+        return this.ranges[Symbol.iterator]()
+      }
     }
   }
   /**
@@ -309,6 +318,11 @@ export async function boot(options = {}) {
     }
     return handled
   }
+  /** Deliver one batch of page mutations to every live observer. */
+  const mutate = (records = []) => {
+    for (const observer of [...observers]) observer.callback(records, observer)
+    return observers.length
+  }
   /** Fire one recorded window listener pass, like a capture-phase browser event. */
   const dispatchWindow = (type, event) => {
     let handled = false
@@ -323,6 +337,7 @@ export async function boot(options = {}) {
     runtime: sandbox.__dshNudge,
     dispatch,
     dispatchWindow,
+    mutate,
     document: documentStub,
     docListeners,
     winListeners,

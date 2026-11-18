@@ -691,6 +691,23 @@ window.__ModuleLoader__.load({
       }
     }
 
+    /** Whether a painted highlight already covers exactly these ranges, in order. */
+    function sameRanges(highlight, ranges) {
+      if (!highlight || typeof highlight[Symbol.iterator] !== 'function') return false
+      const current = [...highlight]
+      if (current.length !== ranges.length) return false
+      return current.every((range, index) => {
+        const next = ranges[index]
+        return (
+          range.collapsed !== true &&
+          range.startContainer === next.startContainer &&
+          range.startOffset === next.startOffset &&
+          range.endContainer === next.endContainer &&
+          range.endOffset === next.endOffset
+        )
+      })
+    }
+
     /** Where one stored anchor sits in an anchor element's current projection. */
     function locateAnchor(full, anchor) {
       if (anchor === null || typeof anchor !== 'object') return null
@@ -2906,8 +2923,12 @@ window.__ModuleLoader__.load({
               })
             }
           }
+          // An unchanged set keeps its Highlight: replacing it makes the browser
+          // repaint every mark on the page for nothing.
           if (ranges.length === 0) registry.delete(HIGHLIGHT_NAME)
-          else registry.set(HIGHLIGHT_NAME, new window.Highlight(...ranges))
+          else if (!sameRanges(registry.get(HIGHLIGHT_NAME), ranges)) {
+            registry.set(HIGHLIGHT_NAME, new window.Highlight(...ranges))
+          }
           if (captureAnchor === null && captureDraft !== null && captureDraft.range) {
             try {
               if (captureDraft.range.collapsed !== true) captureRanges.push(captureDraft.range)
@@ -2916,7 +2937,9 @@ window.__ModuleLoader__.load({
             }
           }
           if (captureRanges.length === 0) registry.delete(CAPTURE_HIGHLIGHT)
-          else registry.set(CAPTURE_HIGHLIGHT, new window.Highlight(...captureRanges))
+          else if (!sameRanges(registry.get(CAPTURE_HIGHLIGHT), captureRanges)) {
+            registry.set(CAPTURE_HIGHLIGHT, new window.Highlight(...captureRanges))
+          }
         } catch (error) {
           console.warn('[dsh-nudge] highlight repaint failed', error)
         }
@@ -2932,6 +2955,75 @@ window.__ModuleLoader__.load({
           repaintTimer = undefined
           repaintHighlights()
         }, 120)
+      }
+
+      /**
+       * Whether a painted mark lost its text. A mark is a live Range over the
+       * transcript's text nodes; when the shell re-renders that row it swaps
+       * in fresh nodes with the same text, the old range collapses, and the
+       * passage shows unpainted until the next repaint.
+       */
+      function paintedMarkBroken() {
+        for (const entry of highlighted) {
+          try {
+            const range = entry.range
+            if (range.collapsed === true) return true
+            if (range.startContainer?.isConnected === false) return true
+          } catch {
+            return true
+          }
+        }
+        return false
+      }
+
+      /**
+       * Whether one mutation record touches the transcript. A change that sits
+       * in a flow item, or that brings one in or takes one away, can move a
+       * mark; a change outside every flow item — this window, the shell's own
+       * chrome — cannot, so it must not repaint.
+       */
+      function transcriptChanged(record) {
+        let touched = false
+        const target = record?.target
+        const element = target?.nodeType === 1 ? target : (target?.parentElement ?? null)
+        if (typeof element?.closest === 'function' && element.closest(ANCHOR_SELECTOR) !== null) {
+          touched = true
+        }
+        for (const list of [record?.addedNodes, record?.removedNodes]) {
+          for (const node of list ?? []) {
+            if (node?.nodeType !== 1) continue
+            if (node.matches?.(ANCHOR_SELECTOR) || node.querySelector?.(ANCHOR_SELECTOR)) touched = true
+          }
+        }
+        return touched
+      }
+
+      /**
+       * The page changed. Only a change to the transcript can move a mark, so
+       * nothing else repaints. A broken mark is repainted right here: an
+       * observer callback runs before the browser paints the frame, so the
+       * passage never shows unpainted. Any other transcript change keeps the
+       * debounce.
+       */
+      function onTranscriptMutation(records) {
+        // A row that arrives, leaves or is re-keyed is also the only thing that
+        // can bring back a passage whose row is gone.
+        if (flowAnchorsChanged(records)) anchorEpoch += 1
+        if (state.quick !== true) return
+        let relevant = false
+        for (const record of records ?? []) {
+          if (transcriptChanged(record)) relevant = true
+        }
+        if (!relevant) return
+        if (!paintedMarkBroken()) {
+          scheduleRepaint()
+          return
+        }
+        if (repaintTimer !== undefined) {
+          clearTimeout(repaintTimer)
+          repaintTimer = undefined
+        }
+        repaintHighlights()
       }
 
       /**
@@ -4373,13 +4465,12 @@ window.__ModuleLoader__.load({
 
       try {
         if (typeof MutationObserver === 'function' && typeof document !== 'undefined') {
-          highlightObserver = new MutationObserver((records) => {
-            if (flowAnchorsChanged(records)) anchorEpoch += 1
-            scheduleRepaint()
-          })
+          highlightObserver = new MutationObserver(onTranscriptMutation)
           highlightObserver.observe(document.documentElement ?? document.body, {
             childList: true,
             subtree: true,
+            // A streamed answer edits text in place: that changes a row's text too.
+            characterData: true,
             // Rows are re-keyed in place when a turn stops streaming.
             attributes: true,
             attributeFilter: ['data-chat-anchor-key'],
