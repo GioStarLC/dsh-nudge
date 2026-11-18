@@ -51,6 +51,11 @@ window.__ModuleLoader__.load({
      * the node that took the caret is one of ours.
      */
     const SELF_SELECTOR = '.dsh-nudge-card, .dsh-nudge-pill, .dsh-nudge-popup'
+    /**
+     * The two roots a drag moves. A title bar press resolves its card through
+     * this selector, so the pointer moves the window and not just the bar.
+     */
+    const DRAG_ROOT_SELECTOR = '.dsh-nudge-card, .dsh-nudge-pill'
     /** Registry name for the annotated-passage highlight. */
     const HIGHLIGHT_NAME = 'dsh-nudge-notes'
     /** Registry name for the passage currently being annotated. */
@@ -4745,6 +4750,24 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
     function makeView(runtime) {
       /** The same form the shell section renders, reused by the in-window panel. */
       const SettingsForm = makeSettingsView(runtime)
+
+      /**
+       * Write the dragged window's position straight onto its node.
+       *
+       * A drag is a pointer sample every 4–16 ms. Taking each one through the
+       * store re-rendered the whole card — the annotation tray and the prompt
+       * row included — for a position only the root element shows. The render
+       * keeps owning `left`/`top`; this write exists only between the press and
+       * the drop, and the drop commits the same numbers through the store, so
+       * the first render after it paints the value the pointer already shows.
+       */
+      function paintDrag(node, point) {
+        const style = node?.style
+        if (!style) return
+        style.left = `${point.x}px`
+        style.top = `${point.y}px`
+      }
+
       const useSyncExternalStore =
         React.useSyncExternalStore ??
         function useSyncExternalStoreFallback(subscribe, getSnapshot) {
@@ -5291,12 +5314,22 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
           // A previous drag may have ended outside the pill without a click;
           // never let that stale suppression swallow the next real click.
           suppressPillClick.current = false
+          // The press lands on the title bar (inside the card) or on the pill
+          // itself; the position belongs to the root those live in.
+          const root = event.currentTarget
+          const node =
+            root && typeof root.closest === 'function'
+              ? root.closest(DRAG_ROOT_SELECTOR) ?? root
+              : root
           drag.current = {
             dx: event.clientX - state.pos.x,
             dy: event.clientY - state.pos.y,
             startX: event.clientX,
             startY: event.clientY,
             moved: false,
+            x: state.pos.x,
+            y: state.pos.y,
+            node,
           }
           event.currentTarget.setPointerCapture?.(event.pointerId)
         }
@@ -5309,14 +5342,25 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
             const distance = Math.hypot(event.clientX - current.startX, event.clientY - current.startY)
             if (distance > 3) current.moved = true
           }
-          if (current.moved) runtime.moveTo(event.clientX - current.dx, event.clientY - current.dy)
+          if (!current.moved) return
+          // No store write per sample: the node follows the pointer, the store
+          // hears about the final spot once, on drop.
+          const point = clampPoint(
+            { x: event.clientX - current.dx, y: event.clientY - current.dy },
+            state.collapsed,
+          )
+          current.x = point.x
+          current.y = point.y
+          paintDrag(current.node, point)
         }
 
-        /** Finish one drag, persisting only when the window really moved. */
+        /** Finish one drag, committing the final position once. */
         function endDrag() {
           const current = drag.current
           drag.current = null
-          if (current && current.moved) runtime.saveUi()
+          if (!current || !current.moved) return
+          runtime.moveTo(current.x, current.y)
+          runtime.saveUi()
         }
 
         function onPointerDown(event) {

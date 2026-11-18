@@ -66,8 +66,14 @@ export function observable(initial) {
   }
 }
 
-/** One synthetic pointer event for the component wiring checks. */
-export function pointerAt(clientX, clientY, target) {
+/**
+ * One synthetic pointer event.
+ *
+ * `dragNode` is the node the press is delivered to. A drag paints the window
+ * position onto that node's `style` and commits to the store on drop, so a
+ * check reads the painted value from the same object it handed in.
+ */
+export function pointerAt(clientX, clientY, target, dragNode) {
   return {
     button: 0,
     pointerId: 7,
@@ -75,7 +81,7 @@ export function pointerAt(clientX, clientY, target) {
     clientY,
     preventDefault() {},
     target: target ?? { closest: () => null },
-    currentTarget: { setPointerCapture() {} },
+    currentTarget: dragNode ?? { setPointerCapture() {}, style: {}, closest: () => null },
   }
 }
 

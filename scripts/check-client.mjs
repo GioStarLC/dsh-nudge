@@ -790,13 +790,25 @@ function expandTree(node) {
   const pill = findByClass(tree, 'dsh-nudge-pill')
   check('pill rendered', Boolean(pill), true)
   // A real press lands on the pill button (or its label span); both must drag.
+  // A drag paints the node directly and commits once on drop: no store update
+  // per pointer sample, which is what made a busy window lag behind the pointer.
   const pillTarget = { closest: (selector) => (selector === 'button' ? {} : null) }
-  pill.props.onPointerDown(pointerAt(500, 300, pillTarget))
+  const pillNode = { setPointerCapture() {}, style: {}, closest: () => null }
+  let pillRenders = 0
+  const stopPillWatch = booted.runtime.subscribe(() => {
+    pillRenders += 1
+  })
+  pill.props.onPointerDown(pointerAt(500, 300, pillTarget, pillNode))
   pill.props.onPointerMove(pointerAt(560, 340, pillTarget))
-  const moved = booted.runtime.getSnapshot().pos
-  check('pill drag moves x', moved.x, 460)
-  check('pill drag moves y', moved.y, 240)
+  check('pill drag paints x', pillNode.style.left, '460px')
+  check('pill drag paints y', pillNode.style.top, '240px')
+  check('pill drag does not re-render', pillRenders, 0)
   pill.props.onPointerUp()
+  stopPillWatch()
+  const moved = booted.runtime.getSnapshot().pos
+  check('pill drop commits x', moved.x, 460)
+  check('pill drop commits y', moved.y, 240)
+  check('pill drop re-renders once', pillRenders, 1)
   pill.props.onClick()
   check('a drag does not expand the pill', booted.runtime.getSnapshot().collapsed, true)
   check('pill drag persisted', JSON.parse(booted.localStorage.getItem('dsh-nudge:ui')).pos.x, 460)
@@ -817,8 +829,19 @@ function expandTree(node) {
   check('settings gear rendered', gear?.props?.['aria-label'], '打开设置')
   const title = findByClass(tree, 'dsh-nudge-title')
   const before = booted.runtime.getSnapshot().pos
-  title.props.onPointerDown(pointerAt(300, 200))
+  // The bar lives inside the card: the press resolves the card and moves it,
+  // so the drag paints the root rather than the bar alone.
+  const cardNode = { style: {} }
+  const barNode = {
+    setPointerCapture() {},
+    style: {},
+    closest: (selector) => (selector === '.dsh-nudge-card, .dsh-nudge-pill' ? cardNode : null),
+  }
+  title.props.onPointerDown(pointerAt(300, 200, null, barNode))
   title.props.onPointerMove(pointerAt(340, 230))
+  check('titlebar drag paints the card', cardNode.style.left, `${before.x + 40}px`)
+  check('titlebar drag paints the card (y)', cardNode.style.top, `${before.y + 30}px`)
+  check('titlebar drag leaves the bar alone', barNode.style.left, undefined)
   title.props.onPointerUp()
   const after = booted.runtime.getSnapshot().pos
   check('titlebar drag moves x', after.x - before.x, 40)
