@@ -4077,23 +4077,49 @@ window.__ModuleLoader__.load({
       // --- window state ---------------------------------------------------
 
       /**
-       * Collapse or expand the window in place: the pill keeps the card's
-       * top-left anchor (clamped to the pill's own size), and expanding restores
-       * the card at the same anchor.
+       * The card's own spot while the pill carries the window, or null.
+       *
+       * A fold that came from the pointer parks the pill under that pointer, so
+       * the shared anchor no longer describes the card; this keeps the card's
+       * spot for the unfold. Not persisted: after a reload the pill's spot is
+       * the anchor, exactly as it is after a pill drag.
        */
-      function setCollapsed(value) {
+      let cardAnchor = null
+
+      /**
+       * Collapse or expand the window.
+       *
+       * A fold that came from a pointer puts the pill where that pointer is —
+       * centred on it and clamped into the viewport — so the button lands under
+       * the hand that folded the window instead of jumping to the card's corner.
+       * The card keeps its own spot, so the unfold returns it where it was. A
+       * fold with no pointer (the keyboard) keeps the shared anchor as before.
+       */
+      function setCollapsed(value, point) {
         if (state.collapsed === value) return
+        let pos = clampPoint(state.pos, value)
+        if (value === true && isPoint(point)) {
+          cardAnchor = state.pos
+          pos = clampPoint({ x: point.x - PILL_SIZE / 2, y: point.y - PILL_SIZE / 2 }, true)
+        }
+        if (value === false) {
+          if (cardAnchor !== null) pos = clampPoint(cardAnchor, false)
+          cardAnchor = null
+        }
         setState({
           collapsed: value,
           settingsOpen: value ? false : state.settingsOpen,
           unread: value ? state.unread : false,
-          pos: clampPoint(state.pos, value),
+          pos,
         })
         saveUi()
       }
 
       /** Move the window while dragging (not persisted until drop). */
       function moveTo(x, y) {
+        // A pill dragged elsewhere is the anchor the next unfold starts from:
+        // the spot the card was folded at no longer applies.
+        if (state.collapsed) cardAnchor = null
         setState({ pos: clampPoint({ x, y }, state.collapsed) })
       }
 
@@ -4151,6 +4177,9 @@ window.__ModuleLoader__.load({
         // The tray comes back from storage; the marks a write left behind in a
         // draft do not, because the draft they pointed at may be gone too.
         resetAnchorRecovery()
+        // A reloaded window starts folded from its stored spot: no card anchor
+        // outlives the page it was folded on.
+        cardAnchor = null
         setState({
           ...readSettings({ lang: state.lang, sessionId: state.target?.sessionId }),
           tipIndex: 0,
@@ -5355,13 +5384,25 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
           onFocus: (event) => runtime.showTip(key, event?.currentTarget?.getBoundingClientRect?.()),
           onBlur: () => runtime.hideTip(),
         })
-        /** Clicking the window title folds the window into the pill. */
-        function onNameClick() {
+        /**
+         * The spot a click landed on, when a pointer is what clicked. A keyboard
+         * activation reports `detail` 0 and no usable coordinates, so it folds
+         * from the shared anchor like before.
+         */
+        function clickPoint(event) {
+          if (!event || event.detail === 0) return null
+          const x = Number(event.clientX)
+          const y = Number(event.clientY)
+          if (!Number.isFinite(x) || !Number.isFinite(y)) return null
+          return { x, y }
+        }
+        /** Clicking the window title folds the window into the pill at the pointer. */
+        function onNameClick(event) {
           if (suppressTitleClick.current) {
             suppressTitleClick.current = false
             return
           }
-          runtime.setCollapsed(true)
+          runtime.setCollapsed(true, clickPoint(event))
         }
         /**
          * The title bar captures the pointer for dragging, which retargets the
@@ -5372,7 +5413,7 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
           if (origin && origin !== event.currentTarget && typeof origin.closest === 'function' && origin.closest('button')) {
             return
           }
-          onNameClick()
+          onNameClick(event)
         }
         /** Keyboard equivalent of clicking the title. */
         function onNameKeyDown(event) {

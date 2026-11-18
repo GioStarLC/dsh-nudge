@@ -776,6 +776,71 @@ function expandTree(node) {
   check('expand after pill drag keeps spot', booted.runtime.getSnapshot().pos.x, 420)
 }
 
+// --- 7.1.5 folding parks the pill under the pointer ---------------------
+
+{
+  const booted = await boot({})
+  // The card sits where the user left it; folding it with the pointer parks the
+  // pill centred on that pointer instead of at the card's corner.
+  booted.runtime.moveTo(300, 220)
+  booted.runtime.setCollapsed(true, { x: 500, y: 300 })
+  check('fold at the pointer: collapsed', booted.runtime.getSnapshot().collapsed, true)
+  check('fold at the pointer: x', booted.runtime.getSnapshot().pos.x, 482)
+  check('fold at the pointer: y', booted.runtime.getSnapshot().pos.y, 282)
+  check(
+    'fold at the pointer: the spot is persisted',
+    JSON.parse(booted.localStorage.getItem('dsh-nudge:ui')).pos.y,
+    282,
+  )
+
+  // A pointer in the corner still leaves the whole pill on screen.
+  booted.runtime.setCollapsed(false)
+  booted.runtime.setCollapsed(true, { x: 1420, y: 880 })
+  check('fold at the edge: x stays on screen', booted.runtime.getSnapshot().pos.x, 1396)
+  check('fold at the edge: y stays on screen', booted.runtime.getSnapshot().pos.y, 856)
+
+  // The card comes back to the spot it was folded from, not at the pill.
+  booted.runtime.setCollapsed(false)
+  booted.runtime.moveTo(300, 220)
+  booted.runtime.setCollapsed(true, { x: 500, y: 300 })
+  booted.runtime.setCollapsed(false)
+  check('unfold returns the card (x)', booted.runtime.getSnapshot().pos.x, 300)
+  check('unfold returns the card (y)', booted.runtime.getSnapshot().pos.y, 220)
+
+  // A pill dragged after the fold is the anchor the unfold starts from.
+  booted.runtime.setCollapsed(true, { x: 500, y: 300 })
+  booted.runtime.moveTo(420, 260)
+  booted.runtime.setCollapsed(false)
+  check('a dragged pill wins on unfold (x)', booted.runtime.getSnapshot().pos.x, 420)
+  check('a dragged pill wins on unfold (y)', booted.runtime.getSnapshot().pos.y, 260)
+
+  // The keyboard has no pointer to land on: it folds from the shared anchor.
+  booted.runtime.moveTo(360, 240)
+  booted.runtime.setCollapsed(true)
+  check('keyboard fold keeps the anchor (x)', booted.runtime.getSnapshot().pos.x, 360)
+  check('keyboard fold keeps the anchor (y)', booted.runtime.getSnapshot().pos.y, 240)
+}
+
+{
+  // The gesture the user performs: a title click carries its own pointer, a
+  // keyboard activation does not.
+  const booted = await boot({})
+  const overlay = booted.registrations.find((item) => item.entry.name === 'shell.overlay')
+  const View = overlay.Component
+  booted.runtime.moveTo(300, 220)
+  const bar = findByClass(View(), 'dsh-nudge-title')
+  bar.props.onClick({ target: bar.props, currentTarget: bar.props, detail: 1, clientX: 500, clientY: 300 })
+  check('title click folds at the pointer: x', booted.runtime.getSnapshot().pos.x, 482)
+  check('title click folds at the pointer: y', booted.runtime.getSnapshot().pos.y, 282)
+
+  booted.runtime.setCollapsed(false)
+  booted.runtime.moveTo(300, 220)
+  const name = findByClass(View(), 'dsh-nudge-name')
+  name.props.onKeyDown({ key: 'Enter', preventDefault() {} })
+  check('title key fold keeps the anchor (x)', booted.runtime.getSnapshot().pos.x, 300)
+  check('title key fold keeps the anchor (y)', booted.runtime.getSnapshot().pos.y, 220)
+}
+
 // --- view wiring: the pill really drags, a plain click still expands ----
 
 {
