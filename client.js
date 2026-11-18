@@ -1126,8 +1126,10 @@ window.__ModuleLoader__.load({
             method: 'POST',
             headers: { 'content-type': 'application/json' },
             body: JSON.stringify({ store: snapshot }),
-            // Survives a page that closes while the request is in flight.
-            keepalive: true,
+            // No `keepalive`: the desktop shell serves this page from its own
+            // dsh-app:// scheme, which refuses keepalive requests ("Failed to
+            // fetch"), so every mirror write was lost and the Host record went
+            // stale.
           }),
         ).catch(() => {})
       } catch {
@@ -4250,8 +4252,8 @@ window.__ModuleLoader__.load({
        * Leaving the page writes the pending settings now. The mirror waits
        * `STORE_SYNC_MS` for a burst of edits to settle, and a window closed in
        * that gap would otherwise drop the last change — on the very restart the
-       * Host record exists for. The request carries `keepalive`, so it survives
-       * the page that sent it.
+       * Host record exists for. It is best effort: a page torn down at once may
+       * still cut the request short.
        */
       function onPageHide() {
         flushSettingsMirror()
