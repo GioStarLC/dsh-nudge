@@ -2038,6 +2038,11 @@ function countedFlowItem(key, text, counter) {
     popup?.props?.style?.transform,
     'translateY(-100%)',
   )
+  check(
+    'annotation: the fallback card grows from the quote centre',
+    popup?.props?.style?.transformOrigin,
+    '170px 0px',
+  )
 
   // A pointer that ended the selection itself stays the anchor.
   const near = await boot({})
@@ -2048,6 +2053,13 @@ function countedFlowItem(key, text, counter) {
   popup = findByClass(nearView(), 'dsh-nudge-popup')
   check('annotation: the selection pointer stays the anchor', popup?.props?.style?.left, '162px')
   check('annotation: the card sits below the pointer', popup?.props?.style?.top, '322px')
+  // The release point sits left of the card's own gutter, so the origin is
+  // clamped to the card's left edge instead of going negative.
+  check(
+    'annotation: the card grows from the release point',
+    popup?.props?.style?.transformOrigin,
+    '0px 0px',
+  )
 }
 
 // --- turbo mode: no primary button, double-click runs a prompt ----------

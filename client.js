@@ -3128,17 +3128,24 @@ window.__ModuleLoader__.load({
         const clampX = (value) => Math.max(margin, Math.min(value, vw - boxWidth - margin))
         if (pointer) {
           const { x, y } = pointer
-          const left = clampX(x + offset)
           const flipLeft = x + offset + boxWidth > vw - margin
+          const leftValue = flipLeft ? clampX(x - offset - boxWidth) : clampX(x + offset)
+          // The card grows out of the point that opened it. Horizontally only:
+          // an upward card is pinned by its bottom edge, so y is always the
+          // anchor line and a vertical origin would move the card on frame one.
+          const origin = {
+            transformOrigin: `${Math.round(Math.max(0, Math.min(x - leftValue, boxWidth)))}px 0px`,
+          }
           const top = y + offset
           if (top + approxHeight <= vh - margin) {
-            return { left: `${Math.round(flipLeft ? clampX(x - offset - boxWidth) : left)}px`, top: `${Math.round(top)}px`, transform: 'none' }
+            return { left: `${Math.round(leftValue)}px`, top: `${Math.round(top)}px`, ...origin, transform: 'none' }
           }
           // Not enough room below: open above the cursor instead.
           const aboveTop = Math.max(margin, y - offset)
           return {
-            left: `${Math.round(flipLeft ? clampX(x - offset - boxWidth) : left)}px`,
+            left: `${Math.round(leftValue)}px`,
             top: `${Math.round(aboveTop)}px`,
+            ...origin,
             transform: 'translateY(-100%)',
           }
         }
@@ -3162,23 +3169,29 @@ window.__ModuleLoader__.load({
           return {
             left: `${Math.max(margin, vw - boxWidth - margin)}px`,
             top: '96px',
+            transformOrigin: '0px 0px',
             transform: 'none',
           }
         }
         // A stored quote box may lack width (an older draft); NaN here would
         // invalidate `left` and leave the card at the overlay's origin.
         const rectWidth = Number.isFinite(rect.width) ? rect.width : rect.right - rect.left
-        const left = clampX(rect.left + rectWidth / 2 - boxWidth / 2)
+        const anchorX = rect.left + rectWidth / 2
+        const left = clampX(anchorX - boxWidth / 2)
+        const origin = {
+          transformOrigin: `${Math.round(Math.max(0, Math.min(anchorX - left, boxWidth)))}px 0px`,
+        }
         if (rect.top - gap - approxHeight >= margin) {
           return {
             left: `${Math.round(left)}px`,
             top: `${Math.round(rect.top - gap)}px`,
+            ...origin,
             transform: 'translateY(-100%)',
           }
         }
         const below = rect.bottom + gap
         const top = Math.min(below, Math.max(margin, vh - approxHeight - margin))
-        return { left: `${Math.round(left)}px`, top: `${Math.round(top)}px`, transform: 'none' }
+        return { left: `${Math.round(left)}px`, top: `${Math.round(top)}px`, ...origin, transform: 'none' }
       }
 
       /** Where the in-place note editor hangs: over the box that opened it. */
@@ -4757,9 +4770,14 @@ window.__ModuleLoader__.load({
 .dsh-nudge-ask:focus-visible{outline:2px solid var(--dn-accent-line);outline-offset:2px}
 .dsh-nudge-annotation-quote{font-size:11.5px;line-height:1.5;color:var(--dsw-alias-label-secondary,#5a5a66);white-space:pre-wrap;word-break:break-word;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
 .dsh-nudge-annotation-hint{font-size:11px;line-height:1.5;color:var(--dsw-alias-label-secondary,#5a5a66)}
-.dsh-nudge-popup{position:fixed;z-index:${Z_INDEX + 1};box-sizing:border-box;width:340px;max-width:calc(100vw - 16px);display:flex;flex-direction:column;gap:8px;padding:10px;border-radius:12px;border:1px solid var(--dn-line);background:var(--dsw-alias-bg-layer-1,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);box-shadow:0 10px 30px rgba(0,0,0,.16),0 2px 8px rgba(0,0,0,.08);font:13px/1.45 ui-sans-serif,system-ui,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;pointer-events:auto;opacity:.72;transition:opacity .22s ease;animation:dsh-nudge-popup-in .18s ease-out}
+.dsh-nudge-popup{position:fixed;z-index:${Z_INDEX + 1};box-sizing:border-box;width:340px;max-width:calc(100vw - 16px);display:flex;flex-direction:column;gap:8px;padding:10px;border-radius:12px;border:1px solid var(--dn-line);background:var(--dsw-alias-bg-layer-1,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);box-shadow:0 10px 30px rgba(0,0,0,.16),0 2px 8px rgba(0,0,0,.08);font:13px/1.45 ui-sans-serif,system-ui,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;pointer-events:auto;opacity:.72;transition:opacity .22s ease;animation:dsh-nudge-popup-in .12s cubic-bezier(.16,1,.3,1)}
 .dsh-nudge-popup:hover,.dsh-nudge-popup:focus-within{opacity:1}
-@keyframes dsh-nudge-popup-in{from{opacity:0}to{opacity:.72}}
+/* The end state stays open on purpose: the card takes the focus in the frame
+   it mounts, so :focus-within makes its resting opacity 1 — a fixed
+   to{opacity:.72} would snap to the real value on the last frame. scale is
+   its own property so it never overwrites the inline translateY that places
+   an upward-opening card. */
+@keyframes dsh-nudge-popup-in{from{opacity:0;scale:.97}}
 @media (prefers-reduced-motion:reduce){.dsh-nudge-popup{animation:none;transition:none}}
 .dsh-nudge-popup-close{position:absolute;top:6px;right:6px;width:22px;height:22px;padding:0;border:0;border-radius:6px;background:transparent;color:var(--dsw-alias-label-secondary,#5a5a66);font:inherit;font-size:16px;line-height:20px;cursor:pointer}
 .dsh-nudge-popup-close:hover{background:var(--dn-hover);color:var(--dsw-alias-label-primary,#1a1a1a)}
@@ -4786,7 +4804,7 @@ window.__ModuleLoader__.load({
 /* The in-place note editor: the capture card's shape, hung off the passage.
    It sits fully opaque because it holds a field the user types into, and its
    field starts two lines tall so a stored note is readable at a glance. */
-.dsh-nudge-edit-popup{opacity:1;animation:none}
+.dsh-nudge-edit-popup{opacity:1}
 .dsh-nudge-edit-quote{max-height:34px;-webkit-line-clamp:2;min-height:0}
 .dsh-nudge-edit-popup .dsh-nudge-annotation-input{min-height:56px;resize:none}
 .dsh-nudge-popup-row .dsh-nudge-edit-delete{margin-right:auto;border-color:transparent;background:transparent;color:var(--dsw-alias-state-error-primary,#c8433c)}
