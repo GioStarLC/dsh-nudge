@@ -2184,7 +2184,10 @@ window.__ModuleLoader__.load({
         return String(value ?? '').replace(/\s+$/, '')
       }
 
-      /** One annotation as the Markdown block it becomes in the composer. */
+      /**
+       * One annotation as the Markdown block it becomes in the composer: the
+       * quote on its own lines, the answer on the line right below it.
+       */
       function annotationBlock(item) {
         const lines = tidyQuote(item.quote).split('\n')
         const quoted = lines.map((line) => (line === '' ? '>' : `> ${line}`)).join('\n')
@@ -2239,10 +2242,22 @@ window.__ModuleLoader__.load({
         }
       }
 
-      /** One write or send batch as one message body. */
+      /** One write or send batch as one message body, notes two blank lines apart. */
       function annotationsText(list) {
         const items = Array.isArray(list) ? list : pendingAnnotations()
-        return items.map(annotationBlock).join('\n\n')
+        return items.map(annotationBlock).join('\n\n\n')
+      }
+
+      /**
+       * The break a Markdown block needs in front of it: two blank lines, so a
+       * note reads as a block of its own in the draft instead of running on from
+       * whatever it is appended to. A draft already ending with them gets no more.
+       */
+      function blockBreak(before) {
+        if (before === '') return ''
+        if (before.endsWith('\n\n\n')) return ''
+        if (before.endsWith('\n\n')) return '\n'
+        return before.endsWith('\n') ? '\n\n' : '\n\n\n'
       }
 
       /** Whether a node belongs to a text field rather than the transcript. */
@@ -3447,15 +3462,14 @@ window.__ModuleLoader__.load({
             const span = handle.captureInsertion()
             if (span && typeof span.start === 'number' && typeof span.end === 'number') {
               const before = draft.slice(0, span.start)
-              const separator = before !== '' && before.endsWith('\n') === false ? '\n' : ''
-              written = handle.insertText(separator + body, span) === true
+              written = handle.insertText(blockBreak(before) + body, span) === true
             }
           } catch {
             written = false
           }
         }
         if (!written) {
-          const next = draft.trim() === '' ? body : `${draft}${draft.endsWith('\n') ? '' : '\n'}${body}`
+          const next = draft.trim() === '' ? body : `${draft}${blockBreak(draft)}${body}`
           try {
             handle.setDraft(next)
           } catch (error) {

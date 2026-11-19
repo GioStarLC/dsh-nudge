@@ -1523,9 +1523,9 @@ function flowItemStub(key, text, children = []) {
   booted.runtime.attachComposer({ readDraft: () => '已有草稿', setDraft: (value) => writes.push(value) })
   check('annotation: written to the composer', booted.runtime.writeAnnotations(), true)
   check(
-    'annotation: quote block keeps paragraphs, newline separates the draft',
+    'annotation: quote block keeps paragraphs, two blank lines separate the draft',
     writes[0],
-    '已有草稿\n> 第二行\n>\n> 第四行',
+    '已有草稿\n\n\n> 第二行\n>\n> 第四行',
   )
   check('annotation: the written note stays in the tray', booted.runtime.getSnapshot().annotations.length, 1)
   check('annotation: the note is marked written', booted.runtime.getSnapshot().annotations[0].written, true)
@@ -1669,7 +1669,11 @@ function flowItemStub(key, text, children = []) {
   let draft = ''
   booted.runtime.attachComposer({ readDraft: () => draft, setDraft: (value) => (draft = value) })
   check('written note: write accepted', booted.runtime.writeAnnotations(), true)
-  includes('written note: the quote reached the draft', draft, '可以继续标注')
+  check(
+    'written note: the answer sits under its quote',
+    draft,
+    '> 可以继续标注\n我的回答：这条还在输入框里',
+  )
   check('written note: the note stays in the tray', booted.runtime.getSnapshot().annotations.length, 1)
   check('written note: the note is marked written', booted.runtime.getSnapshot().annotations[0].written, true)
   check('written note: the passage stays painted', registry.get('dsh-nudge-notes')?.ranges.length, 1)
@@ -2506,7 +2510,7 @@ const durable = (type, seq, data) => ({ type: 'event', event: { type, seq, time:
   })
   check('write: accepted at the caret', booted.runtime.writeAnnotations(), true)
   check('write: one splice', calls.inserted.length, 1)
-  check('write: the splice carries a line separator', calls.inserted[0]?.text.startsWith('\n> 写进光标处'), true)
+  check('write: the splice starts two blank lines down', calls.inserted[0]?.text.startsWith('\n\n\n> 写进光标处'), true)
   check('write: the span is the caret the shell reported', calls.inserted[0]?.span?.draftRev, 7)
   check('write: the draft is not rebuilt', calls.written.length, 0)
 }
@@ -2527,7 +2531,44 @@ const durable = (type, seq, data) => ({ type: 'event', event: { type, seq, time:
     insertText: () => false,
   })
   check('write: a refused splice still writes', booted.runtime.writeAnnotations(), true)
-  check('write: the rebuild kept the draft', written[0], '原草稿\n> 兜底写入\n我的回答：同意')
+  check('write: the rebuild kept the draft', written[0], '原草稿\n\n\n> 兜底写入\n我的回答：同意')
+}
+
+{
+  // A draft that already ends with a blank line is not padded with another.
+  const booted = await boot({})
+  booted.runtime.setQuick(true)
+  booted.sandbox.getSelection = selectionStub('已有空行', { nodeType: 1, closest: () => null })
+  booted.runtime.captureSelection()
+  booted.runtime.addAnnotation('同意')
+  const written = []
+  booted.runtime.attachComposer({ readDraft: () => '原草稿\n\n', setDraft: (value) => written.push(value) })
+  check('write: a padded draft still writes', booted.runtime.writeAnnotations(), true)
+  check('write: the gap stays two lines', written[0], '原草稿\n\n\n> 已有空行\n我的回答：同意')
+}
+
+{
+  // One batch keeps its notes apart: each note is its quote with the answer on
+  // the line below it, and two blank lines between one note and the next.
+  const booted = await boot({})
+  booted.runtime.setQuick(true)
+  const item = flowItemStub('turn-13', '第一段原文')
+  booted.sandbox.getSelection = selectionStub('第一段', item)
+  booted.runtime.captureSelection()
+  booted.runtime.setAnnotationNote('一条意见')
+  check('write: first note added', booted.runtime.addAnnotation(), true)
+  booted.sandbox.getSelection = selectionStub('第二段', item)
+  booted.runtime.captureSelection()
+  booted.runtime.setAnnotationNote('另一条意见')
+  check('write: second note added', booted.runtime.addAnnotation(), true)
+  const written = []
+  booted.runtime.attachComposer({ readDraft: () => '', setDraft: (value) => written.push(value) })
+  check('write: a batch writes once', booted.runtime.writeAnnotations(), true)
+  check(
+    'write: notes are two blank lines apart, answers under their quotes',
+    written[0],
+    '> 第一段\n我的回答：一条意见\n\n\n> 第二段\n我的回答：另一条意见',
+  )
 }
 
 {
