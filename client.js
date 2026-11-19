@@ -4770,7 +4770,7 @@ window.__ModuleLoader__.load({
 .dsh-nudge-ask:focus-visible{outline:2px solid var(--dn-accent-line);outline-offset:2px}
 .dsh-nudge-annotation-quote{font-size:11.5px;line-height:1.5;color:var(--dsw-alias-label-secondary,#5a5a66);white-space:pre-wrap;word-break:break-word;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
 .dsh-nudge-annotation-hint{font-size:11px;line-height:1.5;color:var(--dsw-alias-label-secondary,#5a5a66)}
-.dsh-nudge-popup{position:fixed;z-index:${Z_INDEX + 1};box-sizing:border-box;width:340px;max-width:calc(100vw - 16px);display:flex;flex-direction:column;gap:8px;padding:10px;border-radius:12px;border:1px solid var(--dn-line);background:var(--dsw-alias-bg-layer-1,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);box-shadow:0 10px 30px rgba(0,0,0,.16),0 2px 8px rgba(0,0,0,.08);font:13px/1.45 ui-sans-serif,system-ui,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;pointer-events:auto;opacity:.72;transition:opacity .22s ease;animation:dsh-nudge-popup-in .12s cubic-bezier(.16,1,.3,1)}
+.dsh-nudge-popup{position:fixed;z-index:${Z_INDEX + 1};box-sizing:border-box;width:280px;max-width:calc(100vw - 16px);display:flex;flex-direction:column;gap:8px;padding:10px;border-radius:12px;border:1px solid var(--dn-line);background:var(--dsw-alias-bg-layer-1,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);box-shadow:0 10px 30px rgba(0,0,0,.16),0 2px 8px rgba(0,0,0,.08);font:13px/1.45 ui-sans-serif,system-ui,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;pointer-events:auto;opacity:.72;transition:opacity .22s ease;animation:dsh-nudge-popup-in .12s cubic-bezier(.16,1,.3,1)}
 .dsh-nudge-popup:hover,.dsh-nudge-popup:focus-within{opacity:1}
 /* The end state stays open on purpose: the card takes the focus in the frame
    it mounts, so :focus-within makes its resting opacity 1 — a fixed
@@ -4785,19 +4785,19 @@ window.__ModuleLoader__.load({
 .dsh-nudge-settings-head{display:flex;align-items:center;gap:8px}
 .dsh-nudge-settings-name{font:inherit;font-size:12px;font-weight:600;color:var(--dsw-alias-label-primary,#1a1a1a)}
 .dsh-nudge-popup-row{display:flex;align-items:center;gap:6px}
-.dsh-nudge-popup-row button{height:32px;padding:0 9px;border:1px solid var(--dn-line);border-radius:8px;background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);font:inherit;font-size:13px;line-height:1;white-space:nowrap;cursor:pointer;transition:background-color .12s ease,border-color .12s ease,transform .12s ease}
+.dsh-nudge-popup-row button{height:28px;padding:0 8px;border:1px solid var(--dn-line);border-radius:8px;background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);font:inherit;font-size:12px;line-height:1;white-space:nowrap;cursor:pointer;transition:background-color .12s ease,border-color .12s ease,transform .12s ease}
 .dsh-nudge-popup-row button:active{transform:scale(.97)}
 .dsh-nudge-popup-row button:focus-visible{outline:2px solid var(--dn-accent-line);outline-offset:2px}
 .dsh-nudge-popup-mic{display:inline-flex;align-items:center;gap:5px;height:26px;padding:0 9px;border:1px solid var(--dn-line);border-radius:999px;background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-secondary,#5a5a66);font:inherit;font-size:11px;line-height:1;cursor:pointer}
 .dsh-nudge-popup-mic-hint{font-size:11px;line-height:1.4;color:var(--dsw-alias-label-secondary,#5a5a66)}
-.dsh-nudge-popup-quick{flex:1 1 0;display:inline-flex;align-items:center;justify-content:center;gap:5px;min-width:0}
+.dsh-nudge-popup-quick{display:inline-flex;align-items:center;justify-content:center;gap:5px;min-width:0;padding:0 6px}
 .dsh-nudge-popup-quick .emoji{font-size:15px;line-height:1}
 .dsh-nudge-popup-quick:hover{background:var(--dn-hover)}
 .dsh-nudge-popup-quick.agree{border-color:var(--dn-agree);background:var(--dn-agree);color:#fff;font-weight:600}
 .dsh-nudge-popup-quick.agree:hover{filter:brightness(.94)}
 .dsh-nudge-popup-row .dsh-nudge-popup-save{border-color:var(--dn-accent-line);background:var(--dn-accent-soft);color:var(--dn-accent);font-weight:600}
 .dsh-nudge-popup-row .dsh-nudge-popup-save:hover{background:color-mix(in srgb,var(--dn-accent) 20%,transparent)}
-.dsh-nudge-popup-row .dsh-nudge-popup-copy{min-width:62px;color:var(--dn-accent)}
+.dsh-nudge-popup-row .dsh-nudge-popup-copy{color:var(--dn-accent)}
 .dsh-nudge-popup-copy[data-copied="true"]{border-color:var(--dn-accent-line);background:var(--dn-accent-soft)}
 .dsh-nudge-popup-hint{display:flex;justify-content:space-between;gap:8px;font-size:11px;line-height:1.5;color:var(--dsw-alias-label-secondary,#5a5a66)}
 .dsh-nudge-popup-hint kbd{font:inherit;padding:0 3px;border:1px solid var(--dn-line);border-radius:4px;background:color-mix(in srgb,var(--dsw-alias-label-primary,#1a1a1a) 4%,transparent)}
@@ -4806,10 +4806,10 @@ window.__ModuleLoader__.load({
    field starts two lines tall so a stored note is readable at a glance. */
 .dsh-nudge-edit-popup{opacity:1}
 .dsh-nudge-edit-quote{max-height:34px;-webkit-line-clamp:2;min-height:0}
-.dsh-nudge-edit-popup .dsh-nudge-annotation-input{min-height:56px;resize:none}
+.dsh-nudge-edit-popup .dsh-nudge-annotation-input{min-height:56px}
 .dsh-nudge-popup-row .dsh-nudge-edit-delete{margin-right:auto;border-color:transparent;background:transparent;color:var(--dsw-alias-state-error-primary,#c8433c)}
 .dsh-nudge-popup-row .dsh-nudge-edit-delete:hover{background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#c8433c) 10%,transparent)}
-.dsh-nudge-annotation-input{width:100%;box-sizing:border-box;min-height:34px;field-sizing:content;max-height:132px;overflow-y:auto;border:1px solid var(--dn-line);border-radius:8px;background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);font:inherit;font-size:13px;line-height:20px;padding:7px 10px}
+.dsh-nudge-annotation-input{width:100%;box-sizing:border-box;min-height:34px;field-sizing:content;max-height:132px;resize:none;overflow-y:auto;border:1px solid var(--dn-line);border-radius:8px;background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);font:inherit;font-size:13px;line-height:20px;padding:7px 10px}
 .dsh-nudge-annotation-input:disabled{opacity:.6;cursor:not-allowed}
 .dsh-nudge-btn:disabled{opacity:.45;cursor:default}
 .dsh-nudge-annotation-input:focus{outline:none;border-color:var(--dn-accent-line);box-shadow:0 0 0 3px var(--dn-accent-soft)}
@@ -5237,20 +5237,22 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
                     {
                       type: 'button',
                       className: 'dsh-nudge-popup-quick agree',
+                      title: t('agree'),
+                      'aria-label': t('agree'),
                       onClick: () => runtime.quickReply('agree'),
                     },
                     h('span', { className: 'emoji', 'aria-hidden': true }, '👍'),
-                    h('span', null, t('agree')),
                   ),
                   h(
                     'button',
                     {
                       type: 'button',
                       className: 'dsh-nudge-popup-quick',
+                      title: t('disagree'),
+                      'aria-label': t('disagree'),
                       onClick: () => runtime.quickReply('disagree'),
                     },
                     h('span', { className: 'emoji', 'aria-hidden': true }, '👎'),
-                    h('span', null, t('disagree')),
                   ),
                   h(
                     'button',
@@ -5267,24 +5269,11 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
                     {
                       type: 'button',
                       className: 'dsh-nudge-popup-copy',
+                      title: t('copyHint'),
                       'data-copied': copyFlash === 'done' ? 'true' : undefined,
                       onClick: copyQuote,
                     },
                     copyLabel,
-                  ),
-                ),
-                h(
-                  'div',
-                  { key: 'hint', className: 'dsh-nudge-popup-hint' },
-                  h(
-                    'span',
-                    null,
-                    h('kbd', null, 'Enter'),
-                    ` ${t('addAnnotation')} · `,
-                    h('kbd', null, 'Esc'),
-                    ` ${t('dismissAnnotation')} · `,
-                    h('kbd', null, 'Ctrl+C'),
-                    ` ${t('copyHint')}`,
                   ),
                 ),
               )

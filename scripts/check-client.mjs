@@ -1936,6 +1936,17 @@ function countedFlowItem(key, text, counter) {
     (findAllByClass(popup, 'dsh-nudge-popup-quick') ?? []).length,
     2,
   )
+  const quicks = findAllByClass(popup, 'dsh-nudge-popup-quick') ?? []
+  check(
+    'annotation: the verdict buttons are icon-only',
+    quicks[0]?.children?.length === 1 && quicks[1]?.children?.length === 1,
+    true,
+  )
+  check(
+    'annotation: icon-only verdicts stay labelled',
+    quicks[0]?.props?.['aria-label'],
+    '同意',
+  )
   check(
     'annotation: card offers save and copy',
     Boolean(findByClass(popup, 'dsh-nudge-popup-save')) &&
@@ -1948,9 +1959,9 @@ function countedFlowItem(key, text, counter) {
     false,
   )
   check(
-    'annotation: card spells out the keys',
-    findByClass(popup, 'dsh-nudge-popup-hint')?.children?.[0]?.children?.[0]?.children?.[0],
-    'Enter',
+    'annotation: card drops the key-legend line',
+    findByClass(popup, 'dsh-nudge-popup-hint'),
+    null,
   )
   check(
     'annotation: card is placed over the quote, not beside it',
