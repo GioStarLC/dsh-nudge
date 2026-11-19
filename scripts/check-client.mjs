@@ -2539,6 +2539,101 @@ const durable = (type, seq, data) => ({ type: 'event', event: { type, seq, time:
 }
 
 {
+  // A shell that offers the composer's quote face shows the passage as the
+  // same quote preview the official「引用文本」button uses, and keeps the
+  // answer as text right below it. The draft is never rebuilt.
+  const booted = await boot({})
+  booted.runtime.setQuick(true)
+  booted.sandbox.getSelection = selectionStub('被引用的原文', { nodeType: 1, closest: () => null })
+  booted.runtime.captureSelection()
+  booted.runtime.addAnnotation('同意')
+  const calls = { quotes: [], inserted: [], written: [] }
+  let rev = 0
+  booted.runtime.attachComposer({
+    readDraft: () => '',
+    readPhase: () => 'plain',
+    setDraft: (value) => calls.written.push(value),
+    captureInsertion: () => ({ start: 0, end: 0, draftRev: (rev += 1) }),
+    insertText: (text, span) => {
+      calls.inserted.push({ text, span })
+      return true
+    },
+    insertQuote: (text, summary) => {
+      calls.quotes.push({ text, summary })
+      return true
+    },
+  })
+  check('quote: the write uses the quote face', booted.runtime.writeAnnotations(), true)
+  check('quote: the passage went in as a quote', calls.quotes.map((call) => call.text).join('|'), '被引用的原文')
+  check('quote: no summary is invented for the passage', calls.quotes[0]?.summary, undefined)
+  check('quote: the answer follows as text', calls.inserted.map((call) => call.text).join('|'), '\n我的回答：同意')
+  check('quote: the draft is not rebuilt', calls.written.length, 0)
+}
+
+{
+  // One batch keeps its quote nodes in order: after each answer two blank
+  // lines separate one note from the next, the same gap the text path uses.
+  const booted = await boot({})
+  booted.runtime.setQuick(true)
+  const item = flowItemStub('turn-quote-batch', '甲乙')
+  booted.sandbox.getSelection = selectionStub('甲', item)
+  booted.runtime.captureSelection()
+  booted.runtime.addAnnotation('同意')
+  booted.sandbox.getSelection = selectionStub('乙', item)
+  booted.runtime.captureSelection()
+  booted.runtime.addAnnotation('保留')
+  const calls = { quotes: [], inserted: [] }
+  let rev = 0
+  booted.runtime.attachComposer({
+    readDraft: () => '',
+    readPhase: () => 'plain',
+    setDraft: () => {
+      throw new Error('unexpected rebuild')
+    },
+    captureInsertion: () => ({ start: 0, end: 0, draftRev: (rev += 1) }),
+    insertText: (text) => {
+      calls.inserted.push(text)
+      return true
+    },
+    insertQuote: (text) => {
+      calls.quotes.push(text)
+      return true
+    },
+  })
+  check('quote: a batch writes every passage', booted.runtime.writeAnnotations(), true)
+  check('quote: passages stay in order', calls.quotes.join('|'), '甲|乙')
+  check(
+    'quote: answers and the gap stay in order',
+    calls.inserted.join('|'),
+    '\n我的回答：同意|\n\n\n|\n我的回答：保留',
+  )
+}
+
+{
+  // A refused quote (a shell that will not take one right now) falls back to
+  // the plain text block, so the note is never lost.
+  const booted = await boot({})
+  booted.runtime.setQuick(true)
+  booted.sandbox.getSelection = selectionStub('退路原文', { nodeType: 1, closest: () => null })
+  booted.runtime.captureSelection()
+  booted.runtime.addAnnotation('同意')
+  const calls = { inserted: [] }
+  booted.runtime.attachComposer({
+    readDraft: () => '',
+    readPhase: () => 'plain',
+    setDraft: () => {},
+    captureInsertion: () => ({ start: 0, end: 0, draftRev: 1 }),
+    insertText: (text) => {
+      calls.inserted.push(text)
+      return true
+    },
+    insertQuote: () => false,
+  })
+  check('quote: a refused quote still writes', booted.runtime.writeAnnotations(), true)
+  check('quote: the fallback is the text block', calls.inserted.join('|'), '> 退路原文\n我的回答：同意')
+}
+
+{
   // A refused splice (the draft moved) falls back to the rebuild, so a note
   // is never lost to a stale caret.
   const booted = await boot({})

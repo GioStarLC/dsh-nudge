@@ -2185,14 +2185,28 @@ window.__ModuleLoader__.load({
       }
 
       /**
-       * One annotation as the Markdown block it becomes in the composer: the
+       * One passage as the Markdown blockquote the shell serializes a quote
+       * node to; text copied out of the composer keeps this form.
+       */
+      function quoteMarkdown(value) {
+        const lines = tidyQuote(value).split('\n')
+        return lines.map((line) => (line === '' ? '>' : `> ${line}`)).join('\n')
+      }
+
+      /** The answer line under a passage, or '' when the passage stands alone. */
+      function annotationNoteLine(item) {
+        const note = typeof item.note === 'string' ? item.note.trim() : ''
+        return note === '' ? '' : `${text('answerLabel')}${note}`
+      }
+
+      /**
+       * One annotation as the Markdown block it becomes when it is sent: the
        * quote on its own lines, the answer on the line right below it.
        */
       function annotationBlock(item) {
-        const lines = tidyQuote(item.quote).split('\n')
-        const quoted = lines.map((line) => (line === '' ? '>' : `> ${line}`)).join('\n')
-        const note = typeof item.note === 'string' ? item.note.trim() : ''
-        return note === '' ? quoted : `${quoted}\n${text('answerLabel')}${note}`
+        const quoted = quoteMarkdown(item.quote)
+        const note = annotationNoteLine(item)
+        return note === '' ? quoted : `${quoted}\n${note}`
       }
 
       /** The annotations still waiting to be written into a message. */
@@ -3447,6 +3461,92 @@ window.__ModuleLoader__.load({
         copyDraftQuote().then((ok) => notify(ok ? text('copiedShort') : text('copyFailedShort')))
       }
 
+      /** Put one text block in at the caret; false when the shell refused it. */
+      function spliceAtCaret(handle, value) {
+        if (value === '') return true
+        if (typeof handle.insertText !== 'function' || typeof handle.captureInsertion !== 'function') return false
+        try {
+          const span = handle.captureInsertion()
+          if (!span || typeof span.start !== 'number' || typeof span.end !== 'number') return false
+          return handle.insertText(value, span) === true
+        } catch {
+          return false
+        }
+      }
+
+      /**
+       * Write the pending annotations as the shell's own quote previews: one
+       * quote node per passage, the answer as plain text on the line below it.
+       * This is the node DSH inserts for a quoted selection, so the draft shows
+       * the quote mark instead of a run of `>` lines — and the node serializes
+       * back to the very Markdown a sent message carries.
+       *
+       * Reports how far it got and the blank-line break it already placed, so
+       * a shell that stops taking quotes mid-batch can finish the rest as text
+       * without doubling the gap. `attempted: false` means the shell has no
+       * quote face (or is not idle): the caller keeps its text path.
+       */
+      function writeQuotedBatch(handle, pending, draft) {
+        const skipped = { attempted: false, written: 0, lead: '', gap: false }
+        if (typeof handle.insertQuote !== 'function') return skipped
+        if (typeof handle.insertText !== 'function' || typeof handle.captureInsertion !== 'function') return skipped
+        // The shell only takes a quote into a plain composer; a sending or
+        // decided composer is the text path's business.
+        let phase = ''
+        try {
+          phase = handle.readPhase?.() ?? ''
+        } catch {
+          phase = ''
+        }
+        if (phase !== '' && phase !== 'plain') return skipped
+        const result = { attempted: true, written: 0, lead: '', gap: false }
+        const caret = () => {
+          try {
+            const span = handle.captureInsertion()
+            return span && typeof span.start === 'number' ? span : undefined
+          } catch {
+            return undefined
+          }
+        }
+        try {
+          const first = caret()
+          if (first === undefined) {
+            result.attempted = false
+            return result
+          }
+          const lead = blockBreak(draft.slice(0, first.start))
+          if (lead !== '' && handle.insertText(lead, first) !== true) {
+            result.attempted = false
+            return result
+          }
+          result.lead = lead
+          for (let index = 0; index < pending.length; index += 1) {
+            const item = pending[index]
+            const quote = tidyQuote(item.quote)
+            if (quote.trim() === '') break
+            // A refused quote leaves the last written note where it is; the
+            // separator for this slot is what `gap` reports.
+            if (handle.insertQuote(quote) !== true) {
+              result.gap = index > 0
+              break
+            }
+            result.written += 1
+            const note = annotationNoteLine(item)
+            if (note !== '') {
+              const span = caret()
+              if (span === undefined || handle.insertText(`\n${note}`, span) !== true) break
+            }
+            if (index === pending.length - 1) break
+            const span = caret()
+            if (span === undefined || handle.insertText('\n\n\n', span) !== true) break
+            result.gap = true
+          }
+        } catch {
+          return result
+        }
+        return result
+      }
+
       /** Append every pending annotation to the composer draft. */
       function writeAnnotations() {
         const pending = pendingAnnotations()
@@ -3465,37 +3565,56 @@ window.__ModuleLoader__.load({
           draft = ''
         }
         if (typeof draft !== 'string') draft = ''
-        // Splice at the caret first: `setDraft` rebuilds every paragraph and
-        // drops the caret at the end, which is exactly what a write in the
-        // middle of typing must not do. The rebuild stays as the fallback for
-        // a shell without the insertion face, or for a draft that moved.
-        let written = false
-        if (typeof handle.insertText === 'function' && typeof handle.captureInsertion === 'function') {
-          try {
-            const span = handle.captureInsertion()
-            if (span && typeof span.start === 'number' && typeof span.end === 'number') {
-              const before = draft.slice(0, span.start)
-              written = handle.insertText(blockBreak(before) + body, span) === true
+        // Preferred: the shell's quote preview per passage. Whatever it could
+        // not take stays pending; the rest of the batch is written as text.
+        const quoted = writeQuotedBatch(handle, pending, draft)
+        let writtenCount = quoted.written
+        if (writtenCount < pending.length && writtenCount > 0) {
+          const rest = annotationsText(pending.slice(writtenCount))
+          if (spliceAtCaret(handle, (quoted.gap ? '' : '\n\n\n') + rest)) writtenCount = pending.length
+        }
+        if (writtenCount < pending.length && writtenCount === 0) {
+          // The text path: splice at the caret first, then rebuild. `setDraft`
+          // rebuilds every paragraph and drops the caret at the end, which is
+          // exactly what a write in the middle of typing must not do; the
+          // rebuild stays as the fallback for a shell without the insertion
+          // face, or for a draft that moved. A leading break the quote path
+          // already placed is not put in twice.
+          let written = false
+          if (typeof handle.insertText === 'function' && typeof handle.captureInsertion === 'function') {
+            try {
+              const span = handle.captureInsertion()
+              if (span && typeof span.start === 'number' && typeof span.end === 'number') {
+                const lead = quoted.lead !== '' ? '' : blockBreak(draft.slice(0, span.start))
+                written = handle.insertText(lead + body, span) === true
+              }
+            } catch {
+              written = false
             }
-          } catch {
-            written = false
+          }
+          if (written) {
+            writtenCount = pending.length
+          } else {
+            const next = draft.trim() === '' ? body : `${draft}${blockBreak(draft)}${body}`
+            try {
+              handle.setDraft(next)
+            } catch (error) {
+              console.warn('[dsh-nudge] annotation write failed', error)
+              setState({ note: text('insertUnavailable'), error: '' })
+              return false
+            }
+            writtenCount = pending.length
           }
         }
-        if (!written) {
-          const next = draft.trim() === '' ? body : `${draft}${blockBreak(draft)}${body}`
-          try {
-            handle.setDraft(next)
-          } catch (error) {
-            console.warn('[dsh-nudge] annotation write failed', error)
-            setState({ note: text('insertUnavailable'), error: '' })
-            return false
-          }
+        if (writtenCount === 0) {
+          setState({ note: text('insertUnavailable'), error: '' })
+          return false
         }
         // The note leaves the pending set but stays in the tray and keeps its
         // passage painted: a mark belongs to the conversation, not to the
         // draft. Clearing the input box no longer takes it away — only
         // deleting the note does.
-        const ids = new Set(pending.map((item) => item.id))
+        const ids = new Set(pending.slice(0, writtenCount).map((item) => item.id))
         const marked = state.annotations.map((item) =>
           ids.has(item.id) ? { ...item, written: true } : item,
         )
@@ -7461,8 +7580,9 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
      * Zero-DOM registrant in the conversation input overlay. The slot composes
      * the composer's public action face (`inputActions`) and the input store
      * hook (`useInput`) into the entry's props; this bridge hands both to the
-     * window runtime so the same button can append the chosen prompt instead
-     * of sending it. The editor DOM is never touched.
+     * window runtime so the window can append a chosen prompt, or write notes
+     * with the shell's own quote previews, instead of sending. The editor DOM
+     * is never touched.
      * @param runtime - the window runtime.
      * @returns the slot component.
      */
@@ -7495,6 +7615,13 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
             insertText:
               typeof inputActions?.insertText === 'function'
                 ? (text, span) => inputActions.insertText(text, span)
+                : undefined,
+            // The shell's own quote node: the passage is shown as its quote
+            // preview (quote mark, hover for the full text, click to remove)
+            // and still serializes to the Markdown a plain write produced.
+            insertQuote:
+              typeof inputActions?.insertQuote === 'function'
+                ? (value, summary) => inputActions.insertQuote(value, summary)
                 : undefined,
           }
         }
