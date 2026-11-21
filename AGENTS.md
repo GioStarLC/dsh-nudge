@@ -73,10 +73,10 @@ uv run --with "graphifyy[mcp]==0.9.57" graphify update "$PWD"
 ## 约定
 
 - **手写单文件就是产物**：`client.js` 由 `window.__ModuleLoader__.load({ id, factory(require) })` 加载，peer 依赖只能 `require(...)`。不改成 ESM `import`、不拆模块、不加 bundler 或 TypeScript。`client.settings-jump.js` 同样受 chunk 契约约束：与 `client.js` 同目录、名字匹配 `client.<name>.js`、注册为 `<owner id>/client.<name>.js`、导出纯函数（无 React、无插件状态）。
-- **设置有两份**：`localStorage` 的 `dsh-nudge:*` 是同步缓存；`index.js` 落在 profile 目录的 `nudge-store.json` 是跨重启、跨端口的真副本（`DSH_HOME` 可覆盖）。client 侧每个设置项都在 `client.js` 的 `SETTINGS` 表里登记（存储键 / 解码 / 编码 / 线上名 / 回灌），启动态、回灌和镜像负载都从这张表派生，所以新增一项 = 表里加一行 + 界面。镜像有两步不可省：只在读到记录之后才写（`mirrorReady`），刚回灌的记录不回写。
+- **设置有两份**：`localStorage` 的 `dsh-nudge:*` 是同步缓存；`index.js` 落在 profile 目录的 `nudge-store.json` 是跨重启、跨端口的真副本（`DSH_HOME` 可覆盖）。client 侧每个设置项都在 `client.js` 的 `SETTINGS` 表里登记（存储键 / 解码 / 编码 / 线上名 / 回灌），启动态、回灌和镜像负载都从这张表派生，所以新增一项 = 表里加一行 + 界面 + Host 白名单（`STORE_KEYS` 与 `pickStore`）。`scripts/check-client.mjs` 会核对这两张表，漏写 host 侧会红。镜像有两步不可省：只在读到记录之后才写（`mirrorReady`），刚回灌的记录不回写。
 - **host 安全不变量不可放宽**：只答 loopback；只保留 `STORE_KEYS` 内的键并校验结构（`pickStore`）；body ≤ 256KB；临时文件 + `rename` 原子写。
 - **client 不解析回答**：回答只属于对话，插件不重复、不改写、不朗读。
-- **校验是行为校验**：加断言用 `check(label, actual, expected)`，走真实渲染树或真实 HTTP 往返，不 mock 内部函数、不测实现细节。
+- **校验优先行为**：加断言用 `check(label, actual, expected)`，走真实渲染树或真实 HTTP 往返，不 mock 内部函数。两张白名单（`SETTINGS` ↔ `STORE_KEYS`、ZH/EN 键集）另有一组显式的不变式断言，那是刻意的例外：它们测的正是"两边必须同名"这件事。
 - **CHANGELOG.md 是生成物**：要改措辞就写 `scripts/release-notes/<tag>.md`，再 `npm run changelog:write`。
 - **提交是 Conventional Commits**：`feat(client): ...`、`fix: ...` 等，否则整条落进日志的「其他」分类。一条提交一件事，拆分依据是用户能感知的变化，不是文件。
 - **文案**：用户可见文案是中文，术语跟界面一致（悬浮窗、批注、快捷输入），不自创新词；`locale/en.json` 与 `locale/zh.json` 键集保持同步。

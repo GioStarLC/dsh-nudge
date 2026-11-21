@@ -25,6 +25,7 @@ import {
   pointerAt,
   // boot/builds the VM instance; the rest are shared with scripts/preview.mjs
 } from './harness.mjs'
+import { STORE_KEYS } from '../index.js'
 
 let failures = 0
 function check(label, actual, expected) {
@@ -3803,6 +3804,27 @@ function statefulSection(Component) {
   booted.runtime.addAnnotation()
   check('tray: one derivation of the pending notes', booted.runtime.pendingAnnotations().length, 1)
   check('tray: a note with no text is still one note', booted.runtime.getSnapshot().annotations.length, 1)
+}
+
+// --- invariants: the two allowlists that used to drift silently ----------
+//
+// The settings table names the fields the Host record carries and STORE_KEYS
+// is the Host's own allowlist. A row added to one side only is dropped without
+// a word, so the two are compared here instead of being remembered. The
+// dictionaries get the same treatment: the two languages must expose the same
+// keys, and every key must be referenced by a literal, because a key only the
+// dictionaries know about is dead copy nobody notices.
+{
+  const booted = await boot({})
+  const names = booted.runtime._debug.settingsNames()
+  check('settings: every row has a host store key', names.filter((name) => STORE_KEYS.includes(name) === false).join(','), '')
+  check('settings: every host store key has a row', STORE_KEYS.filter((key) => names.includes(key) === false).join(','), '')
+  const { zh, en } = booted.runtime._debug.locales()
+  const zhKeys = Object.keys(zh).sort()
+  const enKeys = Object.keys(en).sort()
+  check('locale: zh and en key sets match', zhKeys.join('|') === enKeys.join('|'), true)
+  const unused = zhKeys.filter((key) => source.includes(`'${key}'`) === false && source.includes(`"${key}"`) === false)
+  check('locale: every key is referenced by a literal', unused.join(','), '')
 }
 
 // --- the bridge: the shipped client against the real Host half -----------
