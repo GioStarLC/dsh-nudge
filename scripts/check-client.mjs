@@ -15,6 +15,7 @@ import {
   source,
   sleep,
   tick,
+  waitFor,
   findByClass,
   findAllByClass,
   findByProp,
@@ -124,8 +125,11 @@ function expandTree(node) {
   // The turn runs and closes; the window reports 已返回 after the settle delay.
   booted.statusMap.set(new Map([['A', { running: true }]]))
   booted.statusMap.set(new Map([['A', { running: false }]]))
-  await sleep(1400)
-  check('running then idle: answered', booted.runtime.getSnapshot().phase, 'done')
+  check(
+    'running then idle: answered',
+    await waitFor(() => booted.runtime.getSnapshot().phase === 'done', { timeout: 4000 }),
+    true,
+  )
   check('answered: timestamp recorded', typeof booted.runtime.getSnapshot().lastAt, 'number')
 }
 
@@ -1163,7 +1167,7 @@ function expandTree(node) {
   check('settings command invoked', invoked[0]?.id, 'settings.open')
   check('settings command passes a modal context', invoked[0]?.context?.modal, null)
   check('stray team dialog trigger is never clicked', invoked.includes('team'), false)
-  await sleep(80)
+  await waitFor(() => invoked[1] === 'nudge', { timeout: 2000 })
   check('section selected after the command opens the panel', invoked[1], 'nudge')
 }
 
@@ -1252,7 +1256,7 @@ function expandTree(node) {
   }
   check('command route is accepted', await booted.runtime.openSettings(), true)
   check('no panel yet, nothing shown', booted.runtime.getSnapshot().settingsOpen, false)
-  await sleep(1500)
+  await waitFor(() => booted.runtime.getSnapshot().settingsOpen === true, { timeout: 3000 })
   check('a shell that never paints the panel falls back to the window', booted.runtime.getSnapshot().settingsOpen, true)
 }
 
@@ -1345,7 +1349,7 @@ function expandTree(node) {
   }
   check('a silent settings command is not trusted', await booted.runtime.openSettings(), true)
   check('nothing is shown while the command is being verified', booted.runtime.getSnapshot().settingsOpen, false)
-  await sleep(900)
+  await waitFor(() => calls[0] === 'trigger', { timeout: 3000 })
   check('the next route clicks the settings trigger', calls[0], 'trigger')
   check('the section is selected from that panel', calls[1], 'nudge')
   check('the in-window form stays closed', booted.runtime.getSnapshot().settingsOpen, false)
@@ -1390,7 +1394,7 @@ function expandTree(node) {
   gear.props.onClick()
   // The jump driver is a package-local chunk: the press resolves after it loads.
   // Wait for the outcome instead of assuming a fixed 20ms is enough for disk IO.
-  for (let i = 0; i < 25 && booted.runtime.getSnapshot().settingsOpen !== true; i += 1) await sleep(20)
+  await waitFor(() => booted.runtime.getSnapshot().settingsOpen === true, { timeout: 1500 })
   check('the gear opens the in-window form', booted.runtime.getSnapshot().settingsOpen, true)
   const gearAgain = findByProp(overlay.Component(), 'aria-label', '打开设置')
   gearAgain.props.onClick()
@@ -1928,7 +1932,7 @@ function countedFlowItem(key, text, counter) {
   booted.sandbox.document.querySelectorAll = (selector) =>
     selector === '[data-chat-anchor-key]' ? [left, right] : []
   booted.dispatchWindow('scroll', {})
-  await sleep(200)
+  await waitFor(() => counter.walks === 2, { timeout: 2000 })
   check('stale note: the first miss searches every row', counter.walks, 2)
   check('stale note: nothing is painted on a guess', registry.has('dsh-nudge-notes'), false)
 
@@ -1936,9 +1940,9 @@ function countedFlowItem(key, text, counter) {
   await sleep(200)
   check('stale note: a repaint inside the window reuses the answer', counter.walks, 2)
 
-  await sleep(1600)
+  await sleep(1700) // the retry window itself is 1500ms; this only waits it out
   booted.dispatchWindow('scroll', {})
-  await sleep(200)
+  await waitFor(() => counter.walks === 4, { timeout: 2000 })
   check('stale note: the search retries after the window', counter.walks, 4)
 }
 
@@ -1978,7 +1982,7 @@ function countedFlowItem(key, text, counter) {
   booted.sandbox.document.querySelectorAll = (selector) =>
     selector === '[data-chat-anchor-key]' ? [other, fresh] : []
   booted.observers[0].callback([{ type: 'childList', addedNodes: [fresh], removedNodes: [] }])
-  await sleep(200)
+  await waitFor(() => registry.get('dsh-nudge-notes')?.ranges.length === 1, { timeout: 2000 })
   check(
     'new row: the search runs without waiting out the window',
     registry.get('dsh-nudge-notes')?.ranges.length,
@@ -2363,7 +2367,13 @@ function countedFlowItem(key, text, counter) {
     store: { version: 1, ui: { collapsed: false, pos: { x: 900, y: 240 } } },
   })
   const booted = await boot({ storage: storageStub(), fetch: host.fetch, expanded: false })
-  await sleep(20)
+  await waitFor(
+    () => {
+      const pos = booted.runtime.getSnapshot().pos
+      return pos.x === 1440 - 36 - 16 && pos.y === 240
+    },
+    { timeout: 3000 },
+  )
   const state = booted.runtime.getSnapshot()
   check('launch: a restored window comes back collapsed', state.collapsed, true)
   check('launch: a restored window comes back on its side', state.pos.x, 1440 - 36 - 16)
@@ -2374,7 +2384,7 @@ function countedFlowItem(key, text, counter) {
   // A window left near the left edge comes back on the left edge.
   const host = hostStub({ store: { version: 1, ui: { pos: { x: 40, y: 300 } } } })
   const booted = await boot({ storage: storageStub(), fetch: host.fetch, expanded: false })
-  await sleep(20)
+  await waitFor(() => booted.runtime.getSnapshot().pos.x === 16, { timeout: 3000 })
   check('launch: the nearer side is kept', booted.runtime.getSnapshot().pos.x, 16)
   check('launch: the spot is kept on that side', booted.runtime.getSnapshot().pos.y, 300)
 }
@@ -2550,7 +2560,7 @@ const durable = (type, seq, data) => ({ type: 'event', event: { type, seq, time:
   booted.runtime.setAnnotationExpanded(false)
   booted.sandbox.getSelection = selectionStub('第三段', { nodeType: 1, closest: () => null })
   check('annotation: selectionchange listener wired', booted.dispatch('selectionchange', {}), true)
-  await sleep(320)
+  await waitFor(() => booted.runtime.getSnapshot().annotationDraft?.quote === '第三段', { timeout: 3000 })
   check('annotation: settled selection reopens the card', booted.runtime.getSnapshot().annotationDraft?.quote, '第三段')
 }
 
@@ -2567,7 +2577,7 @@ const durable = (type, seq, data) => ({ type: 'event', event: { type, seq, time:
   check('drag: no card while the button is down', booted.runtime.getSnapshot().annotationDraft, null)
   check('drag: pointerup listener wired', booted.dispatch('pointerup', {}), true)
   booted.dispatch('selectionchange', {})
-  await sleep(320)
+  await waitFor(() => booted.runtime.getSnapshot().annotationDraft?.quote === '拖出来的原文', { timeout: 3000 })
   check('drag: settled selection opens after the release', booted.runtime.getSnapshot().annotationDraft?.quote, '拖出来的原文')
 }
 
@@ -2861,11 +2871,11 @@ const durable = (type, seq, data) => ({ type: 'event', event: { type, seq, time:
   const editor = { nodeType: 1, closest: (selector) => (selector.includes('contenteditable') ? editor : null) }
   booted.sandbox.document.activeElement = editor
   booted.dispatch('keyup', { key: 'Enter', shiftKey: true, target: editor })
-  await sleep(260)
+  await sleep(400) // past the 260ms debounce, so a capture would have happened
   check('typing: Shift+Enter in a field does not capture', booted.runtime.getSnapshot().annotationDraft, null)
   booted.sandbox.document.activeElement = null
   booted.dispatch('keyup', { key: 'ArrowLeft', shiftKey: true, target: item })
-  await sleep(260)
+  await waitFor(() => booted.runtime.getSnapshot().annotationDraft?.quote === '一段在对话里', { timeout: 3000 })
   check('typing: a shifted keyup in the transcript still captures', booted.runtime.getSnapshot().annotationDraft?.quote, '一段在对话里')
 }
 // --- preset order: the arrows move a row and the order survives ----------
@@ -3128,7 +3138,7 @@ const durable = (type, seq, data) => ({ type: 'event', event: { type, seq, time:
   booted.sandbox.getSelection = selectionStub('滚动前选中的原文', { nodeType: 1, closest: () => null })
   booted.dispatch('mouseup', { clientX: 120, clientY: 240 })
   check('selection: window scroll listener wired', booted.dispatchWindow('scroll', { target: { closest: () => null } }), true)
-  await sleep(260)
+  await waitFor(() => booted.runtime.getSnapshot().annotationDraft?.quote === '滚动前选中的原文', { timeout: 3000 })
   // The card is what takes the focus: a trailing scroll must not eat it.
   check('selection: a trailing scroll still opens the card', booted.runtime.getSnapshot().annotationDraft?.quote, '滚动前选中的原文')
 }
@@ -3470,7 +3480,7 @@ function hostStub({ store } = {}) {
     },
   })
   const booted = await boot({ storage, fetch: host.fetch })
-  await sleep(20)
+  await waitFor(() => booted.runtime.getSnapshot().quick === true, { timeout: 3000 })
   const state = booted.runtime.getSnapshot()
   check('restore: quick switch comes back', state.quick, true)
   check('restore: auto-paste switch comes back', state.autoPaste, true)
@@ -3493,7 +3503,7 @@ function hostStub({ store } = {}) {
   booted.runtime.setQuick(true)
   booted.runtime.moveTo(120, 240)
   booted.runtime.saveUi()
-  await sleep(400)
+  await waitFor(() => host.calls.some((call) => call.init?.method === 'POST'), { timeout: 3000 })
   const posts = host.calls.filter((call) => call.init?.method === 'POST')
   check('mirror: a burst of edits becomes one write', posts.length, 1)
   const payload = JSON.parse(posts[0]?.init?.body ?? '{}')
@@ -3510,7 +3520,7 @@ function hostStub({ store } = {}) {
   storage.setItem('dsh-nudge:quick', '1')
   const host = hostStub({ store: { version: 1, delivery: 'queue' } })
   const booted = await boot({ storage, fetch: host.fetch })
-  await sleep(400)
+  await waitFor(() => host.calls.some((call) => call.init?.method === 'POST'), { timeout: 3000 })
   check('restart: the local record still wins', booted.runtime.getSnapshot().quick, true)
   check('restart: a field the page never set comes back', booted.runtime.effectiveDelivery(), 'followup')
   check('restart: the local record is pushed up', host.calls.some((call) => call.init?.method === 'POST'), true)
@@ -3906,12 +3916,12 @@ function statefulSection(Component) {
     await sleep(20)
     a.runtime.setDelivery('followup')
     a.runtime.setTurbo(true)
-    await sleep(400)
+    await waitFor(() => hostModule.readStore({}).store?.delivery === 'queue', { timeout: 3000 })
     const record = hostModule.readStore({}).store
     check('bridge: the record names the queued mode', record?.delivery, 'queue')
     check('bridge: the record keeps the switch', record?.turbo, true)
     const b = await boot({ storage: storageStub(), fetch: mountHost().fetch })
-    await sleep(60)
+    await waitFor(() => b.runtime.getSnapshot().turbo === true, { timeout: 3000 })
     check('bridge: the queued mode comes back', b.runtime.effectiveDelivery(), 'followup')
     check('bridge: the switch comes back', b.runtime.getSnapshot().turbo, true)
   }
@@ -3928,7 +3938,7 @@ function statefulSection(Component) {
     const slow = mountHost({ getDelayMs: 150 })
     const a = await boot({ storage: storageStub(), fetch: slow.fetch, expanded: false })
     a.runtime.setCollapsed(false)
-    await sleep(700)
+    await waitFor(() => a.runtime.getSnapshot().quick === true, { timeout: 4000 })
     check('bridge: an early write does not hide the record', a.runtime.getSnapshot().quick, true)
     check('bridge: the early write does not erase it', hostModule.readStore({}).store?.presets?.[0]?.text, '恢复正文')
   }
@@ -3940,7 +3950,7 @@ function statefulSection(Component) {
     const storage = storageStub()
     storage.setItem('dsh-nudge:frame', '1')
     const a = await boot({ storage, fetch: mountHost({ getDelayMs: 30 }).fetch })
-    await sleep(140)
+    await waitFor(() => a.runtime.getSnapshot().tips.join('|') === '恢复的一句', { timeout: 3000 })
     check('bridge: a field the page holds keeps its value', a.runtime.getSnapshot().frame, 1)
     check('bridge: a field the page lacks is adopted', a.runtime.getSnapshot().tips.join('|'), '恢复的一句')
   }

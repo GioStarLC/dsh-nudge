@@ -15,6 +15,34 @@ export const source = await readFile(new URL('../client.js', import.meta.url), '
 export const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 export const tick = () => sleep(20)
 
+/**
+ * Poll `predicate` until it returns a truthy value, then return true; false
+ * when the timeout expires.
+ *
+ * The client's own delays — the selection debounce, the settle delay, the
+ * mirror burst — are part of what the checks verify, so they keep real timers
+ * and poll for the outcome instead of assuming one fixed sleep is enough on
+ * every machine. A predicate that throws counts as "not yet": the state it
+ * reads may not exist until the boot finishes.
+ */
+export async function waitFor(predicate, options = {}) {
+  const timeout = options.timeout ?? 2000
+  const step = options.step ?? 10
+  const deadline = Date.now() + timeout
+  for (;;) {
+    let value
+    try {
+      value = predicate()
+    } catch {
+      value = false
+    }
+    if (value) return true
+    const left = deadline - Date.now()
+    if (left <= 0) return false
+    await sleep(Math.min(step, left))
+  }
+}
+
 /** Depth-first search for one rendered element by CSS class. */
 export function findByClass(node, className) {
   if (!node || typeof node !== 'object') return null
