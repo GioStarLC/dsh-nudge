@@ -27,8 +27,9 @@
     "README.md"
   ],
   "scripts": {
+    "build": "node scripts/build.mjs",
     "hooks:install": "git config core.hooksPath .githooks",
-    "check": "node scripts/check-client.mjs && node scripts/check-host.mjs && node scripts/check-graph.mjs",
+    "check": "node scripts/build.mjs --verify && node scripts/check-client.mjs && node scripts/check-host.mjs && node scripts/check-graph.mjs",
     "check:client": "node scripts/check-client.mjs",
     "check:host": "node scripts/check-host.mjs",
     "check:graph": "node scripts/check-graph.mjs",
@@ -53,5 +54,8 @@
         "@deepseek-ai/dsh-client-locale"
       ]
     }
+  },
+  "devDependencies": {
+    "rollup": "4.52.5"
   }
 }

@@ -14,7 +14,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      # No install step: the repository has no dependencies.
+          cache: npm
+      # The client half is built from src/ into committed artifacts. Installing
+      # the one build dependency is what lets check verify they are current.
+      - run: npm ci
       - run: npm run check
 
   release-facts:
