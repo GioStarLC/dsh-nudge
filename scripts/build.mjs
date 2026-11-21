@@ -92,6 +92,10 @@ async function compile(target) {
       if (warning.code === 'UNRESOLVED_IMPORT') {
         throw new Error(`build: unresolved import in ${target.source}: ${warning.message}`)
       }
+      // Modules are layers, not a web: a cycle means two files own one seam.
+      if (warning.code === 'CIRCULAR_DEPENDENCY') {
+        throw new Error(`build: circular dependency: ${warning.message}`)
+      }
       warn(warning)
     },
   })

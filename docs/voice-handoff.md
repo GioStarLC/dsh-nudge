@@ -1,6 +1,6 @@
 # 语音批注接入 — 调研记录
 
-> **状态：未接入。** 仓库里没有任何 voice 相关代码——`client.js`、`index.js`、`scripts/` 都搜不到 `voice` / `parseCombo` / `OimeVoice`。
+> **状态：未接入。** 仓库里没有任何 voice 相关代码——`src/`、`index.js`、`scripts/` 都搜不到 `voice` / `parseCombo` / `OimeVoice`。
 > 本文只保留调研结论与实测证据，供下次接手时不必重跑一遍。
 
 ## 一、结论
@@ -35,7 +35,7 @@
 
 ## 五、若要接入，落点在哪
 
-- **设置项**：插件自己的设置项都登记在 `client.js` 的 `SETTINGS` 表里（存储键 / 解码 / 编码 / 线上名），新增一项 = 表里加一行 + 设置页控件；启动态与回灌会跟着走，不用另写读取逻辑。
+- **设置项**：插件自己的设置项都登记在 `src/client/settings.js` 的 `SETTINGS` 表里（存储键 / 解码 / 编码 / 线上名），新增一项 = 表里加一行 + 设置页控件；启动态与回灌会跟着走，不用另写读取逻辑。
 - **拉起按键必须由宿主半部发**（页面发不了系统按键）。新路由挂在 `index.js` 已有的 loopback 前缀下，并延续两条不变量：只答 loopback、按白名单校验载荷。宿主侧新字段还要补 `index.js` 的 `pickStore`（`scripts/check-host.mjs` 会核对 `STORE_KEYS` 与它是否一致）。
 - **检查写在 `scripts/check-client.mjs`**：那里已经有走真实 `index.js` 路由的桥接检查（`bridge:` 开头的条目，用临时 profile 目录落真实文件），新增路由照这个形态接，不必新开脚本。
 - **卡片**：批注卡片的状态现在由 `IDLE_ANNOTATION` 与 `settleAnnotation` / `commitAnnotations` 统一收口，「正在听 / 失败原因」这类临时状态应作为卡片字段加到那一处，而不是各处 setState 各拼一份。

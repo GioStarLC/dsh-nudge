@@ -1,15 +1,21 @@
 # AGENTS.md
 
-dsh-nudge 是一个 DSH Web 插件：在悬浮窗里选一条快捷输入，让 agent 汇报当前状态，回答直接落在对话里。改 `client.js` 前先读它头部的扩展点清单；发版流程见 [docs/RELEASE.md](docs/RELEASE.md)。
+dsh-nudge 是一个 DSH Web 插件：在悬浮窗里选一条快捷输入，让 agent 汇报当前状态，回答直接落在对话里。改浏览器半部前先读 `src/client/index.js` 头部的扩展点清单；发版流程见 [docs/RELEASE.md](docs/RELEASE.md)。
 
 ## 仓库布局
 
 ```
 index.js                        宿主半部：设置持久化 + loopback 路由（inject: webServer）
-client.js                       浏览器半部：悬浮窗、设置面板、输入区入口（手写单文件，即产物）
-client.settings-jump.js         按需加载的 chunk：跳转到设置页
+src/client/index.js             浏览器半部入口：扩展点清单、apply、三个 slot 的注册
+src/client/runtime.js           窗口状态机：投递、等待、批注、设置、统计
+src/client/view.js              悬浮窗渲染树；settings-view.js 是设置页渲染树
+src/client/composer.js          输入区桥；其余模块按职责拆分（设置、存储、词表、几何、CSS…）
+src/client.settings-jump.js     按需加载 chunk 的源码：设置跳转
+client.js                       产物：浏览器半部 bundle（由 npm run build 生成，提交）
+client.settings-jump.js         产物：按需加载的 chunk（同上）
 cordis.patch.yml                bundle patch：一行插件注册，零配置
 locale/{en,zh}.json             插件元数据文案
+scripts/build.mjs               src/ → 两个产物（rollup）；--verify 比对已提交的产物
 scripts/check-client.mjs        浏览器半部校验（VM + stub React；含与宿主半部的桥接检查）
 scripts/check-host.mjs          宿主半部校验（临时 profile 目录）
 scripts/check-graph.mjs         代码图校验：project root 必须解析成仓库根
@@ -23,7 +29,7 @@ docs/RELEASE.md                 发版流程
 .github/workflows/check.yml     CI：推送/PR 跑 check，打 v* 标签再跑发版校验
 ```
 
-生成物不提交：`preview-out/`、`.agent/`、`graphify-out/`。
+`client.js` 与 `client.settings-jump.js` 是**要提交的生成物**：改 `src/` 后跑 `npm run build`，产物与源码同一条提交。不提交的生成物：`preview-out/`、`.agent/`、`graphify-out/`。
 
 ## 为什么有两个半部
 
@@ -32,7 +38,9 @@ Web GUI 每次启动换一个 loopback 端口，浏览器视角就是**新的 or
 ## 命令
 
 ```sh
-npm run check            # 日常验证入口：client + host + graph 校验；零依赖、不编译
+npm install              # 首次克隆后：唯一的构建依赖 rollup
+npm run build            # src/ → client.js + client.settings-jump.js（产物要提交）
+npm run check            # 日常验证入口：先核对产物与 src 一致，再跑 client + host + graph
 npm run check:client     # 只跑浏览器半部
 npm run check:host       # 只跑宿主半部
 npm run check:graph      # 只校验代码图的 project root（无图时跳过）
@@ -50,7 +58,7 @@ npm run hooks:install    # 启用 .githooks/pre-commit
 uv run --with "graphifyy[mcp]==0.9.57" graphify update "$PWD"
 ```
 
-`check` 是本项目的"单测"，不是构建：不编译、不下载、不装 `node_modules`。可以直接跑，不受全局「构建约束」限制。`test` 脚本不存在，也不要新增。
+`check` 先跑 `node scripts/build.mjs --verify`：`src/` 改了却没重新构建，这一步直接失败；之后才是 client、host、graph 校验。`test` 脚本不存在，也不要新增。
 
 ## graphify
 
@@ -63,7 +71,7 @@ uv run --with "graphifyy[mcp]==0.9.57" graphify update "$PWD"
 
 ## 查代码：grep 定位符号，graphify 看结构
 
-`client.js` 是一个八千多行的单文件，grep 能定位符号，但答不出"这块功能散在哪、改这里会波及谁"。这类问题用图（`graphify_*`），逐符号定位用 grep。
+浏览器半部按职责拆在 `src/client/` 下，但 `runtime.js`、`view.js`、`settings-view.js` 仍是三个两三千行的大文件。grep 能定位符号，答不出"这块功能散在哪、改这里会波及谁"；这类问题用图（`graphify_*`），逐符号定位用 grep。
 
 - **什么时候上图。** "某功能散在哪些函数/模块""谁调用 X、X 又调了谁""改这里波及谁""两条链路怎么串起来"→ 先读 `GRAPH_REPORT.md`（见上），要精确边和行号再 `query_graph`（BFS 铺面、DFS 追线）、`god_nodes`、`get_neighbors`、`shortest_path`。只找定义、精确字符串、改文案、单点符号 → `grep`/读源码，一次就中，别绕路。**别用仓库级宽 grep 开场**（`"批注|annotation"` 一把梭）；查询词用代码里的词，不是界面的中文词。
 - **调用一律带 `project_path`**（仓库根绝对路径）。不传时用的是 MCP 启动时缓存的 project root；`npm run check:graph` 守的就是这个不变量。
@@ -75,23 +83,24 @@ uv run --with "graphifyy[mcp]==0.9.57" graphify update "$PWD"
 
 ## 约定
 
-- **手写单文件就是产物**：`client.js` 由 `window.__ModuleLoader__.load({ id, factory(require) })` 加载，peer 依赖只能 `require(...)`。不改成 ESM `import`、不拆模块、不加 bundler 或 TypeScript。`client.settings-jump.js` 同样受 chunk 契约约束：与 `client.js` 同目录、名字匹配 `client.<name>.js`、注册为 `<owner id>/client.<name>.js`、导出纯函数（无 React、无插件状态）。
-- **设置有两份**：`localStorage` 的 `dsh-nudge:*` 是同步缓存；`index.js` 落在 profile 目录的 `nudge-store.json` 是跨重启、跨端口的真副本（`DSH_HOME` 可覆盖）。client 侧每个设置项都在 `client.js` 的 `SETTINGS` 表里登记（存储键 / 解码 / 编码 / 线上名 / 回灌），启动态、回灌和镜像负载都从这张表派生，所以新增一项 = 表里加一行 + 界面 + Host 白名单（`STORE_KEYS` 与 `pickStore`）。`scripts/check-client.mjs` 会核对这两张表，漏写 host 侧会红。镜像有两步不可省：只在读到记录之后才写（`mirrorReady`），刚回灌的记录不回写。
+- **`src/` 是源码，`client.js` / `client.settings-jump.js` 是提交的产物**：`npm run build` 用 rollup 把 `src/client/` 打成一个 CommonJS 包，再由 `scripts/build.mjs` 套上 `window.__ModuleLoader__.load({ id, factory(require) })`；源码里 `import 'react'`，产物里是 loader 的 `require('react')`。产物必须和源码一起提交，改了 src 不构建 `check` 会红。选 rollup 而不是 esbuild，是因为它只改 import/export，模板字符串里的 `\n`、注释和排版都原样保留——产物仍可逐行对照源码（见脚本头注释）。chunk 契约不变：与 `client.js` 同目录、名字匹配 `client.<name>.js`、注册为 `<owner id>/client.<name>.js`、导出纯函数（无 React、无插件状态），源码在 `src/client.settings-jump.js`。
+- **设置有两份**：`localStorage` 的 `dsh-nudge:*` 是同步缓存；`index.js` 落在 profile 目录的 `nudge-store.json` 是跨重启、跨端口的真副本（`DSH_HOME` 可覆盖）。client 侧每个设置项都在 `src/client/settings.js` 的 `SETTINGS` 表里登记（存储键 / 解码 / 编码 / 线上名 / 回灌），启动态、回灌和镜像负载都从这张表派生，所以新增一项 = 表里加一行 + 界面 + Host 白名单（`STORE_KEYS` 与 `pickStore`）。`scripts/check-client.mjs` 会核对这两张表，漏写 host 侧会红。镜像有两步不可省：只在读到记录之后才写（`mirrorReady`），刚回灌的记录不回写。
 - **host 安全不变量不可放宽**：只答 loopback；只保留 `STORE_KEYS` 内的键并校验结构（`pickStore`）；body ≤ 256KB；临时文件 + `rename` 原子写。
 - **client 不解析回答**：回答只属于对话，插件不重复、不改写、不朗读。
 - **校验优先行为**：加断言用 `check(label, actual, expected)`，走真实渲染树或真实 HTTP 往返，不 mock 内部函数。两张白名单（`SETTINGS` ↔ `STORE_KEYS`、ZH/EN 键集）另有一组显式的不变式断言，那是刻意的例外：它们测的正是"两边必须同名"这件事。
 - **CHANGELOG.md 是生成物**：要改措辞就写 `scripts/release-notes/<tag>.md`，再 `npm run changelog:write`。
 - **提交是 Conventional Commits**：`feat(client): ...`、`fix: ...` 等，否则整条落进日志的「其他」分类。一条提交一件事，拆分依据是用户能感知的变化，不是文件。
 - **文案**：用户可见文案是中文，术语跟界面一致（悬浮窗、批注、快捷输入），不自创新词；`locale/en.json` 与 `locale/zh.json` 键集保持同步。
-- **不引依赖**：`package.json` 没有 dependencies 与 devDependencies，脚本保持 node 原生。确需引入时先说明为什么现有的不够。
+- **运行时零依赖，构建只有一个 devDependency**：`package.json` 没有 dependencies，只有锁死的 `rollup`；脚本保持 node 原生。确需再加依赖时先说明为什么现有的不够。
 
 ## 反模式
 
 | 反模式 | 正确做法 |
 | --- | --- |
 | 想装 jest / vitest 补测试 | 在 `scripts/check-*.mjs` 加 `check(...)` |
-| 把 `client.js` 改成 ESM 或拆多模块 | 保持单文件 + `__ModuleLoader__` factory |
-| 加设置项只改界面 | 先在 client.js 的 `SETTINGS` 表加一行；Host 侧出现新形状再补 `pickStore`（`check-host` 核对 `STORE_KEYS`） |
+| 手改 `client.js` 或 `client.settings-jump.js` | 改 `src/client/`，再 `npm run build` |
+| 提交了 src 却没提交重建的产物 | 跑 `npm run check`（先 verify 再校验） |
+| 加设置项只改界面 | 先在 `src/client/settings.js` 的 `SETTINGS` 表加一行；Host 侧出现新形状再补 `pickStore`（`check-host` 核对 `STORE_KEYS`） |
 | 手改 CHANGELOG.md | 改 release note，再 `changelog:write` |
 | `git commit --no-verify` 跳过守卫 | 先修 `npm run check` |
 | `git add -A` 一把梭 | 按"一件事"拆提交，见 `docs/RELEASE.md` |
@@ -99,4 +108,4 @@ uv run --with "graphifyy[mcp]==0.9.57" graphify update "$PWD"
 
 ## 编辑本文件
 
-加一条就删一条，同一事实只写一处。能从 `docs/RELEASE.md`、脚本头部注释或 `client.js` 头注释读到的，只放链接不复制。全局行为约定（自主推进、输出形态、符号先搜再改）在 `~/.dsh/AGENTS.md`，这里不重复。
+加一条就删一条，同一事实只写一处。能从 `docs/RELEASE.md`、脚本头部注释或 `src/client/index.js` 头注释读到的，只放链接不复制。全局行为约定（自主推进、输出形态、符号先搜再改）在 `~/.dsh/AGENTS.md`，这里不重复。

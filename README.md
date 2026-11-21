@@ -78,21 +78,27 @@ dsh plugin --profile desktop add github:GioStarLC/dsh-nudge   # 桌面端
 dsh plugin --profile web     add github:GioStarLC/dsh-nudge   # dsh web
 ```
 
-重启或刷新窗口，无需构建。
+重启或刷新窗口即可；安装方不需要构建，产物已经随仓库提供。
 
 若启动时报 `dsh: failed to read overlay …\dsh-nudge\cordis.patch.yml: ENOENT`，说明安装副本里缺了包声明的 `dsh.bundle.patch`（插件行就是从这个文件插进去的，缺了它整条 `nudge` 行都不会注册）。把仓库里的 `cordis.patch.yml` 与 `icon.svg` 补进该安装目录再重启即可，不必重新安装。
 
 ## 开发
 
+浏览器半部的源码在 `src/client/`，`client.js` 与 `client.settings-jump.js` 是它构建出来的产物。产物要随源码一起提交：安装方拿到的是仓库里的文件，不会在安装时构建。
+
 ```sh
+npm install             # 唯一的构建依赖：rollup（版本锁在 lockfile）
+npm run build           # src/ → 两个产物；改过 src 就要跑
 npm run hooks:install   # 首次克隆后执行，启用 .githooks/pre-commit
 npm run check
 npm run preview:all
 ```
 
-`check` 跑 client、host、graph 三组检查（零依赖，不需要 `npm install`），提交钩子也会调用；`preview:all` 把界面场景渲染到 `preview-out/`。推送或 PR 时 GitHub Actions 会再跑一遍 `check`；打 `v*` 标签时额外核对 tag、`package.json` 与 `CHANGELOG.md` 同名（`npm run check:release`）。
+`check` 先跑 `build --verify`：源码改了却没有重建产物，第一步就会失败；随后才跑 client、host、graph 三组检查，提交钩子也会调用。`preview:all` 把界面场景渲染到 `preview-out/`。推送或 PR 时 GitHub Actions 会再跑一遍 `check`；打 `v*` 标签时额外核对 tag、`package.json` 与 `CHANGELOG.md` 同名（`npm run check:release`）。
 
-仓库不含任何安装期钩子（没有 `prepare`、`postinstall`），所以以 git 方式安装的消费方不会触发 pnpm 的构建脚本审批。
+构建用 rollup 而不是 esbuild：rollup 只重写 import/export，模板字符串里的 `\n`、注释和排版原样留在产物里，产物可以逐行对照源码读。构建脚本在 `scripts/build.mjs`，负责给产物套上 DSH 加载器要求的 `__ModuleLoader__.load` 外壳。
+
+仓库不含任何安装期钩子（没有 `prepare`、`postinstall`），所以以 git 方式安装的消费方不会触发 pnpm 的构建脚本审批，也不需要装 rollup。
 
 ## 更新日志与发布
 

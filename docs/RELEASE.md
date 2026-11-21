@@ -99,6 +99,7 @@ git push --follow-tags
 
 ## 坑
 
+- **改过 `src/` 先构建**：`npm run build` 之后把 `client.js` / `client.settings-jump.js` 和源码放进同一条提交。`npm run check` 会先跑 `build --verify`，产物没重建会直接拦下；只提交 `src/` 或只提交产物，都会让安装副本和源码对不上。
 - **tag 还没推时一切都可重来**：`git reset --soft HEAD~1` 改发版提交，`git tag -d vX.Y.Z` 重打。
 - **`--version` 撞已有 tag 会直接报错**，这是故意的：已发布的段落只由标签决定，不接受重命名。
 - **打 tag 前后生成的字节必须一致**，靠两条不变量：发布块按最新一条真实提交的日期命名（不是 tag 创建时间）；`chore(release):` 这类提交自身不进日志。
