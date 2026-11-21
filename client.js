@@ -5716,6 +5716,176 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
         )
       }
 
+      /** Whether this browser wants the chip motion (reduced motion users do not). */
+      function chipMotionOn() {
+        try {
+          if (typeof window === 'undefined') return false
+          return window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches !== true
+        } catch {
+          return false
+        }
+      }
+
+      /**
+       * Every chip's box in view coordinates, measured from its layout
+       * (`offsetLeft`/`offsetTop`) rather than its painted rect: a chip that is
+       * still sliding from the previous reorder must not skew the next one.
+       */
+      function chipRowBoxes(row) {
+        if (row === null || row === undefined) return []
+        let base = null
+        try {
+          base = typeof row.getBoundingClientRect === 'function' ? row.getBoundingClientRect() : null
+        } catch {
+          base = null
+        }
+        if (base === null) return []
+        const boxes = []
+        const children = row.children ?? []
+        for (let index = 0; index < children.length; index += 1) {
+          const node = children[index]
+          const id = node?.dataset?.presetId
+          if (typeof id !== 'string' || id === '') continue
+          boxes.push({
+            id,
+            node,
+            left: base.left + node.offsetLeft,
+            top: base.top + node.offsetTop,
+            width: node.offsetWidth,
+            height: node.offsetHeight,
+          })
+        }
+        return boxes
+      }
+
+      /**
+       * How far one chip has to travel for its box to land in the new slot:
+       * the layout delta, plus any offset still painted from an earlier pass.
+       */
+      function chipShiftOf(prev, box, axis) {
+        const delta = prev[axis] - box[axis]
+        let painted = box[axis]
+        try {
+          const rect = typeof box.node?.getBoundingClientRect === 'function' ? box.node.getBoundingClientRect() : null
+          if (rect !== null) painted = rect[axis]
+        } catch {
+          painted = box[axis]
+        }
+        return Math.round(delta + (painted - box[axis]))
+      }
+
+      /** Put the dragged chip under the pointer, whatever slot its layout took. */
+      function paintChipUnderPointer(drag, row) {
+        const node = drag?.node
+        if (row === null || row === undefined || node === undefined || node === null) return
+        let base = null
+        try {
+          base = typeof row.getBoundingClientRect === 'function' ? row.getBoundingClientRect() : null
+        } catch {
+          base = null
+        }
+        if (base === null) return
+        const left = base.left + node.offsetLeft
+        const top = base.top + node.offsetTop
+        node.style.transform = `translate(${Math.round(drag.lastX - drag.grabX - left)}px, ${Math.round(
+          drag.lastY - drag.grabY - top,
+        )}px)`
+      }
+
+      /**
+       * The insertion point the pointer points at, counted against the boxes
+       * frozen at the start of the drag. The row does not move while dragging,
+       * so the same pointer position always yields the same slot.
+       */
+      function chipTargetAt(drag) {
+        return chipSlotAt(drag.boxes ?? [], drag.id, drag.lastX, drag.lastY)
+      }
+
+      /** The caret that shows the slot above, drawn on the frozen boxes. */
+      function chipCaretAt(drag, index, row) {
+        if (row === null || row === undefined || drag === null) return null
+        const rest = (drag.boxes ?? []).filter((box) => box.id !== drag.id)
+        if (rest.length === 0) return null
+        let base = null
+        try {
+          base = typeof row.getBoundingClientRect === 'function' ? row.getBoundingClientRect() : null
+        } catch {
+          base = null
+        }
+        if (base === null) return null
+        const box = index < rest.length ? rest[index] : rest[rest.length - 1]
+        const left = index < rest.length ? box.left - base.left - 2 : box.left + box.width - base.left
+        return {
+          left: `${Math.round(left)}px`,
+          top: `${Math.round(box.top - base.top)}px`,
+          height: `${Math.round(box.height)}px`,
+        }
+      }
+
+      /**
+       * The drag one press on a chip starts, or null when the press is not one.
+       * The row's boxes are read once, when the press becomes a drag, so a later
+       * reorder cannot move the slot under a still pointer.
+       */
+      function chipDragFrom(event, presetId) {
+        if (event === undefined || event === null) return null
+        if (event.button !== undefined && event.button !== 0) return null
+        if (typeof event.clientX !== 'number' || typeof event.clientY !== 'number') return null
+        const node = event.currentTarget
+        if (node === undefined || node === null) return null
+        if (typeof node.setPointerCapture === 'function' && event.pointerId !== undefined) {
+          try {
+            node.setPointerCapture(event.pointerId)
+          } catch {
+            /* capture is best effort */
+          }
+        }
+        let rect = null
+        try {
+          rect = typeof node.getBoundingClientRect === 'function' ? node.getBoundingClientRect() : null
+        } catch {
+          rect = null
+        }
+        return {
+          id: presetId,
+          node,
+          pointerId: event.pointerId,
+          startX: event.clientX,
+          startY: event.clientY,
+          lastX: event.clientX,
+          lastY: event.clientY,
+          grabX: rect === null ? 0 : event.clientX - rect.left,
+          grabY: rect === null ? 0 : event.clientY - rect.top,
+          moved: false,
+          /** The row's boxes, read once: the drag is decided against them. */
+          boxes: null,
+          /** Insertion point among the other chips, or null before the first move. */
+          target: null,
+        }
+      }
+
+      /** Let a dropped chip slide from under the pointer back into its slot. */
+      function settleChipNode(node) {
+        if (node === undefined || node === null) return
+        let from = ''
+        try {
+          from = typeof window === 'undefined' ? '' : window.getComputedStyle(node).transform
+        } catch {
+          from = ''
+        }
+        node.style.transform = ''
+        if (from === '' || from === 'none' || chipMotionOn() !== true) return
+        if (typeof node.animate !== 'function') return
+        try {
+          node.animate([{ transform: from }, { transform: 'none' }], {
+            duration: CHIP_SETTLE_MS,
+            easing: 'ease-out',
+          })
+        } catch {
+          /* the motion is decoration */
+        }
+      }
+
       /**
        * The quick-input row: one chip per enabled entry, plus the add and edit
        * chips. In edit mode a chip is a drag handle: a press starts a drag, a
@@ -5955,13 +6125,13 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
           const settle = chipSettleRef.current
           chipSettleRef.current = null
           const dropped = settle === null ? null : settle.node
-          if (before !== null && chipsMotionOn()) {
+          if (before !== null && chipMotionOn()) {
             for (const box of chipRowLayout()) {
               if (box.node === dropped) continue
               const prev = before.get(box.id)
               if (prev === undefined) continue
-              const dx = beforeChipShift(prev, box, 'left')
-              const dy = beforeChipShift(prev, box, 'top')
+              const dx = chipShiftOf(prev, box, 'left')
+              const dy = chipShiftOf(prev, box, 'top')
               if (dx === 0 && dy === 0) continue
               if (typeof box.node?.animate !== 'function') continue
               try {
@@ -5974,7 +6144,7 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
               }
             }
           }
-          if (settle !== null && chipsMotionOn() && typeof settle.node?.animate === 'function') {
+          if (settle !== null && chipMotionOn() && typeof settle.node?.animate === 'function') {
             const box = chipRowLayout().find((item) => item.node === settle.node)
             if (box !== undefined) {
               const dx = Math.round(settle.left - box.left)
@@ -5992,7 +6162,7 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
             }
           }
           const dragging = chipDragRef.current
-          if (dragging !== null && dragging.moved === true) placeChipUnderPointer(dragging)
+          if (dragging !== null && dragging.moved === true) paintChipUnderPointer(dragging, chipRowRef.current)
         }, [chipOrderKey])
         // The status row is never empty: a change message wins while its timer
         // runs, otherwise the idle lines take turns.
@@ -6086,7 +6256,7 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
         /** The window's own edit mode: drag to reorder, click one to change it. */
         const editing = state.nudgeEditing === true
         /** The caret the row shows while a chip is being dragged, or null. */
-        const chipCaretStyle = editing && chipDropIndex !== null ? chipCaretAt(chipDragRef.current, chipDropIndex) : null
+        const chipCaretStyle = editing && chipDropIndex !== null ? chipCaretAt(chipDragRef.current, chipDropIndex, chipRowRef.current) : null
         /** The entry the in-window editor is about, or null once it is disabled. */
         const editingPreset =
           state.nudgeEditId === null
@@ -6112,82 +6282,9 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
               : t('ask')
         const askTitle = insertMode ? t('insertHint') : t('askHint')
 
-        /** Whether this browser wants the chip motion (reduced motion users do not). */
-        function chipsMotionOn() {
-          try {
-            if (typeof window === 'undefined') return false
-            return window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches !== true
-          } catch {
-            return false
-          }
-        }
-
-        /**
-         * Every chip's box in view coordinates, measured from its layout
-         * (`offsetLeft`/`offsetTop`) rather than its painted rect: a chip that is
-         * still sliding from the previous reorder must not skew the next one.
-         */
+        /** The row's boxes; the drag is judged against the copy frozen at its start. */
         function chipRowLayout() {
-          const row = chipRowRef.current
-          if (row === null || row === undefined) return []
-          let base = null
-          try {
-            base = typeof row.getBoundingClientRect === 'function' ? row.getBoundingClientRect() : null
-          } catch {
-            base = null
-          }
-          if (base === null) return []
-          const boxes = []
-          const children = row.children ?? []
-          for (let index = 0; index < children.length; index += 1) {
-            const node = children[index]
-            const id = node?.dataset?.presetId
-            if (typeof id !== 'string' || id === '') continue
-            boxes.push({
-              id,
-              node,
-              left: base.left + node.offsetLeft,
-              top: base.top + node.offsetTop,
-              width: node.offsetWidth,
-              height: node.offsetHeight,
-            })
-          }
-          return boxes
-        }
-
-        /**
-         * How far one chip has to travel for its box to land in the new slot:
-         * the layout delta, plus any offset still painted from an earlier pass.
-         */
-        function beforeChipShift(prev, box, axis) {
-          const delta = prev[axis] - box[axis]
-          let painted = box[axis]
-          try {
-            const rect = typeof box.node?.getBoundingClientRect === 'function' ? box.node.getBoundingClientRect() : null
-            if (rect !== null) painted = rect[axis]
-          } catch {
-            painted = box[axis]
-          }
-          return Math.round(delta + (painted - box[axis]))
-        }
-
-        /** Put the dragged chip under the pointer, whatever slot its layout took. */
-        function placeChipUnderPointer(drag) {
-          const row = chipRowRef.current
-          const node = drag?.node
-          if (row === null || row === undefined || node === undefined || node === null) return
-          let base = null
-          try {
-            base = typeof row.getBoundingClientRect === 'function' ? row.getBoundingClientRect() : null
-          } catch {
-            base = null
-          }
-          if (base === null) return
-          const left = base.left + node.offsetLeft
-          const top = base.top + node.offsetTop
-          node.style.transform = `translate(${Math.round(drag.lastX - drag.grabX - left)}px, ${Math.round(
-            drag.lastY - drag.grabY - top,
-          )}px)`
+          return chipRowBoxes(chipRowRef.current)
         }
 
         /**
@@ -6200,71 +6297,17 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
          */
         function updateChipTarget(drag) {
           if ((drag.boxes ?? []).length < 2) return
-          const index = chipSlotAt(drag.boxes, drag.id, drag.lastX, drag.lastY)
+          const index = chipTargetAt(drag)
           if (drag.target === index) return
           drag.target = index
           setChipDropIndex(index)
         }
 
-        /** The caret that shows the slot above, drawn on the frozen boxes. */
-        function chipCaretAt(drag, index) {
-          const row = chipRowRef.current
-          if (row === null || row === undefined || drag === null) return null
-          const rest = (drag.boxes ?? []).filter((box) => box.id !== drag.id)
-          if (rest.length === 0) return null
-          let base = null
-          try {
-            base = typeof row.getBoundingClientRect === 'function' ? row.getBoundingClientRect() : null
-          } catch {
-            base = null
-          }
-          if (base === null) return null
-          const box = index < rest.length ? rest[index] : rest[rest.length - 1]
-          const left = index < rest.length ? box.left - base.left - 2 : box.left + box.width - base.left
-          return {
-            left: `${Math.round(left)}px`,
-            top: `${Math.round(box.top - base.top)}px`,
-            height: `${Math.round(box.height)}px`,
-          }
-        }
-
         /** Begin a press on a chip in edit mode; it becomes a drag past a few px. */
         function beginChipDrag(event, preset) {
           if (state.nudgeEditing !== true) return
-          if (event === undefined || event === null) return
-          if (event.button !== undefined && event.button !== 0) return
-          if (typeof event.clientX !== 'number' || typeof event.clientY !== 'number') return
-          const node = event.currentTarget
-          if (node === undefined || node === null) return
-          if (typeof node.setPointerCapture === 'function' && event.pointerId !== undefined) {
-            try {
-              node.setPointerCapture(event.pointerId)
-            } catch {
-              /* capture is best effort */
-            }
-          }
-          let rect = null
-          try {
-            rect = typeof node.getBoundingClientRect === 'function' ? node.getBoundingClientRect() : null
-          } catch {
-            rect = null
-          }
-          chipDragRef.current = {
-            id: preset.id,
-            node,
-            pointerId: event.pointerId,
-            startX: event.clientX,
-            startY: event.clientY,
-            lastX: event.clientX,
-            lastY: event.clientY,
-            grabX: rect === null ? 0 : event.clientX - rect.left,
-            grabY: rect === null ? 0 : event.clientY - rect.top,
-            moved: false,
-            /** The row's boxes, read once: the drag is decided against them. */
-            boxes: null,
-            /** Insertion point among the other chips, or null before the first move. */
-            target: null,
-          }
+          const drag = chipDragFrom(event, preset.id)
+          if (drag !== null) chipDragRef.current = drag
         }
 
         /** Follow the pointer once a press has travelled far enough to be a drag. */
@@ -6284,7 +6327,7 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
               /* the lift is decoration */
             }
           }
-          placeChipUnderPointer(drag)
+          paintChipUnderPointer(drag, chipRowRef.current)
           if (drag.boxes !== null) updateChipTarget(drag)
         }
 
@@ -6341,14 +6384,14 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
           const rest = (drag.boxes ?? []).filter((box) => box.id !== drag.id)
           const target = drag.target
           if (rest.length === 0 || target === null || target === undefined || left === null) {
-            settleChip(node)
+            settleChipNode(node)
             return
           }
           const live = state.presets.filter((preset) => preset.enabled !== false).map((preset) => preset.id)
           const current = live.indexOf(drag.id)
           // Dropping on the slot the chip already occupies changes nothing.
           if (current < 0 || target === current) {
-            settleChip(node)
+            settleChipNode(node)
             return
           }
           chipFlipRef.current = new Map((drag.boxes ?? []).map((box) => [box.id, box]))
@@ -6361,27 +6404,6 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
           }
         }
 
-        /** Let a dropped chip slide from under the pointer back into its slot. */
-        function settleChip(node) {
-          if (node === undefined || node === null) return
-          let from = ''
-          try {
-            from = typeof window === 'undefined' ? '' : window.getComputedStyle(node).transform
-          } catch {
-            from = ''
-          }
-          node.style.transform = ''
-          if (from === '' || from === 'none' || chipsMotionOn() !== true) return
-          if (typeof node.animate !== 'function') return
-          try {
-            node.animate([{ transform: from }, { transform: 'none' }], {
-              duration: CHIP_SETTLE_MS,
-              easing: 'ease-out',
-            })
-          } catch {
-            /* the motion is decoration */
-          }
-        }
         /** Hover/focus handlers for the explanation bubble of one control. */
         const tipProps = (key) => ({
           onMouseEnter: (event) => runtime.showTip(key, event?.currentTarget?.getBoundingClientRect?.()),
