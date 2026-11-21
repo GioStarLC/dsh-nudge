@@ -413,6 +413,11 @@ export function renderToHtml(node) {
   }
   const attrText = attrs.length ? ' ' + attrs.join(' ') : ''
 
+  // A textarea's content is its text, not its value attribute: a browser
+  // ignores `value="…"` on it, so a filled field would preview as an empty box.
+  if (tag === 'textarea' && typeof props?.value === 'string') {
+    return `<textarea${attrText}>${escapeHtml(props.value)}</textarea>`
+  }
   if (props?.dangerouslySetInnerHTML?.__html) {
     return `<${tag}${attrText}>${props.dangerouslySetInnerHTML.__html}</${tag}>`
   }

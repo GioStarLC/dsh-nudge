@@ -577,6 +577,167 @@ function expandTree(node) {
   check('quick add: cancel discards', runtime.getSnapshot().presets.length, 4)
 }
 
+// --- in-window edit: drag to reorder, click one to change it --------------
+
+{
+  const booted = await boot({})
+  const { runtime } = booted
+  const View = booted.registrations.find((item) => item.entry.name === 'shell.overlay').Component
+  const ids = () => runtime.getSnapshot().presets.map((preset) => preset.id)
+  const chips = () => findAllByClass(View(), 'dsh-nudge-chip')
+  const chip = () =>
+    findAllByClass(View(), 'dsh-nudge-chip').find((item) => item.props['data-preset-id'] !== undefined)
+  check(
+    'edit: the button follows add',
+    chips()
+      .map((item) => item.props.className.includes('dsh-nudge-chip-edit'))
+      .join('|'),
+    'false|false|false|false|true',
+  )
+  check('edit: mode is off at rest', runtime.getSnapshot().nudgeEditing, false)
+  runtime.startNudgeDraft()
+  check('edit: arming the mode accepted', runtime.setNudgeEditing(true), true)
+  check('edit: arming the mode closes the add form', Boolean(findByClass(View(), 'dsh-nudge-quick-add')), false)
+  check(
+    'edit: the row says so',
+    findAllByClass(View(), 'dsh-nudge-presets')[0]?.props?.className,
+    'dsh-nudge-presets editing',
+  )
+  check('edit: every live chip is a handle', (findAllByClass(View(), 'dsh-nudge-chip-drag') ?? []).length, 3)
+  check('edit: arming alone keeps the order', ids().join(','), 'brief,fast,four-line')
+
+  // A press that never travels is a click on that entry: it opens the editor.
+  const node = {
+    setPointerCapture() {},
+    releasePointerCapture() {},
+    classList: { add() {}, remove() {} },
+    style: {},
+    getBoundingClientRect: () => ({ left: 10, top: 10, width: 80, height: 28 }),
+  }
+  // One render tree for the whole press: a drag lives in the instance a press
+  // started on, exactly like the mounted window.
+  const pressed = chip()
+  pressed.props.onPointerDown(pointerAt(20, 20, node, node))
+  pressed.props.onPointerUp(pointerAt(20, 20, node, node))
+  check('edit: a press opens that entry', runtime.getSnapshot().nudgeEditId, 'brief')
+  check('edit: the form renders', Boolean(findByClass(View(), 'dsh-nudge-quick-edit')), true)
+  check('edit: the title comes pre-filled', Boolean(findByProp(View(), 'value', '简述')), true)
+  check(
+    'edit: the body comes pre-filled',
+    Boolean(findByProp(View(), 'value', runtime.getSnapshot().presets[0].text)),
+    true,
+  )
+  runtime.setNudgeEditLabel('简述2')
+  runtime.setNudgeEditText('改成两句话')
+  check('edit: saving accepted', runtime.saveNudgeEdit().ok, true)
+  check('edit: the form closes', runtime.getSnapshot().nudgeEditId, null)
+  check('edit: the label landed', runtime.getSnapshot().presets[0].label, '简述2')
+  check('edit: the text landed', runtime.getSnapshot().presets[0].text, '改成两句话')
+  check('edit: the mode survives a save', runtime.getSnapshot().nudgeEditing, true)
+
+  // A press that travels is a drag: it reorders and never opens the form.
+  const dragged = chip()
+  dragged.props.onPointerDown(pointerAt(20, 20, node, node))
+  dragged.props.onPointerMove(pointerAt(60, 22, node, node))
+  dragged.props.onPointerUp(pointerAt(60, 22, node, node))
+  check('edit: a drag opens no form', runtime.getSnapshot().nudgeEditId, null)
+  check('edit: a drag keeps the mode', runtime.getSnapshot().nudgeEditing, true)
+  check('edit: a drag without a measured row changes nothing', ids().join(','), 'brief,fast,four-line')
+
+  // The drop slot is counted against boxes frozen at the start of the drag, so a
+  // still pointer always asks for the same slot — even when the chips differ in
+  // width and the row wraps. Frozen geometry is the whole fix for the jitter.
+  const slotAt = booted.runtime._debug.chipSlotAt
+  const oneRow = [
+    { id: 'a', left: 0, top: 0, width: 60, height: 28 },
+    { id: 'b', left: 70, top: 0, width: 120, height: 28 },
+    { id: 'c', left: 200, top: 0, width: 60, height: 28 },
+  ]
+  check('edit slot: before the first chip', slotAt(oneRow, 'b', -10, 14), 0)
+  check('edit slot: past the first chip', slotAt(oneRow, 'b', 40, 14), 1)
+  check('edit slot: past the last chip', slotAt(oneRow, 'b', 250, 14), 2)
+  check('edit slot: below every chip', slotAt(oneRow, 'b', 0, 40), 2)
+  check('edit slot: the same pointer asks for the same slot', slotAt(oneRow, 'b', 40, 14), slotAt(oneRow, 'b', 40, 14))
+  const wrapped = [
+    { id: 'a', left: 0, top: 0, width: 60, height: 28 },
+    { id: 'b', left: 70, top: 0, width: 120, height: 28 },
+    { id: 'c', left: 0, top: 34, width: 60, height: 28 },
+  ]
+  check('edit slot: a wrapped second row starts after the first', slotAt(wrapped, 'c', 10, 40), 2)
+  check('edit slot: the dragged chip is no slot of its own', slotAt(wrapped, 'a', 10, 14), 0)
+
+  // The reorder itself: the window hands a drop to one neighbour at a time.
+  check('edit: drop after the neighbour', runtime.movePresetBeside('brief', 'fast', true), true)
+  check('edit: the dragged entry moved', ids().join(','), 'fast,brief,four-line')
+  check(
+    'edit: the new order is stored',
+    JSON.parse(booted.localStorage.getItem('dsh-nudge:presets'))
+      .map((preset) => preset.id)
+      .join(','),
+    'fast,brief,four-line',
+  )
+  check('edit: drop before the neighbour', runtime.movePresetBeside('four-line', 'fast', false), true)
+  check('edit: the anchor order follows', ids().join(','), 'four-line,fast,brief')
+  check('edit: a no-op move reports nothing', runtime.movePresetBeside('four-line', 'fast', false), false)
+  check('edit: an unknown neighbour is refused', runtime.movePresetBeside('four-line', 'nope', true), false)
+
+  // Keys do the same two things, so the mode is usable without a pointer.
+  const fastChip = () =>
+    findAllByClass(View(), 'dsh-nudge-chip').find((item) => item.props['data-preset-id'] === 'fast')
+  fastChip().props.onKeyDown({ key: 'ArrowRight', preventDefault() {} })
+  check('edit: the right arrow hands the entry over', ids().join(','), 'four-line,brief,fast')
+  fastChip().props.onKeyDown({ key: 'ArrowLeft', preventDefault() {} })
+  check('edit: the left arrow brings it back', ids().join(','), 'four-line,fast,brief')
+  const firstChip = () =>
+    findAllByClass(View(), 'dsh-nudge-chip').find((item) => item.props['data-preset-id'] === 'four-line')
+  firstChip().props.onKeyDown({ key: 'ArrowLeft', preventDefault() {} })
+  check('edit: an arrow at the edge does nothing', ids().join(','), 'four-line,fast,brief')
+  fastChip().props.onKeyDown({ key: 'Enter', preventDefault() {} })
+  check('edit: Enter opens the entry', runtime.getSnapshot().nudgeEditId, 'fast')
+  runtime.cancelNudgeEdit()
+
+  // A disabled entry is not in the window, but it keeps its own slot.
+  runtime.setPresetEnabled('fast', false)
+  check(
+    'edit: the live row skips the disabled slot',
+    runtime
+      .getSnapshot()
+      .presets.filter((preset) => preset.enabled !== false)
+      .map((preset) => preset.id)
+      .join(','),
+    'four-line,brief',
+  )
+  check('edit: dragging past a live neighbour', runtime.movePresetBeside('four-line', 'brief', true), true)
+  check(
+    'edit: the live order follows the drop',
+    runtime
+      .getSnapshot()
+      .presets.filter((preset) => preset.enabled !== false)
+      .map((preset) => preset.id)
+      .join(','),
+    'brief,four-line',
+  )
+  check('edit: the disabled entry is kept', ids().length, 3)
+
+  // Empty text is refused by the same rule the settings editor uses.
+  const briefText = runtime.getSnapshot().presets.find((preset) => preset.id === 'brief').text
+  check('edit: the editor opens again', runtime.startNudgeEdit('brief'), true)
+  runtime.setNudgeEditText('   ')
+  check('edit: an empty body is refused', runtime.saveNudgeEdit().ok, false)
+  check('edit: the reason is surfaced', Boolean(findByClass(View(), 'dsh-nudge-settings-error')), true)
+  check('edit: the form stays open', runtime.getSnapshot().nudgeEditId, 'brief')
+  check('edit: cancelling closes it', runtime.cancelNudgeEdit(), true)
+  check(
+    'edit: cancelling keeps the stored text',
+    runtime.getSnapshot().presets.find((preset) => preset.id === 'brief').text,
+    briefText,
+  )
+  check('edit: leaving the mode accepted', runtime.setNudgeEditing(false), true)
+  check('edit: the form goes away with the mode', Boolean(findByClass(View(), 'dsh-nudge-quick-edit')), false)
+  check('edit: the add form can open instead', runtime.startNudgeDraft(), true)
+  check('edit: adding leaves the mode', runtime.getSnapshot().nudgeEditing, false)
+}
+
 // --- preset on/off: disabled prompts stay in settings, leave the window --
 
 {
@@ -610,12 +771,12 @@ function expandTree(node) {
     1,
   )
   const chips = () => findAllByClass(View(), 'dsh-nudge-chip')
-  check('the window hides the disabled chip', chips().length, 3)
+  check('the window hides the disabled chip', chips().length, 4)
   check('the add chip stays', Boolean(findByClass(View(), 'dsh-nudge-chip-add')), true)
 
   check('re-enable accepted', runtime.togglePresetEnabled(target), true)
   check('the preset is enabled again', runtime.getSnapshot().presets.find((preset) => preset.id === target).enabled, true)
-  check('the window shows all chips again', chips().length, 4)
+  check('the window shows all chips again', chips().length, 5)
 
   for (const preset of runtime.getSnapshot().presets) runtime.setPresetEnabled(preset.id, false)
   check('every preset can be off', runtime.getSnapshot().presets.every((preset) => preset.enabled === false), true)

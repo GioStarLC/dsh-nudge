@@ -137,6 +137,20 @@ const SCENES = {
       return { view: 'shell.overlay', width: 520, height: 260 }
     },
   },
+  // The window's own edit mode: the row is draggable and one entry is open in
+  // the in-place form, so the capture shows both halves of the feature.
+  'quick-edit': {
+    bg: '#f3f4f6',
+    storage: statsPreviewStorage,
+    drive: async (b) => {
+      b.sessionsList.set({ ids: ['A'], byId: { A: { title: '示例会话', retainedBy: { mainView: 1 } } } })
+      await tick()
+      b.runtime.setNudgeEditing(true)
+      b.runtime.startNudgeEdit('four-line')
+      await tick()
+      return { view: 'shell.overlay', width: 520, height: 420 }
+    },
+  },
   settings: {
     bg: '#f3f4f6',
     storage: statsPreviewStorage,

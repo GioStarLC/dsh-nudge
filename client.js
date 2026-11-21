@@ -42,6 +42,12 @@ window.__ModuleLoader__.load({
     /** The border widths the settings offer for the floating window, in px. */
     const FRAME_CHOICES = [0, 1, 2, 3]
     const DEFAULT_FRAME = 2
+    /** Pointer travel before a press on a window chip becomes a drag, in px. */
+    const CHIP_DRAG_SLOP = 4
+    /** How long a displaced window chip takes to reach its new slot, in ms. */
+    const CHIP_SHIFT_MS = 150
+    /** How long a dropped chip takes to settle back into its slot, in ms. */
+    const CHIP_SETTLE_MS = 130
     const NOTES_KEY = 'dsh-nudge:notes'
     /** Flow item attribute the shell uses for stable transcript anchors. */
     const ANCHOR_SELECTOR = '[data-chat-anchor-key]'
@@ -234,6 +240,10 @@ window.__ModuleLoader__.load({
       quickAdd: '新增',
       quickAddTitle: '标题',
       quickAddBody: '正文',
+      quickEdit: '编辑',
+      quickEditHint: '编辑快捷输入：拖动排序，点一下改内容',
+      editChipHint: '拖动排序，点一下修改；聚焦后按 ← → 移动，Enter 修改',
+      editPresetHead: '编辑快捷输入',
       collapseAnnotations: '收起批注',
       expandAnnotations: '展开批注',
       collapseNudge: '收起快捷输入',
@@ -402,6 +412,10 @@ window.__ModuleLoader__.load({
       quickAdd: 'Add',
       quickAddTitle: 'Title',
       quickAddBody: 'Body',
+      quickEdit: 'Edit',
+      quickEditHint: 'Edit quick inputs: drag to reorder, click one to change it',
+      editChipHint: 'Drag to reorder, click to edit; focus and press ← / → to move, Enter to edit',
+      editPresetHead: 'Edit quick input',
       collapseAnnotations: 'Collapse notes',
       expandAnnotations: 'Expand notes',
       collapseNudge: 'Collapse quick input',
@@ -1203,6 +1217,26 @@ window.__ModuleLoader__.load({
       return undefined
     }
 
+    /**
+     * The insertion point a pointer at (`x`, `y`) asks for among `boxes`,
+     * counting every box it has passed in reading order: top to bottom, then
+     * left to right. The boxes must be frozen for the whole drag — re-reading
+     * them after a reorder is what made a wide chip re-wrap the row and flip the
+     * slot back and forth under a still pointer.
+     * @param boxes - `{ id, left, top, width, height }` in reading order.
+     * @param id - the dragged chip, which is not a slot of its own.
+     */
+    function chipSlotAt(boxes, id, x, y) {
+      let index = 0
+      for (const box of boxes) {
+        if (box.id === id) continue
+        const below = y > box.top + box.height
+        const sameRow = y >= box.top && y <= box.top + box.height
+        if (below || (sameRow && x > box.left + box.width / 2)) index += 1
+      }
+      return index
+    }
+
     /** Identity for a user-added preset. */
     function mintPresetId() {
       return `custom-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`
@@ -1761,6 +1795,18 @@ window.__ModuleLoader__.load({
         annotationEditingId: null,
         annotationEditRect: null,
       }
+      /**
+       * The window's direct-edit surface for the quick inputs: whether the 编辑
+       * chip is armed, which entry's form is open, and the form's fields. One
+       * object so leaving the mode clears every part of it at once.
+       */
+      const IDLE_NUDGE_EDIT = {
+        nudgeEditing: false,
+        nudgeEditId: null,
+        nudgeEditLabel: '',
+        nudgeEditText: '',
+        nudgeEditError: '',
+      }
 
       let state = {
         phase: 'idle',
@@ -1812,6 +1858,7 @@ window.__ModuleLoader__.load({
         nudgeDraftLabel: '',
         nudgeDraftText: '',
         nudgeDraftError: '',
+        ...IDLE_NUDGE_EDIT,
         /** Whether the window shows the settings form in place of its body. */
         settingsOpen: false,
         /** Timestamp of the last capture, used to restart the attention pulse. */
@@ -3936,6 +3983,25 @@ window.__ModuleLoader__.load({
         return true
       }
 
+      /**
+       * Move one preset next to another (window drag): before it, or after it.
+       * Anchoring on the neighbour rather than on an index keeps the disabled
+       * entries — which never appear in the window — in their own slots.
+       */
+      function movePresetBeside(id, anchorId, after) {
+        if (id === anchorId) return false
+        const list = state.presets
+        const from = list.findIndex((preset) => preset.id === id)
+        if (from < 0) return false
+        const next = list.filter((preset) => preset.id !== id)
+        const anchor = next.findIndex((preset) => preset.id === anchorId)
+        if (anchor < 0) return false
+        next.splice(anchor + (after === true ? 1 : 0), 0, list[from])
+        if (next.every((preset, index) => preset.id === list[index].id)) return false
+        commitPresets(next, state.presetId)
+        return true
+      }
+
       /** Open or close one preset body in the settings list. */
       function togglePresetOpen(id) {
         if (presetOf(state.presets, id) === undefined) return false
@@ -3974,6 +4040,7 @@ window.__ModuleLoader__.load({
           nudgeDraftLabel: '',
           nudgeDraftText: '',
           nudgeDraftError: '',
+          ...IDLE_NUDGE_EDIT,
         })
         return true
       }
@@ -4003,6 +4070,77 @@ window.__ModuleLoader__.load({
           return result
         }
         setState({ nudgeDraftOpen: false, nudgeDraftLabel: '', nudgeDraftText: '', nudgeDraftError: '' })
+        return result
+      }
+
+      /**
+       * Arm or leave the window's direct-edit mode. The same row that adds a
+       * quick input then lets each one be dragged and edited in place, so fixing
+       * an entry no longer means walking into the settings page.
+       */
+      function setNudgeEditing(value) {
+        const next = value === true
+        if (next === (state.nudgeEditing === true)) return false
+        setState({
+          ...IDLE_NUDGE_EDIT,
+          nudgeEditing: next,
+          nudgeExpanded: next ? true : state.nudgeExpanded,
+          nudgeDraftOpen: false,
+          nudgeDraftLabel: '',
+          nudgeDraftText: '',
+          nudgeDraftError: '',
+        })
+        return true
+      }
+
+      /** Open one quick input in the window's own editor, pre-filled. */
+      function startNudgeEdit(id) {
+        const preset = presetOf(state.presets, id)
+        if (preset === undefined || preset.enabled === false) return false
+        setState({
+          ...IDLE_NUDGE_EDIT,
+          nudgeExpanded: true,
+          nudgeEditing: true,
+          nudgeDraftOpen: false,
+          nudgeDraftLabel: '',
+          nudgeDraftText: '',
+          nudgeDraftError: '',
+          nudgeEditId: preset.id,
+          nudgeEditLabel: preset.label,
+          nudgeEditText: preset.text,
+        })
+        return true
+      }
+
+      /** Close the window's editor without saving. */
+      function cancelNudgeEdit() {
+        if (state.nudgeEditId === null) return false
+        setState({ nudgeEditId: null, nudgeEditLabel: '', nudgeEditText: '', nudgeEditError: '' })
+        return true
+      }
+
+      /** Write the editor's title without saving it. */
+      function setNudgeEditLabel(value) {
+        setState({ nudgeEditLabel: typeof value === 'string' ? value : '' })
+      }
+
+      /** Write the editor's body without saving it. */
+      function setNudgeEditText(value) {
+        setState({ nudgeEditText: typeof value === 'string' ? value : '' })
+      }
+
+      /** Save the window's editor through the same preset store the settings use. */
+      function saveNudgeEdit() {
+        if (state.nudgeEditId === null) return { ok: false, error: text('presetTextRequired') }
+        const result = updatePreset(state.nudgeEditId, {
+          label: state.nudgeEditLabel,
+          text: state.nudgeEditText,
+        })
+        if (result.ok !== true) {
+          setState({ nudgeEditError: result.error })
+          return result
+        }
+        setState({ nudgeEditId: null, nudgeEditLabel: '', nudgeEditText: '', nudgeEditError: '' })
         return result
       }
 
@@ -4740,6 +4878,8 @@ window.__ModuleLoader__.load({
         removePreset,
         movePreset,
         movePresetTo,
+        /** Window drag: drop one prompt before or after another. */
+        movePresetBeside,
         resetPresets,
         togglePresetOpen,
         setPresetsOpen,
@@ -4754,6 +4894,13 @@ window.__ModuleLoader__.load({
         setNudgeDraftLabel,
         setNudgeDraftText,
         saveNudgeDraft,
+        /** In-window 编辑 mode: reorder by drag, change one prompt in place. */
+        setNudgeEditing,
+        startNudgeEdit,
+        cancelNudgeEdit,
+        setNudgeEditLabel,
+        setNudgeEditText,
+        saveNudgeEdit,
         importPresets,
         exportPresets,
         setCollapsed,
@@ -4808,6 +4955,7 @@ window.__ModuleLoader__.load({
         /** @internal exposed for scripts/check-client.mjs */
         _debug: {
           state: () => state,
+          chipSlotAt,
           syncComposerFocus,
           settingsSnapshot,
           applySettingsStore,
@@ -4869,19 +5017,40 @@ window.__ModuleLoader__.load({
 .dsh-nudge-field-inline{flex-direction:row;align-items:center;gap:10px}
 .dsh-nudge-field-inline .dsh-nudge-field-label{flex:0 0 auto}
 .dsh-nudge-field-label{font-size:11px;font-weight:600;letter-spacing:.4px;color:var(--dsw-alias-label-secondary,#6a6a76)}
-.dsh-nudge-presets{display:flex;flex-wrap:wrap;gap:6px}
+.dsh-nudge-presets{display:flex;flex-wrap:wrap;gap:6px;position:relative}
 .dsh-nudge-presets-empty{font-size:12px;line-height:1.6;color:var(--dsw-alias-label-secondary,#8a8a8a)}
 .dsh-nudge-chip{height:28px;padding:0 12px;border-radius:999px;border:1px solid var(--dn-line);background:transparent;color:var(--dsw-alias-label-secondary,#5a5a66);font:inherit;font-size:12px;line-height:1;cursor:pointer;transition:background .15s ease,color .15s ease,border-color .15s ease;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .dsh-nudge-chip:hover{border-color:var(--dn-accent-line);color:var(--dsw-alias-label-primary,#1a1a1a);background:var(--dn-accent-soft)}
 .dsh-nudge-chip:focus-visible{outline:2px solid var(--dn-accent-line);outline-offset:2px}
 .dsh-nudge-chip.active{background:var(--dn-accent-soft);border-color:var(--dn-accent-line);color:var(--dn-accent);font-weight:600}
 .dsh-nudge-chip.dsh-nudge-chip-add{border-style:dashed;color:var(--dn-accent)}
+.dsh-nudge-chip.dsh-nudge-chip-edit{border-style:dashed;color:var(--dn-accent)}
+/* Edit mode: a chip is a handle and a target, so the pointer owns its motion
+   and text selection stays out of the way. */
+.dsh-nudge-presets.editing .dsh-nudge-chip{touch-action:none}
+.dsh-nudge-presets.editing .dsh-nudge-chip:not(.dsh-nudge-chip-edit):not(.dsh-nudge-chip-add){cursor:grab;user-select:none}
+.dsh-nudge-chip-grip{display:inline-block;margin-right:4px;font-size:10px;line-height:1;opacity:.6;pointer-events:none}
+/* The drop caret: where the dragged chip lands. It is the only thing that
+   moves while dragging — the row itself stays frozen. */
+.dsh-nudge-chip-caret{position:absolute;z-index:2;width:3px;border-radius:2px;background:var(--dn-accent);pointer-events:none;animation:dsh-nudge-caret-in .12s ease-out;transition:left .1s ease,top .1s ease,height .1s ease}
+@keyframes dsh-nudge-caret-in{from{opacity:0}to{opacity:1}}
+@media (prefers-reduced-motion:reduce){.dsh-nudge-chip-caret{animation:none;transition:none}}
+.dsh-nudge-chip.dsh-nudge-chip-drag{position:relative;z-index:1;will-change:transform}
+.dsh-nudge-chip.dsh-nudge-chip-drag.dragging{z-index:3;cursor:grabbing;border-color:var(--dn-accent-line);background:var(--dsw-alias-bg-layer-1,#fff);box-shadow:0 10px 22px -10px rgba(15,23,42,.55)}
+.dsh-nudge-chip.dsh-nudge-chip-drag.editing{border-color:var(--dn-accent-line);background:var(--dn-accent-soft);color:var(--dn-accent)}
 .dsh-nudge-quick-add{display:flex;flex-direction:column;gap:8px;padding:10px;border:1px solid var(--dn-accent-line);border-radius:12px;background:var(--dn-accent-soft)}
 .dsh-nudge-quick-add-field{display:flex;flex-direction:column;gap:4px}
 .dsh-nudge-quick-add input,.dsh-nudge-quick-add textarea{width:100%;box-sizing:border-box;border:1px solid var(--dn-line);border-radius:8px;background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);font:inherit;font-size:12px;padding:6px 9px;outline:none}
 .dsh-nudge-quick-add input{height:30px}
 .dsh-nudge-quick-add textarea{min-height:64px;max-height:132px;line-height:1.5;resize:none;overflow-y:auto}
 .dsh-nudge-quick-add input:focus,.dsh-nudge-quick-add textarea:focus{border-color:var(--dn-accent-line);box-shadow:0 0 0 3px var(--dn-accent-soft)}
+/* The in-window editor for one quick input: the add form's shape, its own
+   class so the add block keeps one meaning per selector. */
+.dsh-nudge-quick-edit{display:flex;flex-direction:column;gap:8px;padding:10px;border:1px solid var(--dn-accent-line);border-radius:12px;background:var(--dn-accent-soft)}
+.dsh-nudge-quick-edit input,.dsh-nudge-quick-edit textarea{width:100%;box-sizing:border-box;border:1px solid var(--dn-line);border-radius:8px;background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);font:inherit;font-size:12px;padding:6px 9px;outline:none}
+.dsh-nudge-quick-edit input{height:30px}
+.dsh-nudge-quick-edit textarea{min-height:64px;max-height:132px;line-height:1.5;resize:none;overflow-y:auto}
+.dsh-nudge-quick-edit input:focus,.dsh-nudge-quick-edit textarea:focus{border-color:var(--dn-accent-line);box-shadow:0 0 0 3px var(--dn-accent-soft)}
 .dsh-nudge-ask{height:38px;border:0;border-radius:11px;cursor:pointer;font:inherit;font-size:13px;font-weight:600;letter-spacing:.2px;color:var(--dsw-alias-label-primary-inverted,#fff);background:var(--dn-accent);box-shadow:0 8px 20px -10px color-mix(in srgb,var(--dsw-static-deepseek-450,#5686fe) 55%,transparent);transition:filter .15s ease,transform .1s ease,box-shadow .15s ease}
 .dsh-nudge-ask:hover{filter:brightness(1.05);box-shadow:0 10px 24px -10px color-mix(in srgb,var(--dsw-static-deepseek-450,#5686fe) 65%,transparent)}
 .dsh-nudge-ask:active{transform:translateY(1px)}
@@ -5195,6 +5364,17 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
         const editInputRef = React.useRef(null)
         const noteListRef = React.useRef(null)
         const quickAddInputRef = React.useRef(null)
+        const quickEditInputRef = React.useRef(null)
+        /** The chip row: its children hold the layout a reorder is measured from. */
+        const chipRowRef = React.useRef(null)
+        /** One chip drag in flight; a ref, because a drag must not re-render. */
+        const chipDragRef = React.useRef(null)
+        /** Chip boxes captured before a reorder, replayed by the FLIP pass below. */
+        const chipFlipRef = React.useRef(null)
+        /** Where the dropped chip was painted, so the drop can animate from there. */
+        const chipSettleRef = React.useRef(null)
+        /** Insertion slot the drag currently points at, or null; the caret renders it. */
+        const [chipDropIndex, setChipDropIndex] = React.useState(null)
         // The selection card is a writing box: opening it puts the caret straight
         // into the note field so the user can type without clicking first.
         //
@@ -5263,6 +5443,75 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
             }
           }
         }, [state.nudgeDraftOpen])
+        // The in-window editor is a writing box too: the caret lands at the end
+        // of the stored title, so opening it never loses a keystroke.
+        React.useEffect(() => {
+          if (state.nudgeEditId === null) return
+          const node = quickEditInputRef.current
+          if (!node || typeof node.focus !== 'function') return
+          try {
+            node.focus({ preventScroll: true })
+            if (typeof node.setSelectionRange === 'function') {
+              const end = typeof node.value === 'string' ? node.value.length : 0
+              node.setSelectionRange(end, end)
+            }
+          } catch {
+            /* unfocusable */
+          }
+        }, [state.nudgeEditId])
+        /** Order of the prompt list; a change is what a drag's FLIP pass reacts to. */
+        const chipOrderKey = state.presets.map((preset) => preset.id).join('|')
+        // The row is frozen for the whole drag: nothing reorders until the drop, so
+        // a long chip can no longer change the wrapping under the pointer and flip
+        // the target slot back and forth. What is left is the drop itself — the
+        // row takes its new order in one commit, and this pass animates it: the
+        // displaced chips from the boxes they had, the dropped chip from wherever
+        // the pointer left it.
+        useLayoutFocus(() => {
+          const before = chipFlipRef.current
+          chipFlipRef.current = null
+          const settle = chipSettleRef.current
+          chipSettleRef.current = null
+          const dropped = settle === null ? null : settle.node
+          if (before !== null && chipsMotionOn()) {
+            for (const box of chipRowLayout()) {
+              if (box.node === dropped) continue
+              const prev = before.get(box.id)
+              if (prev === undefined) continue
+              const dx = beforeChipShift(prev, box, 'left')
+              const dy = beforeChipShift(prev, box, 'top')
+              if (dx === 0 && dy === 0) continue
+              if (typeof box.node?.animate !== 'function') continue
+              try {
+                box.node.animate(
+                  [{ transform: `translate(${dx}px, ${dy}px)` }, { transform: 'translate(0, 0)' }],
+                  { duration: CHIP_SHIFT_MS, easing: 'cubic-bezier(.2,.8,.2,1)' },
+                )
+              } catch {
+                /* the motion is decoration */
+              }
+            }
+          }
+          if (settle !== null && chipsMotionOn() && typeof settle.node?.animate === 'function') {
+            const box = chipRowLayout().find((item) => item.node === settle.node)
+            if (box !== undefined) {
+              const dx = Math.round(settle.left - box.left)
+              const dy = Math.round(settle.top - box.top)
+              if (dx !== 0 || dy !== 0) {
+                try {
+                  settle.node.animate(
+                    [{ transform: `translate(${dx}px, ${dy}px)` }, { transform: 'translate(0, 0)' }],
+                    { duration: CHIP_SETTLE_MS, easing: 'cubic-bezier(.2,.8,.2,1)' },
+                  )
+                } catch {
+                  /* the motion is decoration */
+                }
+              }
+            }
+          }
+          const dragging = chipDragRef.current
+          if (dragging !== null && dragging.moved === true) placeChipUnderPointer(dragging)
+        }, [chipOrderKey])
         // The status row is never empty: a change message wins while its timer
         // runs, otherwise the idle lines take turns.
         React.useEffect(() => {
@@ -5496,6 +5745,15 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
         const turbo = state.turbo === true
         /** Disabled prompts stay in settings but leave the window row. */
         const livePresets = state.presets.filter((preset) => preset.enabled !== false)
+        /** The window's own edit mode: drag to reorder, click one to change it. */
+        const editing = state.nudgeEditing === true
+        /** The caret the row shows while a chip is being dragged, or null. */
+        const chipCaretStyle = editing && chipDropIndex !== null ? chipCaretAt(chipDragRef.current, chipDropIndex) : null
+        /** The entry the in-window editor is about, or null once it is disabled. */
+        const editingPreset =
+          state.nudgeEditId === null
+            ? null
+            : (livePresets.find((preset) => preset.id === state.nudgeEditId) ?? null)
         /** Notes still waiting to be written into the draft. */
         const pendingNotes = runtime.pendingAnnotations().length
         const attention = state.attentionAt > 0
@@ -5517,6 +5775,277 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
         const askTitle = insertMode ? t('insertHint') : t('askHint')
         /** Keep the caret where it is: clicks on the window must not steal focus. */
         const keepFocus = (event) => event.preventDefault()
+
+        /** Whether this browser wants the chip motion (reduced motion users do not). */
+        function chipsMotionOn() {
+          try {
+            if (typeof window === 'undefined') return false
+            return window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches !== true
+          } catch {
+            return false
+          }
+        }
+
+        /**
+         * Every chip's box in view coordinates, measured from its layout
+         * (`offsetLeft`/`offsetTop`) rather than its painted rect: a chip that is
+         * still sliding from the previous reorder must not skew the next one.
+         */
+        function chipRowLayout() {
+          const row = chipRowRef.current
+          if (row === null || row === undefined) return []
+          let base = null
+          try {
+            base = typeof row.getBoundingClientRect === 'function' ? row.getBoundingClientRect() : null
+          } catch {
+            base = null
+          }
+          if (base === null) return []
+          const boxes = []
+          const children = row.children ?? []
+          for (let index = 0; index < children.length; index += 1) {
+            const node = children[index]
+            const id = node?.dataset?.presetId
+            if (typeof id !== 'string' || id === '') continue
+            boxes.push({
+              id,
+              node,
+              left: base.left + node.offsetLeft,
+              top: base.top + node.offsetTop,
+              width: node.offsetWidth,
+              height: node.offsetHeight,
+            })
+          }
+          return boxes
+        }
+
+        /**
+         * How far one chip has to travel for its box to land in the new slot:
+         * the layout delta, plus any offset still painted from an earlier pass.
+         */
+        function beforeChipShift(prev, box, axis) {
+          const delta = prev[axis] - box[axis]
+          let painted = box[axis]
+          try {
+            const rect = typeof box.node?.getBoundingClientRect === 'function' ? box.node.getBoundingClientRect() : null
+            if (rect !== null) painted = rect[axis]
+          } catch {
+            painted = box[axis]
+          }
+          return Math.round(delta + (painted - box[axis]))
+        }
+
+        /** Put the dragged chip under the pointer, whatever slot its layout took. */
+        function placeChipUnderPointer(drag) {
+          const row = chipRowRef.current
+          const node = drag?.node
+          if (row === null || row === undefined || node === undefined || node === null) return
+          let base = null
+          try {
+            base = typeof row.getBoundingClientRect === 'function' ? row.getBoundingClientRect() : null
+          } catch {
+            base = null
+          }
+          if (base === null) return
+          const left = base.left + node.offsetLeft
+          const top = base.top + node.offsetTop
+          node.style.transform = `translate(${Math.round(drag.lastX - drag.grabX - left)}px, ${Math.round(
+            drag.lastY - drag.grabY - top,
+          )}px)`
+        }
+
+        /**
+         * Which slot the pointer is pointing at, counted against the boxes frozen
+         * at the start of the drag: the row does not move while dragging, so the
+         * same pointer position always yields the same slot — that is what stops
+         * a wide chip from flipping its neighbours back and forth. The index is
+         * an insertion point among the *other* chips, which is the same thing the
+         * drop needs.
+         */
+        function updateChipTarget(drag) {
+          if ((drag.boxes ?? []).length < 2) return
+          const index = chipSlotAt(drag.boxes, drag.id, drag.lastX, drag.lastY)
+          if (drag.target === index) return
+          drag.target = index
+          setChipDropIndex(index)
+        }
+
+        /** The caret that shows the slot above, drawn on the frozen boxes. */
+        function chipCaretAt(drag, index) {
+          const row = chipRowRef.current
+          if (row === null || row === undefined || drag === null) return null
+          const rest = (drag.boxes ?? []).filter((box) => box.id !== drag.id)
+          if (rest.length === 0) return null
+          let base = null
+          try {
+            base = typeof row.getBoundingClientRect === 'function' ? row.getBoundingClientRect() : null
+          } catch {
+            base = null
+          }
+          if (base === null) return null
+          const box = index < rest.length ? rest[index] : rest[rest.length - 1]
+          const left = index < rest.length ? box.left - base.left - 2 : box.left + box.width - base.left
+          return {
+            left: `${Math.round(left)}px`,
+            top: `${Math.round(box.top - base.top)}px`,
+            height: `${Math.round(box.height)}px`,
+          }
+        }
+
+        /** Begin a press on a chip in edit mode; it becomes a drag past a few px. */
+        function beginChipDrag(event, preset) {
+          if (state.nudgeEditing !== true) return
+          if (event === undefined || event === null) return
+          if (event.button !== undefined && event.button !== 0) return
+          if (typeof event.clientX !== 'number' || typeof event.clientY !== 'number') return
+          const node = event.currentTarget
+          if (node === undefined || node === null) return
+          if (typeof node.setPointerCapture === 'function' && event.pointerId !== undefined) {
+            try {
+              node.setPointerCapture(event.pointerId)
+            } catch {
+              /* capture is best effort */
+            }
+          }
+          let rect = null
+          try {
+            rect = typeof node.getBoundingClientRect === 'function' ? node.getBoundingClientRect() : null
+          } catch {
+            rect = null
+          }
+          chipDragRef.current = {
+            id: preset.id,
+            node,
+            pointerId: event.pointerId,
+            startX: event.clientX,
+            startY: event.clientY,
+            lastX: event.clientX,
+            lastY: event.clientY,
+            grabX: rect === null ? 0 : event.clientX - rect.left,
+            grabY: rect === null ? 0 : event.clientY - rect.top,
+            moved: false,
+            /** The row's boxes, read once: the drag is decided against them. */
+            boxes: null,
+            /** Insertion point among the other chips, or null before the first move. */
+            target: null,
+          }
+        }
+
+        /** Follow the pointer once a press has travelled far enough to be a drag. */
+        function moveChipDrag(event) {
+          const drag = chipDragRef.current
+          if (drag === null) return
+          if (typeof event?.clientX !== 'number' || typeof event?.clientY !== 'number') return
+          drag.lastX = event.clientX
+          drag.lastY = event.clientY
+          if (drag.moved !== true) {
+            if (Math.abs(event.clientX - drag.startX) + Math.abs(event.clientY - drag.startY) < CHIP_DRAG_SLOP) return
+            drag.moved = true
+            drag.boxes = chipRowLayout()
+            try {
+              drag.node?.classList?.add('dragging')
+            } catch {
+              /* the lift is decoration */
+            }
+          }
+          placeChipUnderPointer(drag)
+          if (drag.boxes !== null) updateChipTarget(drag)
+        }
+
+        /**
+         * End a press in edit mode. A press that never moved is a click: it opens
+         * that entry's editor. One that moved is a drop: the list is committed to
+         * the slot the caret was showing, and the row animates into it.
+         */
+        function endChipDrag(event, openEditor) {
+          const drag = chipDragRef.current
+          if (drag === null) return
+          chipDragRef.current = null
+          if (typeof drag.node?.releasePointerCapture === 'function' && drag.pointerId !== undefined) {
+            try {
+              drag.node.releasePointerCapture(drag.pointerId)
+            } catch {
+              /* already released */
+            }
+          }
+          try {
+            drag.node?.classList?.remove('dragging')
+          } catch {
+            /* decoration */
+          }
+          setChipDropIndex(null)
+          if (drag.moved === true) {
+            dropChip(drag)
+            return
+          }
+          if (openEditor !== false) runtime.startNudgeEdit(drag.id)
+        }
+
+        /**
+         * Commit the drop. The row was frozen for the whole drag, so the boxes
+         * read at its start are still the ones the pointer was judged against:
+         * the target index is an insertion point among the *other* chips, and the
+         * same index is what the order needs. One commit here, and the layout
+         * effect animates the row into it.
+         */
+        function dropChip(drag) {
+          const node = drag.node
+          let left = null
+          let top = null
+          try {
+            const rect = typeof node?.getBoundingClientRect === 'function' ? node.getBoundingClientRect() : null
+            if (rect !== null) {
+              left = rect.left
+              top = rect.top
+            }
+          } catch {
+            left = null
+            top = null
+          }
+          const rest = (drag.boxes ?? []).filter((box) => box.id !== drag.id)
+          const target = drag.target
+          if (rest.length === 0 || target === null || target === undefined || left === null) {
+            settleChip(node)
+            return
+          }
+          const live = state.presets.filter((preset) => preset.enabled !== false).map((preset) => preset.id)
+          const current = live.indexOf(drag.id)
+          // Dropping on the slot the chip already occupies changes nothing.
+          if (current < 0 || target === current) {
+            settleChip(node)
+            return
+          }
+          chipFlipRef.current = new Map((drag.boxes ?? []).map((box) => [box.id, box]))
+          chipSettleRef.current = { node, left, top }
+          if (node !== undefined && node !== null) node.style.transform = ''
+          const anchor = target < rest.length ? rest[target] : rest[rest.length - 1]
+          if (runtime.movePresetBeside(drag.id, anchor.id, target >= rest.length) !== true) {
+            chipFlipRef.current = null
+            chipSettleRef.current = null
+          }
+        }
+
+        /** Let a dropped chip slide from under the pointer back into its slot. */
+        function settleChip(node) {
+          if (node === undefined || node === null) return
+          let from = ''
+          try {
+            from = typeof window === 'undefined' ? '' : window.getComputedStyle(node).transform
+          } catch {
+            from = ''
+          }
+          node.style.transform = ''
+          if (from === '' || from === 'none' || chipsMotionOn() !== true) return
+          if (typeof node.animate !== 'function') return
+          try {
+            node.animate([{ transform: from }, { transform: 'none' }], {
+              duration: CHIP_SETTLE_MS,
+              easing: 'ease-out',
+            })
+          } catch {
+            /* the motion is decoration */
+          }
+        }
         /** Hover/focus handlers for the explanation bubble of one control. */
         const tipProps = (key) => ({
           onMouseEnter: (event) => runtime.showTip(key, event?.currentTarget?.getBoundingClientRect?.()),
@@ -6194,27 +6723,72 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
               { key: 'presets', className: 'dsh-nudge-field' },
               h(
                 'div',
-                { className: 'dsh-nudge-presets', role: 'group', 'aria-label': t('preset') },
+                {
+                  ref: chipRowRef,
+                  className: `dsh-nudge-presets${editing ? ' editing' : ''}`,
+                  role: 'group',
+                  'aria-label': t('preset'),
+                },
                 ...livePresets.map((preset) =>
                   h(
                     'button',
                     {
                       key: preset.id,
                       type: 'button',
-                      className: `dsh-nudge-chip${state.presetId === preset.id ? ' active' : ''}`,
-                      title: preset.text,
+                      'data-preset-id': preset.id,
+                      className: `dsh-nudge-chip${state.presetId === preset.id ? ' active' : ''}${
+                        editing ? ' dsh-nudge-chip-drag' : ''
+                      }${state.nudgeEditId === preset.id ? ' editing' : ''}`,
+                      title: editing ? t('editChipHint') : preset.text,
+                      'aria-label': editing ? `${t('editPreset')}：${preset.label}` : undefined,
                       onMouseDown: keepFocus,
-                      onPointerDown: keepFocus,
-                      onClick: () => runtime.setPreset(preset.id),
-                      onDoubleClick: turbo
-                        ? () => {
-                            runtime.runPreset(preset.id)
+                      onPointerDown: editing ? (event) => beginChipDrag(event, preset) : keepFocus,
+                      onPointerMove: editing ? moveChipDrag : undefined,
+                      onPointerUp: editing ? (event) => endChipDrag(event, true) : undefined,
+                      onPointerCancel: editing ? (event) => endChipDrag(event, false) : undefined,
+                      onClick: editing ? undefined : () => runtime.setPreset(preset.id),
+                      // Keys do what the pointer does: Enter opens the entry, the
+                      // arrows hand it to its neighbour. A drag release also fires
+                      // a click, so the pointer path stays off `onClick` on purpose.
+                      onKeyDown: editing
+                        ? (event) => {
+                            if (event.key === 'Enter' || event.key === ' ') {
+                              event.preventDefault()
+                              runtime.startNudgeEdit(preset.id)
+                              return
+                            }
+                            if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
+                            event.preventDefault()
+                            const live = state.presets
+                              .filter((item) => item.enabled !== false)
+                              .map((item) => item.id)
+                            const from = live.indexOf(preset.id)
+                            const to = from + (event.key === 'ArrowRight' ? 1 : -1)
+                            if (from < 0 || to < 0 || to >= live.length) return
+                            runtime.movePresetBeside(preset.id, live[to], event.key === 'ArrowRight')
                           }
                         : undefined,
+                      onDoubleClick: editing
+                        ? undefined
+                        : turbo
+                          ? () => {
+                              runtime.runPreset(preset.id)
+                            }
+                          : undefined,
                     },
-                    preset.label,
+                    editing
+                      ? [h('span', { key: 'grip', className: 'dsh-nudge-chip-grip', 'aria-hidden': 'true' }, '⠿'), preset.label]
+                      : preset.label,
                   ),
                 ),
+                chipCaretStyle === null
+                  ? null
+                  : h('span', {
+                      key: 'drop-caret',
+                      className: 'dsh-nudge-chip-caret',
+                      style: chipCaretStyle,
+                      'aria-hidden': 'true',
+                    }),
                 livePresets.length === 0
                   ? h(
                       'span',
@@ -6237,7 +6811,107 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
                   },
                   `＋ ${t('quickAdd')}`,
                 ),
+                livePresets.length > 0
+                  ? h(
+                      'button',
+                      {
+                        key: 'edit-presets',
+                        type: 'button',
+                        className: `dsh-nudge-chip dsh-nudge-chip-edit${editing ? ' active' : ''}`,
+                        title: t('quickEditHint'),
+                        'aria-label': t('quickEditHint'),
+                        'aria-pressed': editing ? 'true' : 'false',
+                        onMouseDown: keepFocus,
+                        onPointerDown: keepFocus,
+                        onClick: () => runtime.setNudgeEditing(!editing),
+                      },
+                      `✎ ${t('quickEdit')}`,
+                    )
+                  : null,
               ),
+              state.nudgeEditId !== null && editingPreset !== null
+                ? h(
+                    'div',
+                    { key: 'quick-edit', className: 'dsh-nudge-quick-edit' },
+                    h(
+                      'div',
+                      { className: 'dsh-nudge-quick-add-head' },
+                      h('span', { className: 'dsh-nudge-field-label' }, t('editPresetHead')),
+                    ),
+                    h(
+                      'label',
+                      { className: 'dsh-nudge-quick-add-field' },
+                      h('span', { className: 'dsh-nudge-field-label' }, t('quickAddTitle')),
+                      h('input', {
+                        ref: quickEditInputRef,
+                        type: 'text',
+                        value: state.nudgeEditLabel,
+                        placeholder: t('quickAddTitle'),
+                        onChange: (event) => runtime.setNudgeEditLabel(event.target.value),
+                        onKeyDown: (event) => {
+                          if (event.isComposing) return
+                          if (event.key === 'Enter') {
+                            event.preventDefault()
+                            runtime.saveNudgeEdit()
+                          } else if (event.key === 'Escape') {
+                            event.preventDefault()
+                            runtime.cancelNudgeEdit()
+                          }
+                        },
+                      }),
+                    ),
+                    h(
+                      'label',
+                      { className: 'dsh-nudge-quick-add-field' },
+                      h('span', { className: 'dsh-nudge-field-label' }, t('quickAddBody')),
+                      h('textarea', {
+                        rows: 3,
+                        value: state.nudgeEditText,
+                        placeholder: t('quickAddBody'),
+                        onChange: (event) => runtime.setNudgeEditText(event.target.value),
+                        onKeyDown: (event) => {
+                          if (event.isComposing) return
+                          if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+                            event.preventDefault()
+                            runtime.saveNudgeEdit()
+                          } else if (event.key === 'Escape') {
+                            event.preventDefault()
+                            runtime.cancelNudgeEdit()
+                          }
+                        },
+                      }),
+                    ),
+                    state.nudgeEditError
+                      ? h('div', { className: 'dsh-nudge-settings-error', role: 'alert' }, state.nudgeEditError)
+                      : null,
+                    h(
+                      'div',
+                      { className: 'dsh-nudge-annotation-actions' },
+                      h(
+                        'button',
+                        {
+                          type: 'button',
+                          className: 'dsh-nudge-btn',
+                          onMouseDown: keepFocus,
+                          onPointerDown: keepFocus,
+                          onClick: () => runtime.cancelNudgeEdit(),
+                        },
+                        t('cancelPreset'),
+                      ),
+                      h(
+                        'button',
+                        {
+                          type: 'button',
+                          className: 'dsh-nudge-btn primary',
+                          onMouseDown: keepFocus,
+                          onPointerDown: keepFocus,
+                          onClick: () => runtime.saveNudgeEdit(),
+                        },
+                        t('savePreset'),
+                      ),
+                    ),
+                  )
+                : null,
               state.nudgeDraftOpen === true
                 ? h(
                     'div',
