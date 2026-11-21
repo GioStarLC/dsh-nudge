@@ -139,7 +139,16 @@ function notesOf(version) {
 function renderBlock({ version, fallbackDate = '', commits: entries }) {
   // A release block is dated by its newest real commit, not by the tag object, so
   // `--version vX` before tagging and the tag block afterwards render identically.
-  const stamp = entries.at(-1)?.date || fallbackDate || ''
+  // `commits()` returns git log order (newest first), so the newest date is the
+  // largest stamp rather than any fixed end of the list.
+  const stamp =
+    entries
+      .map((entry) => entry.date)
+      .filter(Boolean)
+      .sort()
+      .at(-1) ||
+    fallbackDate ||
+    ''
   const heading = version ? `## ${version}${stamp ? ` — ${stamp}` : ''}` : '## 未发布'
   const written = notesOf(version)
   if (written) return `${heading}\n\n${written}\n`
