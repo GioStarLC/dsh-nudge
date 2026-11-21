@@ -22,26 +22,82 @@ const React = require('react');
 const h = React.createElement;
 
 /**
- * dsh-nudge — Client half.
+ * The zero-DOM composer bridge.
  *
- * A floating control over the conversation: pick one of the built-in probe
- * presets (or the delivery mode), press 询问状态, and the agent answers in the
- * conversation. The plugin owns the trigger, the presets and the visible
- * outcome; it never parses or repeats the answer, because the conversation
- * already is the place where the answer belongs.
- *
- * Extension points used:
- *  - `shell.overlay`            — frame-wide floating layer, outside every scroll container.
- *  - `ctx.sessions.list`        — which session the main view retains (the click target).
- *  - `ctx.uiSession.sessionStatus` — running / pending-interaction facts for the wait state.
- *  - `ctx.remote.session.prompt` — the composer's own delivery path (mode: queue = followup, steer).
- *
- * Nothing is written to the page outside this component's own root, and the
- * bundle keeps no DOM of its own: unmounting the slot removes the window.
+ * The input overlay hands the runtime the composer action face; the bridge holds it.
  *
  * Built into `client.js` by `scripts/build.mjs`; edit this file, not the bundle.
  */
 
+    /**
+     * Zero-DOM registrant in the conversation input overlay. The slot composes
+     * the composer's public action face (`inputActions`) and the input store
+     * hook (`useInput`) into the entry's props; this bridge hands both to the
+     * window runtime so the window can append a chosen prompt, or write notes
+     * with the shell's own quote previews, instead of sending. The editor DOM
+     * is never touched.
+     * @param runtime - the window runtime.
+     * @returns the slot component.
+     */
+    function makeComposerBridge(runtime) {
+      return function NudgeComposerBridge(props) {
+        const inputActions = props?.inputActions;
+        const useInput = props?.useInput;
+        const latest = React.useRef(undefined);
+        if (typeof useInput === 'function') {
+          latest.current = useInput((snapshot) => snapshot);
+        }
+        const handle = React.useRef(undefined);
+        if (handle.current === undefined) {
+          handle.current = {
+            setDraft:
+              typeof inputActions?.setDraft === 'function'
+                ? (value) => inputActions.setDraft(value)
+                : undefined,
+            readDraft: () => latest.current?.draft ?? '',
+            // The phase tells a sent message apart from a deleted quote; the
+            // input state publishes it next to the draft.
+            readPhase: () => latest.current?.phase,
+            // Insertion at the caret: the shell's own splice, which leaves
+            // the rest of the document (and its undo step) alone. The write
+            // path prefers it over rebuilding the whole draft.
+            captureInsertion:
+              typeof inputActions?.captureInsertion === 'function'
+                ? () => inputActions.captureInsertion()
+                : undefined,
+            insertText:
+              typeof inputActions?.insertText === 'function'
+                ? (text, span) => inputActions.insertText(text, span)
+                : undefined,
+            // The shell's own quote node: the passage is shown as its quote
+            // preview (quote mark, hover for the full text, click to remove)
+            // and still serializes to the Markdown a plain write produced.
+            insertQuote:
+              typeof inputActions?.insertQuote === 'function'
+                ? (value, summary) => inputActions.insertQuote(value, summary)
+                : undefined,
+          };
+        }
+        // Render only stores the handle (no store update, so React never sees
+        // a cross-component update during render); the effect activates it and
+        // refreshes the focus flag, and releases it on unmount.
+        runtime.attachComposer(handle.current, false);
+        React.useEffect(() => {
+          const current = handle.current;
+          runtime.attachComposer(current);
+          return () => runtime.detachComposer(current)
+        }, [inputActions]);
+        return null
+      }
+    }
+
+/**
+ * Every fixed value the client half shares.
+ *
+ * Storage keys, sizes, timings, built-in presets and idle lines.
+ *
+ * Built into `client.js` by `scripts/build.mjs`; edit this file, not the bundle.
+ */
     /** The slot that renders above every column and does not scroll with messages. */
     const SLOT = 'shell.overlay';
     /** The settings section that edits the probe presets. */
@@ -203,6 +259,13 @@ const h = React.createElement;
     /** Wait this long for the probe to appear in the durable log before calling it unadmitted. */
     const EVENT_RECEIPT_MS = 15000;
 
+/**
+ * The two dictionaries the Client locale service receives.
+ *
+ * One key set, two languages; the visible text is read from here.
+ *
+ * Built into `client.js` by `scripts/build.mjs`; edit this file, not the bundle.
+ */
     const ZH = {
       title: 'dsh-nudge',
       ask: '询问状态',
@@ -533,9 +596,646 @@ const h = React.createElement;
       openSettings: 'Open settings',
     };
 
-    // ---------------------------------------------------------------------
-    // transcript anchors + highlight projection
-    // ---------------------------------------------------------------------
+/**
+ * Reading the Client context: language, target Session, status and event text.
+ *
+ * Every shell seam this plugin reads is narrowed here, so the runtime sees one shape.
+ *
+ * Built into `client.js` by `scripts/build.mjs`; edit this file, not the bundle.
+ */
+    /** Client-minted request identity persisted on the accepted user message. */
+    function mintRequestId() {
+      return `nudge-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
+    }
+
+    /** The browser time zone, forwarded so the Host can record it. */
+    function timeZoneOf() {
+      try {
+        return Intl.DateTimeFormat().resolvedOptions().timeZone
+      } catch {
+        return undefined
+      }
+    }
+
+    /** Active locale id, with the browser language as the fallback. */
+    function readLang(ctx) {
+      try {
+        const snapshot = ctx.get?.('locale')?.getLocale?.();
+        const active = snapshot && typeof snapshot.active === 'string' ? snapshot.active : '';
+        if (/^zh/i.test(active)) return 'zh'
+        if (active.length > 0) return 'en'
+      } catch {
+        /* locale service absent */
+      }
+      const nav = typeof navigator !== 'undefined' ? navigator.language || '' : '';
+      return /^zh/i.test(nav) ? 'zh' : 'en'
+    }
+
+    /** The conversation the main view retains — the session a click is about. */
+    function resolveTarget(ctx) {
+      const list = ctx.get?.('sessions')?.list?.getSnapshot?.();
+      if (list === null || typeof list !== 'object' || !Array.isArray(list.ids)) return undefined
+      for (const id of list.ids) {
+        const row = list.byId?.[id];
+        const retained = row?.retainedBy?.mainView ?? 0;
+        if (retained > 0) {
+          const title = typeof row.title === 'string' && row.title.length > 0
+            ? row.title
+            : row.displayTitle;
+          return { sessionId: String(id), title: typeof title === 'string' ? title : String(id) }
+        }
+      }
+      return undefined
+    }
+
+    /** The unified session status fact for one session. */
+    function statusOf(ctx, sessionId) {
+      try {
+        return ctx.get?.('uiSession')?.sessionStatus?.getSnapshot?.()?.get(sessionId)
+      } catch {
+        return undefined
+      }
+    }
+
+    /**
+     * The shipped session Remote namespace, wherever the composition exposes it.
+     *
+     * Typert registers it both as its own service key (`remote.session`) and as
+     * a property on the `remote` face; read whichever answers so a future
+     * composition change does not take the button down silently.
+     */
+    function sessionRemoteOf(ctx) {
+      const candidates = [];
+      try {
+        candidates.push(ctx.get?.('remote.session'));
+      } catch {
+        /* unknown key */
+      }
+      try {
+        candidates.push(ctx.get?.('remote')?.session);
+      } catch {
+        /* unknown key */
+      }
+      for (const candidate of candidates) {
+        if (candidate && typeof candidate.prompt === 'function') return candidate
+      }
+      return undefined
+    }
+
+    /**
+     * The durable event window of one session, when its binding is live.
+     *
+     * The window is what the Conversation assembler reads; the window here is
+     * only used to observe *that* the probe was admitted and *that* the next
+     * assistant message arrived — never to read or render its content.
+     */
+    function eventSourceOf(ctx, sessionId) {
+      try {
+        return ctx.get?.('sessions')?.binding?.(sessionId)?.eventSource
+      } catch {
+        return undefined
+      }
+    }
+
+    /** Highest durable seq currently in one event window. */
+    function lastDurableSeq(windowSnapshot) {
+      let last = 0;
+      const entries = windowSnapshot?.entries;
+      if (!Array.isArray(entries)) return last
+      for (const item of entries) {
+        if (item?.type !== 'event') continue
+        const seq = item.event?.seq;
+        if (typeof seq === 'number' && seq > last) last = seq;
+      }
+      return last
+    }
+
+    /** Visible text blocks of one durable `user/message` event. */
+    function userMessageText(event) {
+      const content = event?.data?.content;
+      if (!Array.isArray(content)) return ''
+      let text = '';
+      for (const part of content) {
+        if (part && part.type === 'text' && typeof part.text === 'string') text += part.text;
+      }
+      return text
+    }
+
+    /** Visible text blocks of one durable `assistant/message` event. */
+    function assistantMessageText(event) {
+      const content = event?.data?.message?.content;
+      if (!Array.isArray(content)) return ''
+      let text = '';
+      for (const part of content) {
+        if (part && part.type === 'text' && typeof part.text === 'string') text += part.text;
+      }
+      return text
+    }
+
+/**
+ * Window geometry: docks, clamping, edge snapping and chip slots.
+ *
+ * Pure math over the viewport and measured boxes; no state and no DOM writes.
+ *
+ * Built into `client.js` by `scripts/build.mjs`; edit this file, not the bundle.
+ */
+
+    /** Clamp a number into an inclusive range. */
+    function clamp(value, min, max) {
+      const low = Math.min(min, max);
+      const high = Math.max(min, max);
+      return Math.min(high, Math.max(low, value))
+    }
+
+    /**
+     * The insertion point a pointer at (`x`, `y`) asks for among `boxes`,
+     * counting every box it has passed in reading order: top to bottom, then
+     * left to right. The boxes must be frozen for the whole drag — re-reading
+     * them after a reorder is what made a wide chip re-wrap the row and flip the
+     * slot back and forth under a still pointer.
+     * @param boxes - `{ id, left, top, width, height }` in reading order.
+     * @param id - the dragged chip, which is not a slot of its own.
+     */
+    function chipSlotAt(boxes, id, x, y) {
+      let index = 0;
+      for (const box of boxes) {
+        if (box.id === id) continue
+        const below = y > box.top + box.height;
+        const sameRow = y >= box.top && y <= box.top + box.height;
+        if (below || (sameRow && x > box.left + box.width / 2)) index += 1;
+      }
+      return index
+    }
+
+    /** Current viewport, with sane minimums for the first paint. */
+    function viewport() {
+      return {
+        width: Math.max(320, window.innerWidth || 1280),
+        height: Math.max(320, window.innerHeight || 800),
+      }
+    }
+
+    /**
+     * Horizontal inset reserved on the right.
+     *
+     * The right sidebar (shipped column) is an absolutely positioned panel over
+     * the conversation's right edge; a floating window docked at the viewport
+     * edge would cover it while it is open. The panel publishes its own width
+     * as `--dsh-sidebar-width`, so the first dock position steps left of it.
+     * This is host layout chrome, not another plugin's DOM: when the query or
+     * the variable is unavailable the dock simply stays at the plain margin.
+     */
+    function rightInset() {
+      let inset = EDGE;
+      try {
+        const panel = document.querySelector('[data-sidebar-right-open]');
+        if (panel) {
+          const raw = window.getComputedStyle(panel).getPropertyValue('--dsh-sidebar-width').trim();
+          const width = Number.parseFloat(raw);
+          if (Number.isFinite(width) && width > 0) inset += width;
+        }
+      } catch {
+        /* layout unavailable: keep the plain margin */
+      }
+      return inset
+    }
+
+    /** First-run dock position: right, above the composer, clear of the right sidebar. */
+    function dockPosition(collapsed) {
+      const vp = viewport();
+      const width = collapsed ? PILL_SIZE : CARD_WIDTH;
+      const height = collapsed ? PILL_SIZE : 220;
+      return {
+        x: Math.round(clamp(vp.width - width - rightInset(), 8, Math.max(8, vp.width - width - 8))),
+        y: Math.round(clamp(DOCK_TOP, 8, Math.max(8, vp.height - height - 8))),
+      }
+    }
+
+    /** Clamp one stored position into the current viewport. */
+    function clampPoint(point, collapsed) {
+      const vp = viewport();
+      const width = collapsed ? PILL_SIZE : CARD_WIDTH;
+      const height = collapsed ? PILL_SIZE : Math.min(360, Math.max(180, vp.height - COMPOSER_RESERVE - 16));
+      const maxY = collapsed
+        ? Math.max(8, vp.height - height - 8)
+        : Math.max(8, vp.height - height - COMPOSER_RESERVE);
+      return {
+        x: Math.round(clamp(point.x, 8, Math.max(8, vp.width - width - 8))),
+        y: Math.round(clamp(point.y, 8, maxY)),
+      }
+    }
+
+    /** Whether the window sits closer to the left edge than to the right one. */
+    function nearestEdge(point, collapsed) {
+      const vp = viewport();
+      const width = collapsed ? PILL_SIZE : CARD_WIDTH;
+      return point.x + width / 2 <= vp.width / 2 ? 'left' : 'right'
+    }
+
+    /**
+     * Pin a stored point to the side it belongs to.
+     *
+     * Only the vertical spot is the user's: the horizontal one is the edge, so
+     * a window left somewhere in the middle of a wider or narrower screen still
+     * comes back on a side instead of floating over the conversation.
+     */
+    function snapToEdge(point, collapsed) {
+      const vp = viewport();
+      const width = collapsed ? PILL_SIZE : CARD_WIDTH;
+      const edge = nearestEdge(point, collapsed);
+      const x = edge === 'left' ? EDGE : vp.width - width - rightInset();
+      return clampPoint({ x, y: point.y }, collapsed)
+    }
+
+    /** Whether a stored value looks like a point. */
+    function isPoint(point) {
+      return (
+        point !== null &&
+        typeof point === 'object' &&
+        Number.isFinite(point.x) &&
+        Number.isFinite(point.y)
+      )
+    }
+
+    /**
+     * A DOMRect-like box as plain numbers, or null when it is not a usable box.
+     * The in-place editor keeps one of these instead of a live DOMRect, so a
+     * re-render never reads geometry off a detached node.
+     */
+    function rectValue(box) {
+      if (box === null || typeof box !== 'object') return null
+      const left = Number(box.left);
+      const top = Number(box.top);
+      const right = Number(box.right);
+      const bottom = Number(box.bottom);
+      const width = Number.isFinite(Number(box.width)) ? Number(box.width) : right - left;
+      const height = Number.isFinite(Number(box.height)) ? Number(box.height) : bottom - top;
+      const values = [left, top, right, bottom, width, height];
+      if (values.some((value) => Number.isFinite(value) === false)) return null
+      return { left, top, right, bottom, width, height }
+    }
+
+/**
+ * The floating window stylesheet.
+ *
+ * One template string plus the two rules that depend on runtime flags.
+ *
+ * Built into `client.js` by `scripts/build.mjs`; edit this file, not the bundle.
+ */
+
+    /**
+     * The conversation renders selection actions into this one surface, and the
+     * official 「引用文本」 action is its only occupant. While quick notes own
+     * the selection, that surface stays out of the way; turning the notes off
+     * drops the rule and hands the selection back.
+     */
+    const OFFICIAL_SELECTION_CSS = '[data-text-interaction-surface]{display:none!important}';
+
+    /** The hide rule, appended to the window stylesheet while quick notes are on. */
+    function viewCss(quick) {
+      return quick === true ? `${CSS}\n${OFFICIAL_SELECTION_CSS}` : CSS
+    }
+
+    const CSS = `
+.dsh-nudge-card,.dsh-nudge-pill,.dsh-nudge-settings,.dsh-nudge-popup{--dn-accent:color-mix(in srgb,var(--dsw-static-deepseek-450,#5686fe) 78%,var(--dsw-alias-label-primary,#1a1a1a) 22%);--dn-accent-soft:color-mix(in srgb,var(--dsw-static-deepseek-450,#5686fe) 14%,transparent);--dn-accent-line:color-mix(in srgb,var(--dsw-static-deepseek-450,#5686fe) 38%,transparent);--dn-accent-edge:color-mix(in srgb,var(--dsw-static-deepseek-450,#5686fe) 62%,transparent);--dn-line:var(--dsw-alias-border-l1,rgba(127,127,127,.25));--dn-line-strong:color-mix(in srgb,var(--dsw-alias-label-primary,#1a1a1a) 28%,transparent);--dn-hover:color-mix(in srgb,var(--dsw-alias-label-primary,#1a1a1a) 6%,transparent);--dn-agree:#2e7d32;--dn-note:#8b5cf6;--dn-frame:1px}
+.dsh-nudge-card{position:fixed;z-index:${Z_INDEX};width:min(304px,calc(100vw - 24px));display:flex;flex-direction:column;border-radius:16px;border:var(--dn-frame) solid var(--dn-accent-edge);background:var(--dsw-alias-bg-layer-1,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);box-shadow:0 1px 2px rgba(15,23,42,.04),0 18px 44px -22px rgba(15,23,42,.3);font:13px/1.55 ui-sans-serif,system-ui,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;overflow:hidden;pointer-events:auto;animation:dsh-nudge-in .18s ease-out}
+@keyframes dsh-nudge-in{from{opacity:0;transform:translateY(-5px) scale(.985)}to{opacity:1;transform:none}}
+.dsh-nudge-title{display:flex;align-items:center;gap:8px;padding:12px 12px 10px 14px;cursor:grab;user-select:none;touch-action:none;border-bottom:1px solid var(--dn-line)}
+.dsh-nudge-title:active{cursor:grabbing}
+.dsh-nudge-name{font-size:12.5px;font-weight:600;letter-spacing:.2px;cursor:pointer;border-radius:5px;padding:2px 4px;margin:-2px -4px;transition:background .15s ease,color .15s ease}
+.dsh-nudge-name:hover{background:var(--dn-hover);color:var(--dsw-alias-label-primary,#1a1a1a)}
+.dsh-nudge-name:focus-visible{outline:2px solid var(--dn-accent-line);outline-offset:1px}
+.dsh-nudge-spacer{flex:1 1 auto}
+.dsh-nudge-mark{display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;width:16px;height:16px;color:var(--dsw-alias-state-idle-primary,#9a9aa4);transition:color .2s ease}
+.dsh-nudge-mark svg{display:block;overflow:visible}
+.dsh-nudge-mark .dsh-nudge-mark-tap{opacity:.55;transition:opacity .2s ease}
+.dsh-nudge-mark.waiting{color:var(--dsw-alias-state-warn-primary,#d99b1e)}
+.dsh-nudge-mark.waiting .dsh-nudge-mark-tap{opacity:1;transform-box:fill-box;transform-origin:center;animation:dsh-nudge-tap 2s ease-in-out infinite}
+.dsh-nudge-mark.done{color:var(--dsw-alias-state-success-primary,#2f9e63)}
+.dsh-nudge-mark.done .dsh-nudge-mark-tap{opacity:0}
+.dsh-nudge-mark.error{color:var(--dsw-alias-state-error-primary,#c8433c)}
+.dsh-nudge-mark.error .dsh-nudge-mark-tap{opacity:0}
+@keyframes dsh-nudge-tap{0%{opacity:.45;transform:scale(.94)}55%{opacity:.8;transform:scale(1)}100%{opacity:0;transform:scale(1)}}
+@keyframes dsh-nudge-pulse{0%,100%{opacity:1}50%{opacity:.35}}
+.dsh-nudge-icon{width:24px;height:24px;display:inline-flex;align-items:center;justify-content:center;padding:0;border:0;border-radius:8px;background:transparent;color:var(--dsw-alias-label-secondary,#5a5a66);cursor:pointer;transition:background .15s ease,color .15s ease}
+.dsh-nudge-icon:hover{background:var(--dn-hover);color:var(--dsw-alias-label-primary,#1a1a1a)}
+.dsh-nudge-icon:focus-visible{outline:2px solid var(--dn-accent-line);outline-offset:2px}
+.dsh-nudge-alert{margin:10px 14px 0;padding:8px 10px;border-radius:10px;font-size:12px;line-height:1.5;word-break:break-word}
+.dsh-nudge-alert.error{background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#c8433c) 10%,transparent);color:var(--dsw-alias-state-error-primary,#c8433c)}
+.dsh-nudge-alert.note{background:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#d99b1e) 12%,transparent);color:var(--dsw-alias-state-warn-primary,#a06a00)}
+.dsh-nudge-flash{margin:8px 14px 0;font-size:11.5px;line-height:1.4;min-height:16px;color:var(--dn-accent);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dsh-nudge-flash.active{animation:dsh-nudge-flash-in .16s ease-out}
+@keyframes dsh-nudge-flash-in{from{opacity:0;transform:translateY(-2px)}to{opacity:1;transform:none}}
+.dsh-nudge-content{display:flex;flex-direction:column;gap:12px;padding:12px 14px 14px}
+.dsh-nudge-field{display:flex;flex-direction:column;gap:7px;min-width:0}
+.dsh-nudge-field-inline{flex-direction:row;align-items:center;gap:10px}
+.dsh-nudge-field-inline .dsh-nudge-field-label{flex:0 0 auto}
+.dsh-nudge-field-label{font-size:11px;font-weight:600;letter-spacing:.4px;color:var(--dsw-alias-label-secondary,#6a6a76)}
+.dsh-nudge-presets{display:flex;flex-wrap:wrap;gap:6px;position:relative}
+.dsh-nudge-presets-empty{font-size:12px;line-height:1.6;color:var(--dsw-alias-label-secondary,#8a8a8a)}
+.dsh-nudge-chip{height:28px;padding:0 12px;border-radius:999px;border:1px solid var(--dn-line);background:transparent;color:var(--dsw-alias-label-secondary,#5a5a66);font:inherit;font-size:12px;line-height:1;cursor:pointer;transition:background .15s ease,color .15s ease,border-color .15s ease;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dsh-nudge-chip:hover{border-color:var(--dn-accent-line);color:var(--dsw-alias-label-primary,#1a1a1a);background:var(--dn-accent-soft)}
+.dsh-nudge-chip:focus-visible{outline:2px solid var(--dn-accent-line);outline-offset:2px}
+.dsh-nudge-chip.active{background:var(--dn-accent-soft);border-color:var(--dn-accent-line);color:var(--dn-accent);font-weight:600}
+.dsh-nudge-chip.dsh-nudge-chip-add{border-style:dashed;color:var(--dn-accent)}
+.dsh-nudge-chip.dsh-nudge-chip-edit{border-style:dashed;color:var(--dn-accent)}
+/* Edit mode: a chip is a handle and a target, so the pointer owns its motion
+   and text selection stays out of the way. */
+.dsh-nudge-presets.editing .dsh-nudge-chip{touch-action:none}
+.dsh-nudge-presets.editing .dsh-nudge-chip:not(.dsh-nudge-chip-edit):not(.dsh-nudge-chip-add){cursor:grab;user-select:none}
+.dsh-nudge-chip-grip{display:inline-block;margin-right:4px;font-size:10px;line-height:1;opacity:.6;pointer-events:none}
+/* The drop caret: where the dragged chip lands. It is the only thing that
+   moves while dragging — the row itself stays frozen. */
+.dsh-nudge-chip-caret{position:absolute;z-index:2;width:3px;border-radius:2px;background:var(--dn-accent);pointer-events:none;animation:dsh-nudge-caret-in .12s ease-out;transition:left .1s ease,top .1s ease,height .1s ease}
+@keyframes dsh-nudge-caret-in{from{opacity:0}to{opacity:1}}
+@media (prefers-reduced-motion:reduce){.dsh-nudge-chip-caret{animation:none;transition:none}}
+.dsh-nudge-chip.dsh-nudge-chip-drag{position:relative;z-index:1;will-change:transform}
+.dsh-nudge-chip.dsh-nudge-chip-drag.dragging{z-index:3;cursor:grabbing;border-color:var(--dn-accent-line);background:var(--dsw-alias-bg-layer-1,#fff);box-shadow:0 10px 22px -10px rgba(15,23,42,.55)}
+.dsh-nudge-chip.dsh-nudge-chip-drag.editing{border-color:var(--dn-accent-line);background:var(--dn-accent-soft);color:var(--dn-accent)}
+.dsh-nudge-quick-add{display:flex;flex-direction:column;gap:8px;padding:10px;border:1px solid var(--dn-accent-line);border-radius:12px;background:var(--dn-accent-soft)}
+.dsh-nudge-quick-add-field{display:flex;flex-direction:column;gap:4px}
+.dsh-nudge-quick-add input,.dsh-nudge-quick-add textarea{width:100%;box-sizing:border-box;border:1px solid var(--dn-line);border-radius:8px;background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);font:inherit;font-size:12px;padding:6px 9px;outline:none}
+.dsh-nudge-quick-add input{height:30px}
+.dsh-nudge-quick-add textarea{min-height:64px;max-height:132px;line-height:1.5;resize:none;overflow-y:auto}
+.dsh-nudge-quick-add input:focus,.dsh-nudge-quick-add textarea:focus{border-color:var(--dn-accent-line);box-shadow:0 0 0 3px var(--dn-accent-soft)}
+/* The in-window editor for one quick input: the add form's shape, its own
+   class so the add block keeps one meaning per selector. */
+.dsh-nudge-quick-edit{display:flex;flex-direction:column;gap:8px;padding:10px;border:1px solid var(--dn-accent-line);border-radius:12px;background:var(--dn-accent-soft)}
+.dsh-nudge-quick-edit input,.dsh-nudge-quick-edit textarea{width:100%;box-sizing:border-box;border:1px solid var(--dn-line);border-radius:8px;background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);font:inherit;font-size:12px;padding:6px 9px;outline:none}
+.dsh-nudge-quick-edit input{height:30px}
+.dsh-nudge-quick-edit textarea{min-height:64px;max-height:132px;line-height:1.5;resize:none;overflow-y:auto}
+.dsh-nudge-quick-edit input:focus,.dsh-nudge-quick-edit textarea:focus{border-color:var(--dn-accent-line);box-shadow:0 0 0 3px var(--dn-accent-soft)}
+.dsh-nudge-ask{height:38px;border:0;border-radius:11px;cursor:pointer;font:inherit;font-size:13px;font-weight:600;letter-spacing:.2px;color:var(--dsw-alias-label-primary-inverted,#fff);background:var(--dn-accent);box-shadow:0 8px 20px -10px color-mix(in srgb,var(--dsw-static-deepseek-450,#5686fe) 55%,transparent);transition:filter .15s ease,transform .1s ease,box-shadow .15s ease}
+.dsh-nudge-ask:hover{filter:brightness(1.05);box-shadow:0 10px 24px -10px color-mix(in srgb,var(--dsw-static-deepseek-450,#5686fe) 65%,transparent)}
+.dsh-nudge-ask:active{transform:translateY(1px)}
+.dsh-nudge-ask:disabled{opacity:.55;cursor:default;box-shadow:none;filter:none}
+.dsh-nudge-ask:focus-visible{outline:2px solid var(--dn-accent-line);outline-offset:2px}
+.dsh-nudge-annotation-quote{font-size:11.5px;line-height:1.5;color:var(--dsw-alias-label-secondary,#5a5a66);white-space:pre-wrap;word-break:break-word;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.dsh-nudge-annotation-hint{font-size:11px;line-height:1.5;color:var(--dsw-alias-label-secondary,#5a5a66)}
+.dsh-nudge-popup{position:fixed;z-index:${Z_INDEX + 1};box-sizing:border-box;width:280px;max-width:calc(100vw - 16px);display:flex;flex-direction:column;gap:8px;padding:10px;border-radius:12px;border:1px solid var(--dn-line);background:var(--dsw-alias-bg-layer-1,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);box-shadow:0 10px 30px rgba(0,0,0,.16),0 2px 8px rgba(0,0,0,.08);font:13px/1.45 ui-sans-serif,system-ui,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;pointer-events:auto;opacity:.72;transition:opacity .22s ease;animation:dsh-nudge-popup-in .12s cubic-bezier(.16,1,.3,1)}
+.dsh-nudge-popup:hover,.dsh-nudge-popup:focus-within{opacity:1}
+/* The end state stays open on purpose: the card takes the focus in the frame
+   it mounts, so :focus-within makes its resting opacity 1 — a fixed
+   to{opacity:.72} would snap to the real value on the last frame. scale is
+   its own property so it never overwrites the inline translateY that places
+   an upward-opening card. */
+@keyframes dsh-nudge-popup-in{from{opacity:0;scale:.97}}
+@media (prefers-reduced-motion:reduce){.dsh-nudge-popup{animation:none;transition:none}}
+.dsh-nudge-popup-close{position:absolute;top:6px;right:6px;width:22px;height:22px;padding:0;border:0;border-radius:6px;background:transparent;color:var(--dsw-alias-label-secondary,#5a5a66);font:inherit;font-size:16px;line-height:20px;cursor:pointer}
+.dsh-nudge-popup-close:hover{background:var(--dn-hover);color:var(--dsw-alias-label-primary,#1a1a1a)}
+.dsh-nudge-settings-panel{display:flex;flex-direction:column;gap:10px;padding:12px;flex:1 1 auto;min-height:0;max-height:min(520px,72vh);overflow:auto}
+.dsh-nudge-settings-head{display:flex;align-items:center;gap:8px}
+.dsh-nudge-settings-name{font:inherit;font-size:12px;font-weight:600;color:var(--dsw-alias-label-primary,#1a1a1a)}
+.dsh-nudge-popup-row{display:flex;align-items:center;gap:6px}
+.dsh-nudge-popup-row button{height:28px;padding:0 8px;border:1px solid var(--dn-line);border-radius:8px;background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);font:inherit;font-size:12px;line-height:1;white-space:nowrap;cursor:pointer;transition:background-color .12s ease,border-color .12s ease,transform .12s ease}
+.dsh-nudge-popup-row button:active{transform:scale(.97)}
+.dsh-nudge-popup-row button:focus-visible{outline:2px solid var(--dn-accent-line);outline-offset:2px}
+.dsh-nudge-popup-mic{display:inline-flex;align-items:center;gap:5px;height:26px;padding:0 9px;border:1px solid var(--dn-line);border-radius:999px;background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-secondary,#5a5a66);font:inherit;font-size:11px;line-height:1;cursor:pointer}
+.dsh-nudge-popup-mic-hint{font-size:11px;line-height:1.4;color:var(--dsw-alias-label-secondary,#5a5a66)}
+.dsh-nudge-popup-quick{display:inline-flex;align-items:center;justify-content:center;gap:5px;min-width:0;padding:0 6px}
+.dsh-nudge-popup-quick .emoji{font-size:15px;line-height:1}
+.dsh-nudge-popup-quick:hover{background:var(--dn-hover)}
+.dsh-nudge-popup-quick.agree{border-color:var(--dn-agree);background:var(--dn-agree);color:#fff;font-weight:600}
+.dsh-nudge-popup-quick.agree:hover{filter:brightness(.94)}
+.dsh-nudge-popup-row .dsh-nudge-popup-save{border-color:var(--dn-accent-line);background:var(--dn-accent-soft);color:var(--dn-accent);font-weight:600}
+.dsh-nudge-popup-row .dsh-nudge-popup-save:hover{background:color-mix(in srgb,var(--dn-accent) 20%,transparent)}
+.dsh-nudge-popup-row .dsh-nudge-popup-copy{color:var(--dn-accent)}
+.dsh-nudge-popup-copy[data-copied="true"]{border-color:var(--dn-accent-line);background:var(--dn-accent-soft)}
+.dsh-nudge-popup-hint{display:flex;justify-content:space-between;gap:8px;font-size:11px;line-height:1.5;color:var(--dsw-alias-label-secondary,#5a5a66)}
+.dsh-nudge-popup-hint kbd{font:inherit;padding:0 3px;border:1px solid var(--dn-line);border-radius:4px;background:color-mix(in srgb,var(--dsw-alias-label-primary,#1a1a1a) 4%,transparent)}
+/* The in-place note editor: the capture card's shape, hung off the passage.
+   It sits fully opaque because it holds a field the user types into, and its
+   field starts two lines tall so a stored note is readable at a glance. */
+.dsh-nudge-edit-popup{opacity:1}
+.dsh-nudge-edit-quote{max-height:34px;-webkit-line-clamp:2;min-height:0}
+.dsh-nudge-edit-popup .dsh-nudge-annotation-input{min-height:56px}
+.dsh-nudge-popup-row .dsh-nudge-edit-delete{margin-right:auto;border-color:transparent;background:transparent;color:var(--dsw-alias-state-error-primary,#c8433c)}
+.dsh-nudge-popup-row .dsh-nudge-edit-delete:hover{background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#c8433c) 10%,transparent)}
+.dsh-nudge-annotation-input{width:100%;box-sizing:border-box;min-height:34px;field-sizing:content;max-height:132px;resize:none;overflow-y:auto;border:1px solid var(--dn-line);border-radius:8px;background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);font:inherit;font-size:13px;line-height:20px;padding:7px 10px}
+.dsh-nudge-annotation-input:disabled{opacity:.6;cursor:not-allowed}
+.dsh-nudge-btn:disabled{opacity:.45;cursor:default}
+.dsh-nudge-annotation-input:focus{outline:none;border-color:var(--dn-accent-line);box-shadow:0 0 0 3px var(--dn-accent-soft)}
+.dsh-nudge-annotation-actions{display:flex;justify-content:flex-end;gap:8px}
+.dsh-nudge-annotations-count{min-width:16px;height:16px;padding:0 5px;border-radius:999px;background:var(--dn-accent-soft);color:var(--dn-accent);font-size:10px;line-height:16px;text-align:center}
+/* One fixed-height tray: rows scroll inside it, so adding a note never grows
+   the floating window. The guide line and the action row keep their own rows. */
+.dsh-nudge-annotation-tray{display:flex;flex-direction:column;gap:8px;height:216px}
+.dsh-nudge-annotation-list{flex:1 1 auto;min-height:0;display:flex;flex-direction:column;gap:6px;overflow-y:auto;scrollbar-gutter:stable}
+.dsh-nudge-annotation-empty{display:flex;align-items:center;justify-content:center;box-sizing:border-box;height:100%;padding:0 10px;border:1px dashed var(--dn-line);border-radius:12px;color:var(--dsw-alias-label-secondary,#8a8a8a);text-align:center}
+.dsh-nudge-annotation-guide{flex:0 0 auto;min-height:16px;max-height:33px;overflow:hidden}
+.dsh-nudge-annotation-item{display:flex;flex-direction:column;gap:3px;padding:7px 8px;border-radius:9px;background:color-mix(in srgb,var(--dsw-alias-label-primary,#1a1a1a) 5%,transparent)}
+.dsh-nudge-annotation-item-head{display:flex;align-items:flex-start;gap:6px}
+.dsh-nudge-annotation-item-head .dsh-nudge-annotation-quote{flex:1 1 auto;min-width:0;-webkit-line-clamp:2}
+.dsh-nudge-annotation-written{flex:0 0 auto;font-size:10px;line-height:1.6;padding:0 4px;border-radius:4px;color:color-mix(in srgb,var(--dn-accent) 70%,#fff);background:color-mix(in srgb,var(--dn-accent) 18%,transparent)}
+.dsh-nudge-annotation-note{font-size:12px;line-height:1.5;color:var(--dsw-alias-label-primary,#1a1a1a);white-space:pre-wrap;word-break:break-word;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.dsh-nudge-annotation-remove{flex:0 0 auto;width:20px;height:20px;padding:0;border:0;border-radius:6px;background:transparent;color:var(--dsw-alias-label-secondary,#5a5a66);font-size:14px;line-height:1;cursor:pointer}
+.dsh-nudge-annotation-remove:hover{background:var(--dn-hover);color:var(--dsw-alias-label-primary,#1a1a1a)}
+.dsh-nudge-annotation-open{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;gap:2px;padding:0;border:0;background:transparent;color:inherit;text-align:left;font:inherit;cursor:pointer}
+.dsh-nudge-annotation-open .dsh-nudge-annotation-quote{-webkit-line-clamp:1}
+.dsh-nudge-annotation-open .dsh-nudge-annotation-note{-webkit-line-clamp:1}
+.dsh-nudge-annotation-open:hover .dsh-nudge-annotation-quote{color:var(--dsw-alias-label-primary,#1a1a1a)}
+.dsh-nudge-module{display:flex;flex-direction:column;gap:8px}
+.dsh-nudge-module-head{display:flex;align-items:center;gap:7px;padding:1px 0 8px;border:0;border-bottom:1px solid var(--dn-line);background:transparent;color:var(--dsw-alias-label-primary,#1a1a1a);font:inherit;font-size:12.5px;font-weight:700;letter-spacing:.2px;text-align:left;user-select:none}
+.dsh-nudge-module-head::before{content:'';flex:0 0 auto;width:3px;height:13px;border-radius:2px;background:var(--dn-accent);margin-left:2px}
+.dsh-nudge-module-title{white-space:nowrap}
+.dsh-nudge-module-main{display:inline-flex;align-items:center;gap:6px;min-width:0;padding:2px 4px;margin-left:-4px;border:0;border-radius:6px;background:transparent;color:inherit;font:inherit;letter-spacing:inherit;cursor:pointer;transition:color .15s ease,background .15s ease}
+.dsh-nudge-module-main:hover{color:var(--dn-accent);background:var(--dn-hover)}
+.dsh-nudge-module-main:focus-visible{outline:2px solid var(--dn-accent-line);outline-offset:1px}
+.dsh-nudge-module-actions{display:inline-flex;align-items:center;gap:2px;flex:0 0 auto}
+.dsh-nudge-head-btn,.dsh-nudge-head-icon{display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;height:22px;padding:0 8px;border:0;border-radius:6px;background:transparent;color:var(--dsw-alias-label-secondary,#5a5a66);font:inherit;font-size:11.5px;font-weight:600;letter-spacing:0;line-height:1;white-space:nowrap;cursor:pointer;transition:background .15s ease,color .15s ease}
+.dsh-nudge-head-icon{width:22px;padding:0}
+.dsh-nudge-head-btn:hover,.dsh-nudge-head-icon:hover{background:var(--dn-hover);color:var(--dsw-alias-label-primary,#1a1a1a)}
+.dsh-nudge-head-btn:focus-visible,.dsh-nudge-head-icon:focus-visible{outline:2px solid var(--dn-accent-line);outline-offset:1px}
+.dsh-nudge-head-btn.active,.dsh-nudge-head-icon.active{background:var(--dn-accent-soft);color:var(--dn-accent)}
+.dsh-nudge-head-btn.inactive,.dsh-nudge-head-btn:disabled{opacity:.45;cursor:default;background:transparent;color:var(--dsw-alias-label-secondary,#5a5a66)}
+.dsh-nudge-module-body{display:flex;flex-direction:column;gap:10px;padding-top:2px}
+.dsh-nudge-icon.active{background:var(--dn-accent-soft);color:var(--dn-accent)}
+@keyframes dsh-nudge-attention{0%{box-shadow:inset 0 0 0 0 var(--dn-accent-line);opacity:0}20%{box-shadow:inset 0 0 0 3px var(--dn-accent-soft);opacity:1}100%{box-shadow:inset 0 0 0 0 transparent;opacity:0}}
+.dsh-nudge-attention-ring{position:absolute;inset:0;border-radius:inherit;pointer-events:none;animation:dsh-nudge-attention .9s ease-out}
+::highlight(dsh-nudge-notes){background:#fde68a;color:#1f2937}
+/* Same colours as the browser's own selection on Chromium/Windows, because
+   focusing the note field collapses the real selection before it can be kept.
+   --dsh-nudge-capture-bg / -fg stay overridable for other platforms/themes. */
+::highlight(dsh-nudge-capture){background:var(--dsh-nudge-capture-bg,#3367d1);color:var(--dsh-nudge-capture-fg,#fff)}
+.dsh-nudge-pill{position:fixed;z-index:${Z_INDEX};display:inline-flex;align-items:center;justify-content:center;width:36px;height:36px;padding:0;border-radius:50%;border:var(--dn-frame) solid var(--dn-accent-edge);background:var(--dsw-alias-bg-layer-1,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);box-shadow:0 1px 2px rgba(15,23,42,.04),0 10px 26px -14px rgba(15,23,42,.3);font:600 12px/1 ui-sans-serif,system-ui,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;cursor:grab;pointer-events:auto;touch-action:none;user-select:none;transition:transform .15s ease,box-shadow .15s ease;animation:dsh-nudge-in .18s ease-out}
+.dsh-nudge-pill:active{cursor:grabbing}
+.dsh-nudge-pill:hover{transform:translateY(-1px);box-shadow:0 1px 2px rgba(15,23,42,.04),0 14px 30px -14px rgba(15,23,42,.35)}
+.dsh-nudge-pill:focus-visible{outline:2px solid var(--dn-accent-line);outline-offset:2px}
+.dsh-nudge-unread{position:absolute;top:5px;right:5px;width:6px;height:6px;border-radius:50%;background:var(--dn-accent);box-shadow:0 0 0 3px var(--dn-accent-soft)}
+.dsh-nudge-settings{display:flex;flex-direction:column;gap:14px;font:inherit;color:var(--dsw-alias-label-primary,#1a1a1a)}
+/* The shell Settings panel caps the body at 800px and scrolls it. While this
+   section is mounted, let the panel grow with the section instead (never
+   smaller than the shell's own height, never taller than the viewport); the
+   shell's internal options area still scrolls once that cap is reached. The
+   :has() scope is what keeps the override from affecting other sections. */
+body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-height:min(800px,calc(100vh - 2 * max(24px,var(--dsh-frame-overlay-top,24px))));max-height:calc(100vh - 2 * max(24px,var(--dsh-frame-overlay-top,24px)))}
+.dsh-nudge-settings-hint{font-size:12px;line-height:1.6;color:var(--dsw-alias-label-secondary,#5a5a66)}
+.dsh-nudge-settings-section{display:flex;flex-direction:column;gap:8px}
+.dsh-nudge-settings-section-head{display:flex;align-items:center;gap:7px;padding:0 2px 7px;border-bottom:1px solid var(--dn-line)}
+.dsh-nudge-settings-section-head::before{content:'';flex:0 0 auto;width:3px;height:13px;border-radius:2px;background:var(--dn-accent);margin-left:2px}
+.dsh-nudge-settings-section-title{font-size:12.5px;font-weight:700;letter-spacing:.2px;color:var(--dsw-alias-label-primary,#1a1a1a)}
+.dsh-nudge-settings-section-desc{margin:-2px 2px 0;font-size:12px;line-height:1.5;color:var(--dsw-alias-label-secondary,#5a5a66)}
+.dsh-nudge-settings-section-meta{margin-left:auto;font-size:11px;line-height:1.4;color:var(--dsw-alias-label-secondary,#8a8a8a);font-variant-numeric:tabular-nums}
+.dsh-nudge-settings-section.collapsible .dsh-nudge-settings-section-head{cursor:pointer;user-select:none;list-style:none}
+.dsh-nudge-settings-section.collapsible .dsh-nudge-settings-section-head::-webkit-details-marker{display:none}
+.dsh-nudge-settings-section.collapsible .dsh-nudge-settings-section-head::after{content:'';flex:0 0 auto;width:6px;height:6px;margin-left:6px;border-right:1.5px solid var(--dsw-alias-label-secondary,#8a8a8a);border-bottom:1.5px solid var(--dsw-alias-label-secondary,#8a8a8a);opacity:.7;transform:rotate(45deg);transition:transform .15s ease}
+.dsh-nudge-settings-section.collapsible:not([open]) .dsh-nudge-settings-section-head::after{transform:rotate(-45deg)}
+.dsh-nudge-settings-section.collapsible .dsh-nudge-settings-section-head:hover,.dsh-nudge-settings-fold-head:hover{background:var(--dn-hover);border-radius:6px}
+.dsh-nudge-settings-section.collapsible .dsh-nudge-settings-section-head:focus-visible,.dsh-nudge-settings-fold-head:focus-visible{outline:2px solid var(--dn-accent-line);outline-offset:2px;border-radius:6px}
+.dsh-nudge-settings-section.collapsible[open] .dsh-nudge-settings-section-desc{margin-top:2px}
+.dsh-nudge-settings-fold{display:flex;flex-direction:column;gap:8px;padding-top:2px;border-top:1px solid var(--dn-line)}
+.dsh-nudge-settings-fold-head{display:flex;align-items:center;gap:8px;padding:5px 2px;cursor:pointer;list-style:none;font-size:11.5px;font-weight:600;letter-spacing:.2px;color:var(--dsw-alias-label-secondary,#6a6a76);user-select:none}
+.dsh-nudge-settings-fold-head::-webkit-details-marker{display:none}
+.dsh-nudge-settings-fold-head::after{content:'';flex:0 0 auto;width:6px;height:6px;margin-left:6px;border-right:1.5px solid var(--dsw-alias-label-secondary,#8a8a8a);border-bottom:1.5px solid var(--dsw-alias-label-secondary,#8a8a8a);opacity:.7;transform:rotate(45deg);transition:transform .15s ease}
+.dsh-nudge-settings-fold:not([open]) .dsh-nudge-settings-fold-head::after{transform:rotate(-45deg)}
+.dsh-nudge-settings-fold-meta{margin-left:auto;font-size:11px;font-weight:400;color:var(--dsw-alias-label-secondary,#8a8a8a);font-variant-numeric:tabular-nums}
+.dsh-nudge-settings-note{font-size:12px;line-height:1.6;color:var(--dn-accent-line,var(--dsw-alias-label-secondary,#5a5a66))}
+.dsh-nudge-toggle{display:flex;align-items:flex-start;gap:10px;padding:12px;border-radius:12px;border:1px solid var(--dn-line);background:color-mix(in srgb,var(--dsw-alias-label-primary,#1a1a1a) 3%,transparent);cursor:pointer}
+.dsh-nudge-toggle input{accent-color:var(--dn-accent);margin:2px 0 0;flex:0 0 auto;width:14px;height:14px}
+.dsh-nudge-toggle-text{display:flex;flex-direction:column;gap:3px;min-width:0}
+.dsh-nudge-toggle-title{font-size:12px;font-weight:600;line-height:1.4;color:var(--dsw-alias-label-primary,#1a1a1a)}
+.dsh-nudge-toggle-desc{font-size:12px;line-height:1.5;color:var(--dsw-alias-label-secondary,#5a5a66)}
+.dsh-nudge-preset-row{display:flex;flex-direction:column;gap:8px;padding:12px;border-radius:12px;border:1px solid var(--dn-line);background:color-mix(in srgb,var(--dsw-alias-label-primary,#1a1a1a) 3%,transparent)}
+.dsh-nudge-preset-line{display:flex;align-items:center;gap:8px}
+.dsh-nudge-preset-row input{flex:1 1 auto;min-width:0;height:32px;box-sizing:border-box;border:1px solid var(--dn-line);border-radius:9px;background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);font:inherit;font-size:12px;padding:0 10px;transition:border-color .15s ease,box-shadow .15s ease}
+.dsh-nudge-preset-row textarea{width:100%;box-sizing:border-box;min-height:56px;field-sizing:content;max-height:min(320px,40vh);overflow-y:auto;border:1px solid var(--dn-line);border-radius:9px;background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);font:inherit;font-size:12px;line-height:1.55;padding:8px 10px;transition:border-color .15s ease,box-shadow .15s ease}
+.dsh-nudge-preset-row input:focus,.dsh-nudge-preset-row textarea:focus{outline:none;border-color:var(--dn-accent-line);box-shadow:0 0 0 3px var(--dn-accent-soft)}
+.dsh-nudge-preset-actions{display:flex;flex-wrap:wrap;gap:8px}
+/* Preset rows are a table of contents: one name per line, bodies on demand. */
+.dsh-nudge-preset-row:has(> .dsh-nudge-preset-summary){gap:4px;padding:6px 8px}
+.dsh-nudge-preset-toolbar{display:flex;align-items:center;flex-wrap:wrap;gap:8px}
+.dsh-nudge-stats-head{display:flex;align-items:center;gap:8px}
+.dsh-nudge-stats-today{display:flex;flex-direction:column;gap:5px}
+.dsh-nudge-stats-today-head{display:flex;align-items:baseline;gap:6px;font-size:11px;line-height:1.4;color:var(--dsw-alias-label-secondary,#8a8a8a)}
+.dsh-nudge-stats-today-label{font-weight:600}
+.dsh-nudge-stats-today-date{font-variant-numeric:tabular-nums}
+.dsh-nudge-stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.dsh-nudge-stat{display:flex;flex-direction:column;gap:1px;min-width:0;padding-left:12px;border-left:1px solid var(--dn-line)}
+.dsh-nudge-stat:first-child{padding-left:0;border-left:0}
+.dsh-nudge-stat-value{font-size:22px;line-height:1.15;font-weight:600;font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-primary,#1a1a1a)}
+.dsh-nudge-stat-label{font-size:11px;line-height:1.4;color:var(--dsw-alias-label-secondary,#8a8a8a)}
+/* One board: trend on the left, prompt ranking on the right. Narrow panels
+   (the in-window fallback) stack the two instead of squeezing the chart. */
+.dsh-nudge-stats-board{display:grid;grid-template-columns:minmax(0,1fr);gap:14px;margin-top:2px;padding-top:12px;border-top:1px solid var(--dn-line)}
+.dsh-nudge-stats-chart-pane{display:flex;flex-direction:column;gap:6px;min-width:0}
+.dsh-nudge-stats-trend-head{display:flex;align-items:baseline;justify-content:space-between;gap:8px;font-size:11px;line-height:1.4;color:var(--dsw-alias-label-secondary,#8a8a8a)}
+.dsh-nudge-stats-total{font-variant-numeric:tabular-nums}
+.dsh-nudge-chart-peak{color:var(--dsw-alias-label-secondary,#9a9aa4)}
+.dsh-nudge-chart-wrap{position:relative;flex:0 0 auto;width:100%;aspect-ratio:320/168;min-height:150px;overflow:visible}
+.dsh-nudge-chart-svg{display:block;width:100%;height:100%;overflow:visible}
+.dsh-nudge-chart-grid{stroke:var(--dn-line);stroke-width:1;stroke-dasharray:2 4;opacity:.7}
+.dsh-nudge-chart-axis-line{stroke:var(--dn-line);stroke-width:1}
+.dsh-nudge-chart-point{stroke:var(--dsw-alias-bg-layer-1,#fff);stroke-width:1.2}
+.dsh-nudge-chart-point.input{fill:var(--dsw-static-deepseek-450,#5686fe)}
+.dsh-nudge-chart-point.note{fill:var(--dn-note)}
+.dsh-nudge-chart-empty{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;padding:0 12px;font-size:11px;line-height:1.5;color:var(--dsw-alias-label-secondary,#8a8a8a);text-align:center}
+.dsh-nudge-chart-hits{position:absolute;inset:0;display:flex}
+.dsh-nudge-chart-hit{flex:1 1 0;position:relative;min-width:0}
+.dsh-nudge-chart-tip{position:absolute;top:2px;left:50%;transform:translateX(-50%);z-index:2;display:flex;flex-direction:column;gap:1px;padding:5px 8px;border-radius:8px;border:1px solid var(--dn-line);background:var(--dsw-alias-bg-layer-1,#fff);box-shadow:0 8px 22px -12px rgba(15,23,42,.45);font-size:11px;line-height:1.4;white-space:nowrap;opacity:0;pointer-events:none;transition:opacity .12s ease}
+.dsh-nudge-chart-hit:hover .dsh-nudge-chart-tip{opacity:1}
+.dsh-nudge-chart-hit:nth-child(-n+3) .dsh-nudge-chart-tip{left:0;transform:none}
+.dsh-nudge-chart-hit:nth-last-child(-n+3) .dsh-nudge-chart-tip{left:auto;right:0;transform:none}
+.dsh-nudge-chart-tip-date{font-weight:600;color:var(--dsw-alias-label-primary,#1a1a1a);font-variant-numeric:tabular-nums}
+.dsh-nudge-chart-tip-values{color:var(--dsw-alias-label-secondary,#8a8a8a)}
+.dsh-nudge-stats-axis{display:flex;justify-content:space-between;gap:8px;font-size:10.5px;line-height:1.4;color:var(--dsw-alias-label-secondary,#8a8a8a);font-variant-numeric:tabular-nums}
+.dsh-nudge-chart-legend{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:11px;line-height:1.5;color:var(--dsw-alias-label-secondary,#8a8a8a)}
+.dsh-nudge-chart-legend-item{display:inline-flex;align-items:center;gap:5px;white-space:nowrap}
+.dsh-nudge-chart-dot{flex:0 0 auto;width:11px;height:3px;border-radius:2px}
+.dsh-nudge-chart-dot.input{background:var(--dsw-static-deepseek-450,#5686fe)}
+.dsh-nudge-chart-dot.note{background:var(--dn-note)}
+.dsh-nudge-stats-side{display:flex;flex-direction:column;gap:6px;min-width:0}
+/* Today sits above the ranking and stays compact: the board is a summary, not
+   a second settings page. */
+.dsh-nudge-stats-side .dsh-nudge-stats-today{gap:4px;padding-bottom:8px;border-bottom:1px solid var(--dn-line)}
+.dsh-nudge-stats-side .dsh-nudge-stats-today-head{justify-content:space-between}
+.dsh-nudge-stats-side .dsh-nudge-stats{gap:6px}
+.dsh-nudge-stats-side .dsh-nudge-stat{padding-left:7px}
+.dsh-nudge-stats-side .dsh-nudge-stat:first-child{padding-left:0}
+.dsh-nudge-stats-side .dsh-nudge-stat-value{font-size:18px;line-height:1.1}
+.dsh-nudge-stats-side .dsh-nudge-stat-label{font-size:10px;line-height:1.3}
+.dsh-nudge-stats-side-head{margin-top:1px}
+.dsh-nudge-stats-side-head{display:flex;align-items:baseline;justify-content:space-between;gap:8px;font-size:11px;line-height:1.4;font-weight:600;color:var(--dsw-alias-label-secondary,#8a8a8a)}
+.dsh-nudge-stats-side-empty{font-size:11px;line-height:1.6;color:var(--dsw-alias-label-secondary,#8a8a8a)}
+.dsh-nudge-top-list{display:flex;flex-direction:column;gap:2px;margin:0;padding:0;list-style:none}
+.dsh-nudge-top-item{display:flex;align-items:center;gap:8px;min-width:0;padding:3px 6px;border-radius:8px;transition:background .15s ease}
+.dsh-nudge-top-item:hover{background:var(--dn-hover)}
+.dsh-nudge-top-rank{flex:0 0 18px;height:18px;border-radius:6px;background:color-mix(in srgb,var(--dsw-alias-label-primary,#1a1a1a) 6%,transparent);color:var(--dsw-alias-label-secondary,#8a8a8a);font-size:10.5px;font-weight:600;line-height:18px;text-align:center;font-variant-numeric:tabular-nums}
+.dsh-nudge-top-item:first-child .dsh-nudge-top-rank{background:var(--dn-accent-soft);color:var(--dn-accent)}
+.dsh-nudge-top-label{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;line-height:1.5;color:var(--dsw-alias-label-primary,#1a1a1a)}
+.dsh-nudge-top-count{flex:0 0 auto;font-size:11px;line-height:1.4;color:var(--dsw-alias-label-secondary,#8a8a8a);font-variant-numeric:tabular-nums;white-space:nowrap}
+.dsh-nudge-stats-share{margin-top:auto;padding:4px 6px 0;font-size:10.5px;line-height:1.5;color:var(--dsw-alias-label-secondary,#8a8a8a)}
+@container dsh-nudge-stats (min-width: 430px){
+  .dsh-nudge-stats-board{grid-template-columns:minmax(0,1.55fr) minmax(150px,1fr);gap:18px}
+  .dsh-nudge-stats-side{padding-left:18px;border-left:1px solid var(--dn-line)}
+}
+.dsh-nudge-preset-count{margin-right:auto;font-size:11px;color:var(--dsw-alias-label-secondary,#8a8a8a);font-variant-numeric:tabular-nums}
+.dsh-nudge-preset-summary{display:flex;align-items:center;gap:6px;min-width:0}
+.dsh-nudge-preset-grip{cursor:grab;padding:2px;border-radius:6px;color:var(--dsw-alias-label-secondary,#8a8a8a);font-size:13px;line-height:1;user-select:none}
+.dsh-nudge-preset-grip:active{cursor:grabbing}
+.dsh-nudge-preset-grip:focus-visible{outline:2px solid var(--dn-accent-line);outline-offset:1px}
+.dsh-nudge-preset-toggle{flex:1 1 auto;min-width:0;display:flex;align-items:center;gap:6px;padding:4px 6px;border:0;border-radius:8px;background:transparent;color:inherit;font:inherit;font-size:12px;text-align:left;cursor:pointer}
+.dsh-nudge-preset-toggle:hover{background:var(--dn-hover)}
+.dsh-nudge-preset-toggle:focus-visible{outline:2px solid var(--dn-accent-line);outline-offset:1px}
+.dsh-nudge-preset-toggle svg{flex:0 0 auto;color:var(--dsw-alias-label-secondary,#8a8a8a)}
+.dsh-nudge-preset-name{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dsw-alias-label-primary,#1a1a1a);font-weight:600}
+.dsh-nudge-tip-name{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dsw-alias-label-primary,#1a1a1a);font-size:12px;line-height:1.6}
+.dsh-nudge-preset-tools{display:flex;align-items:center;gap:4px;flex:0 0 auto}
+/* Drag: the summary is the handle, and the row follows the pointer live. */
+.dsh-nudge-preset-summary{cursor:grab}
+.dsh-nudge-preset-summary:active{cursor:grabbing}
+.dsh-nudge-preset-row.dragging{opacity:.65;border-color:var(--dn-accent-line);box-shadow:0 6px 18px rgba(0,0,0,.08)}
+.dsh-nudge-preset-row.disabled{opacity:.72}
+.dsh-nudge-preset-row.disabled .dsh-nudge-preset-name{color:var(--dsw-alias-label-secondary,#8a8a8a);font-weight:500}
+.dsh-nudge-preset-state{flex:0 0 auto;height:22px;padding:0 8px;border-radius:999px;border:1px solid var(--dn-line);background:transparent;color:var(--dsw-alias-label-secondary,#8a8a8a);font:inherit;font-size:11px;line-height:1;cursor:pointer;white-space:nowrap;transition:background .15s ease,color .15s ease,border-color .15s ease}
+.dsh-nudge-preset-state:hover{background:var(--dn-hover)}
+.dsh-nudge-preset-state.on{background:var(--dn-accent-soft);border-color:var(--dn-accent-line);color:var(--dn-accent)}
+.dsh-nudge-preset-state:focus-visible{outline:2px solid var(--dn-accent-line);outline-offset:1px}
+.dsh-nudge-preset-body{margin:0 6px 2px 30px;padding:8px 10px;border-radius:9px;background:color-mix(in srgb,var(--dsw-alias-label-primary,#1a1a1a) 4%,transparent);color:var(--dsw-alias-label-secondary,#555);font-size:12px;line-height:1.6;white-space:pre-wrap;word-break:break-word;max-height:min(280px,36vh);overflow-y:auto}
+.dsh-nudge-preset-editor{display:flex;flex-direction:column;gap:8px;padding:2px 6px 2px 30px}
+.dsh-nudge-preset-editor input{flex:0 0 auto}
+.dsh-nudge-preset-empty{padding:14px;border:1px dashed var(--dn-line);border-radius:12px;color:var(--dsw-alias-label-secondary,#8a8a8a);font-size:12px;line-height:1.6;text-align:center}
+.dsh-nudge-preset-import{display:flex;flex-direction:column;gap:8px;padding:10px;border:1px dashed var(--dn-accent-line);border-radius:12px}
+.dsh-nudge-preset-import textarea{width:100%;box-sizing:border-box;min-height:96px;max-height:min(320px,40vh);overflow-y:auto;border:1px solid var(--dn-line);border-radius:9px;background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);font:inherit;font-size:12px;line-height:1.55;padding:8px 10px;transition:border-color .15s ease,box-shadow .15s ease}
+.dsh-nudge-preset-import textarea:focus{outline:none;border-color:var(--dn-accent-line);box-shadow:0 0 0 3px var(--dn-accent-soft)}
+.dsh-nudge-tip-draft{display:flex;flex-direction:column;gap:8px}
+.dsh-nudge-tip-draft textarea{width:100%;box-sizing:border-box;min-height:64px;max-height:min(240px,32vh);overflow-y:auto;border:1px solid var(--dn-line);border-radius:9px;background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);font:inherit;font-size:12px;line-height:1.55;padding:8px 10px;transition:border-color .15s ease,box-shadow .15s ease}
+.dsh-nudge-tip-draft textarea:focus{outline:none;border-color:var(--dn-accent-line);box-shadow:0 0 0 3px var(--dn-accent-soft)}
+.dsh-nudge-tip-draft .dsh-nudge-btn{align-self:flex-start}
+.dsh-nudge-btn{height:30px;padding:0 12px;border:1px solid var(--dn-line);border-radius:9px;background:transparent;color:var(--dsw-alias-label-primary,#1a1a1a);font:inherit;font-size:12px;cursor:pointer;transition:background .15s ease,border-color .15s ease,color .15s ease}
+.dsh-nudge-btn:hover{background:var(--dn-hover)}
+.dsh-nudge-btn.primary{background:var(--dn-accent);border-color:transparent;color:var(--dsw-alias-label-primary-inverted,#fff);font-weight:600}
+.dsh-nudge-btn.primary:hover{filter:brightness(1.05);background:var(--dn-accent)}
+.dsh-nudge-btn.danger{color:var(--dsw-alias-state-error-primary,#c8433c);border-color:color-mix(in srgb,var(--dsw-alias-state-error-primary,#c8433c) 28%,transparent)}
+.dsh-nudge-btn.danger:hover{background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#c8433c) 10%,transparent)}
+.dsh-nudge-btn.icon{width:30px;padding:0;font-size:13px;line-height:1}
+.dsh-nudge-btn:disabled{opacity:.4;cursor:default}
+.dsh-nudge-btn:disabled:hover{background:transparent}
+.dsh-nudge-settings-group,.dsh-nudge-stats-group{display:flex;flex-direction:column;gap:7px;padding:12px;border-radius:12px;border:1px solid var(--dn-line);background:color-mix(in srgb,var(--dsw-alias-label-primary,#1a1a1a) 3%,transparent)}
+/* A setting that is one control wide enough to sit on a single row: label on
+   the left, its choices on the right, no separate description line. */
+.dsh-nudge-settings-inline{flex-direction:row;align-items:center;justify-content:space-between;gap:10px;padding:8px 12px}
+.dsh-nudge-settings-inline .dsh-nudge-toggle-title{flex:0 0 auto}
+.dsh-nudge-settings-inline .dsh-nudge-presets{flex-wrap:nowrap}
+/* The stats board is the page's hero: slightly raised, and a container so the
+   chart/ranking split only kicks in when the panel is actually wide enough. */
+.dsh-nudge-stats-group{container-type:inline-size;container-name:dsh-nudge-stats;background:var(--dsw-alias-bg-layer-1,#fff);box-shadow:0 1px 2px rgba(15,23,42,.04)}
+.dsh-nudge-settings-error{color:var(--dsw-alias-state-error-primary,#c8433c);font-size:12px;line-height:1.5}
+.dsh-nudge-tip{position:fixed;z-index:${Z_INDEX + 2};box-sizing:border-box;padding:7px 10px;border-radius:9px;background:color-mix(in srgb,var(--dsw-alias-label-primary,#1a1a1a) 92%,#000);color:#fff;font:12px/1.45 ui-sans-serif,system-ui,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;box-shadow:0 10px 26px -8px rgba(15,23,42,.45);pointer-events:none;animation:dsh-nudge-tip-in .12s ease-out}
+@keyframes dsh-nudge-tip-in{from{opacity:0;transform:translateY(-2px)}to{opacity:1;transform:none}}
+.dsh-nudge-tip-head{display:flex;align-items:baseline;gap:6px;white-space:nowrap}
+.dsh-nudge-tip-title{font-weight:600}
+.dsh-nudge-tip-state{color:color-mix(in srgb,var(--dn-accent) 55%,#fff);font-weight:600}
+.dsh-nudge-tip-hint{margin-top:2px;font-size:11px;line-height:1.5;opacity:.78}
+@media (prefers-reduced-motion:reduce){.dsh-nudge-tip{animation:none}}
+`.trim();
+
+/**
+ * Reading the transcript: packed text and quote anchors.
+ *
+ * Selection anchors survive a repaint because they are found again by text, not by node.
+ *
+ * Built into `client.js` by `scripts/build.mjs`; edit this file, not the bundle.
+ */
 
     /** The element a DOM node belongs to, or null. */
     function elementOfNode(node) {
@@ -754,12 +1454,28 @@ const h = React.createElement;
       return { start: best.index, end: best.index + anchor.quote.length }
     }
 
+/**
+ * The page storage facade.
+ *
+ * One guarded accessor pair for localStorage; writes tell the durable mirror there is news.
+ *
+ * Built into `client.js` by `scripts/build.mjs`; edit this file, not the bundle.
+ */
+    /**
+     * Called after every stored string lands, so the durable mirror can arm.
+     * The settings module registers its own hook; this layer only knows that a
+     * write is news, not what the news is.
+     */
+    let writeObserver = () => {};
 
-    /** Clamp a number into an inclusive range. */
-    function clamp(value, min, max) {
-      const low = Math.min(min, max);
-      const high = Math.max(min, max);
-      return Math.min(high, Math.max(low, value))
+    /** Register the one observer a storage write notifies. */
+    function setWriteObserver(observer) {
+      writeObserver = observer;
+    }
+
+    /** Tell the observer a write landed; a write that throws never gets here. */
+    function notifyStorageWrite() {
+      writeObserver();
     }
 
     /**
@@ -781,11 +1497,11 @@ const h = React.createElement;
           getItem: (key) => raw.getItem(key),
           setItem: (key, value) => {
             raw.setItem(key, value);
-            noteSettingsWrite();
+            notifyStorageWrite();
           },
           removeItem: (key) => {
             raw.removeItem(key);
-            noteSettingsWrite();
+            notifyStorageWrite();
           },
         };
         return storageFacade
@@ -836,6 +1552,273 @@ const h = React.createElement;
         return false
       }
     }
+
+/**
+ * The per-Session annotation store.
+ *
+ * Every note is keyed by the Session it quotes, so switching conversations keeps each tray.
+ *
+ * Built into `client.js` by `scripts/build.mjs`; edit this file, not the bundle.
+ */
+
+    /** Every stored annotation set, keyed by Session id. */
+    function readNoteStore() {
+      try {
+        const raw = storage()?.getItem(NOTES_KEY);
+        if (typeof raw !== 'string' || raw === '') return {}
+        const parsed = JSON.parse(raw);
+        return parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+      } catch {
+        return {}
+      }
+    }
+
+    /** One Session's stored annotations, degraded to [] when malformed. */
+    function notesOfSession(sessionId) {
+      if (typeof sessionId !== 'string' || sessionId === '') return []
+      const list = readNoteStore()[sessionId];
+      if (!Array.isArray(list)) return []
+      return list.filter(
+        (item) =>
+          item !== null &&
+          typeof item === 'object' &&
+          typeof item.quote === 'string' &&
+          typeof item.id === 'string',
+      )
+    }
+
+    /** Persist one Session's annotations, dropping empty sets and old Sessions. */
+    function saveNotesOfSession(sessionId, list) {
+      if (typeof sessionId !== 'string' || sessionId === '') return
+      const store = readNoteStore();
+      if (!Array.isArray(list) || list.length === 0) delete store[sessionId];
+      else store[sessionId] = list.slice(-MAX_NOTES);
+      const keys = Object.keys(store);
+      if (keys.length > MAX_NOTE_SESSIONS) {
+        for (const key of keys.slice(0, keys.length - MAX_NOTE_SESSIONS)) delete store[key];
+      }
+      writeJson(NOTES_KEY, store);
+    }
+
+/**
+ * Probe presets: built-ins, normalization and the chosen one.
+ *
+ * The list an install starts with, the legacy shapes it may have been stored in, and the pick.
+ *
+ * Built into `client.js` by `scripts/build.mjs`; edit this file, not the bundle.
+ */
+
+    /** One preset by id, `undefined` for an unknown value. */
+    function presetOf(list, id) {
+      for (const preset of list) {
+        if (preset.id === id) return preset
+      }
+      return undefined
+    }
+
+    /** Identity for a user-added preset. */
+    function mintPresetId() {
+      return `custom-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`
+    }
+
+    /** The built-in presets, labelled for the active language. */
+    function builtinPresets(lang) {
+      return BUILTIN_PRESETS.map((preset) => ({
+        id: preset.id,
+        label: lang === 'zh' ? preset.labelZh : preset.labelEn,
+        text: preset.text,
+        enabled: true,
+      }))
+    }
+
+    /** The first non-empty string among a stored preset's text aliases. */
+    function presetTextOf(item) {
+      for (const key of ['text', 'body', 'content', 'prompt']) {
+        const value = item[key];
+        if (typeof value === 'string' && value.trim() !== '') return value.trim()
+      }
+      return ''
+    }
+
+    /**
+     * Normalize one stored/edited preset list; invalid entries are dropped.
+     * An empty array stays empty: the user may delete every prompt, and the
+     * settings page then shows its empty state.
+     */
+    function normalizePresetList(value, lang) {
+      if (!Array.isArray(value)) return builtinPresets(lang)
+      const list = [];
+      const seen = new Set();
+      for (const raw of value) {
+        // An older build could store a bare line of text per entry.
+        const item = typeof raw === 'string' ? { text: raw } : raw;
+        if (item === null || typeof item !== 'object') continue
+        const text = presetTextOf(item);
+        if (text.length === 0) continue
+        let id = typeof item.id === 'string' && item.id.length > 0 ? item.id : mintPresetId();
+        if (seen.has(id)) id = mintPresetId();
+        seen.add(id);
+        const rawLabel =
+          typeof item.label === 'string'
+            ? item.label.trim()
+            : typeof item.name === 'string'
+              ? item.name.trim()
+              : typeof item.title === 'string'
+                ? item.title.trim()
+                : '';
+        list.push({
+          id,
+          label: rawLabel.length > 0 ? rawLabel : text.slice(0, 8),
+          text,
+          enabled: item.enabled !== false,
+        });
+      }
+      return list
+    }
+
+    /** The list inside a legacy wrapper object, or undefined. */
+    function presetListOf(value) {
+      if (Array.isArray(value)) return value
+      if (value === null || typeof value !== 'object') return undefined
+      for (const key of ['presets', 'items', 'list']) {
+        if (Array.isArray(value[key])) return value[key]
+      }
+      return undefined
+    }
+
+    /** Read the chosen preset id, falling back to the first enabled preset. */
+    function readPresetId(presets) {
+      const firstEnabled = presets.find((preset) => preset.enabled !== false);
+      try {
+        const raw = storage()?.getItem(PRESET_KEY);
+        if (raw !== null && raw !== undefined) {
+          const chosen = presetOf(presets, raw);
+          if (chosen !== undefined) {
+            if (chosen.enabled === false) return firstEnabled?.id ?? chosen.id
+            return raw
+          }
+          console.warn(`[dsh-nudge] 忽略非法快捷输入 ${JSON.stringify(raw)}，改用第一条`);
+        }
+      } catch {
+        /* storage unavailable */
+      }
+      return firstEnabled?.id ?? presets[0]?.id ?? DEFAULT_PRESET
+    }
+
+/**
+ * Per-day usage counters.
+ *
+ * Local dates, a bounded window, and the three counters one action can credit.
+ *
+ * Built into `client.js` by `scripts/build.mjs`; edit this file, not the bundle.
+ */
+
+    /** Local calendar day, the bucket the counters roll over on. */
+    function dayKey(date = new Date()) {
+      const month = String(date.getMonth() + 1).padStart(2, '0');
+      const day = String(date.getDate()).padStart(2, '0');
+      return `${date.getFullYear()}-${month}-${day}`
+    }
+
+    /** Local date keys for the newest `count` days, oldest first. */
+    function recentDayKeys(count, now = new Date()) {
+      const keys = [];
+      for (let offset = count - 1; offset >= 0; offset -= 1) {
+        keys.push(dayKey(new Date(now.getFullYear(), now.getMonth(), now.getDate() - offset)));
+      }
+      return keys
+    }
+
+    /** The counters this build owns; anything else is dropped. */
+    const STAT_FIELDS = ['send', 'insert', 'annotation'];
+
+    /**
+     * Normalize a stored counter record: `{ days: { 'YYYY-MM-DD': { send, insert,
+     * annotation } } }`. Unknown fields, malformed rows and days outside the
+     * local-date shape are dropped, and only the newest days are kept.
+     */
+    function normalizeStats(value) {
+      const days = {};
+      const source = value !== null && typeof value === 'object' ? value.days : undefined;
+      if (source === null || typeof source !== 'object' || Array.isArray(source)) return { days }
+      let keys = Object.keys(source).filter((key) => /^\d{4}-\d{2}-\d{2}$/.test(key));
+      keys = keys.sort().slice(-STATS_DAYS);
+      for (const key of keys) {
+        const raw = source[key];
+        if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) continue
+        const entry = {};
+        for (const field of STAT_FIELDS) {
+          const count = raw[field];
+          if (Number.isInteger(count) && count > 0) entry[field] = count;
+        }
+        // Per-preset use is kept beside the daily totals, so the Top 3 list
+        // follows the same window and ages out with it.
+        const rawPresets = raw.presets;
+        if (rawPresets !== null && typeof rawPresets === 'object' && !Array.isArray(rawPresets)) {
+          const presets = {};
+          let kept = 0;
+          for (const id of Object.keys(rawPresets)) {
+            if (kept >= MAX_STAT_PRESETS) break
+            const count = rawPresets[id];
+            if (id.length === 0 || id.length > MAX_STAT_PRESET_ID) continue
+            if (id === '__proto__' || id === 'constructor' || id === 'prototype') continue
+            if (!Number.isInteger(count) || count <= 0) continue
+            presets[id] = count;
+            kept += 1;
+          }
+          if (kept > 0) entry.presets = presets;
+        }
+        if (Object.keys(entry).length > 0) days[key] = entry;
+      }
+      return { days }
+    }
+
+    /** Read the daily counters; an absent or malformed record reads as empty. */
+    function readStats() {
+      return normalizeStats(readJson(STATS_KEY))
+    }
+
+/**
+ * Idle lines: the built-ins and the shapes a stored list may take.
+ *
+ * One line shows at a time while nothing is happening; the list is editable.
+ *
+ * Built into `client.js` by `scripts/build.mjs`; edit this file, not the bundle.
+ */
+
+    /** The built-in idle lines, localized to one language. */
+    function builtinTips(lang) {
+      return BUILTIN_TIPS.map((tip) => (lang === 'zh' ? tip.zh : tip.en))
+    }
+
+    /** One idle line: whitespace collapsed, trimmed, length-capped for the row. */
+    function tidyTip(value) {
+      if (typeof value !== 'string') return ''
+      const line = value.replace(/\s+/g, ' ').trim();
+      return line.length > MAX_TIP_LENGTH ? line.slice(0, MAX_TIP_LENGTH) : line
+    }
+
+    /** Normalize a stored list: strings only, no blanks or duplicates, capped. */
+    function normalizeTipList(value, lang) {
+      const list = Array.isArray(value) ? value.map(tidyTip).filter((line) => line !== '') : [];
+      const unique = [];
+      for (const line of list) if (!unique.includes(line)) unique.push(line);
+      const capped = unique.slice(0, MAX_TIPS);
+      return capped.length > 0 ? capped : builtinTips(lang)
+    }
+
+    /** Read the idle lines; the built-in list is the fallback. */
+    function readTips(lang) {
+      return normalizeTipList(readJson(TIPS_KEY), lang)
+    }
+
+/**
+ * The settings table, its storage shapes, and the Host mirror.
+ *
+ * One row per setting holds the three shapes it takes: page storage, runtime state, Host field.
+ *
+ * Built into `client.js` by `scripts/build.mjs`; edit this file, not the bundle.
+ */
 
     /**
      * One on/off setting: stored as '1', absent when off.
@@ -1099,6 +2082,9 @@ const h = React.createElement;
       armSettingsMirror();
     }
 
+    // The storage layer reports every write; the mirror decides whether it is news.
+    setWriteObserver(noteSettingsWrite);
+
     /** Arm (or re-arm) the write; a mirror that has not read the record waits. */
     function armSettingsMirror() {
       if (!mirrorReady || !mirrorDirty || typeof fetch !== 'function') return
@@ -1201,118 +2187,6 @@ const h = React.createElement;
       return value === 'followup' || value === 'steer'
     }
 
-    /** Client-minted request identity persisted on the accepted user message. */
-    function mintRequestId() {
-      return `nudge-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
-    }
-
-    /** The browser time zone, forwarded so the Host can record it. */
-    function timeZoneOf() {
-      try {
-        return Intl.DateTimeFormat().resolvedOptions().timeZone
-      } catch {
-        return undefined
-      }
-    }
-
-    /** One preset by id, `undefined` for an unknown value. */
-    function presetOf(list, id) {
-      for (const preset of list) {
-        if (preset.id === id) return preset
-      }
-      return undefined
-    }
-
-    /**
-     * The insertion point a pointer at (`x`, `y`) asks for among `boxes`,
-     * counting every box it has passed in reading order: top to bottom, then
-     * left to right. The boxes must be frozen for the whole drag — re-reading
-     * them after a reorder is what made a wide chip re-wrap the row and flip the
-     * slot back and forth under a still pointer.
-     * @param boxes - `{ id, left, top, width, height }` in reading order.
-     * @param id - the dragged chip, which is not a slot of its own.
-     */
-    function chipSlotAt(boxes, id, x, y) {
-      let index = 0;
-      for (const box of boxes) {
-        if (box.id === id) continue
-        const below = y > box.top + box.height;
-        const sameRow = y >= box.top && y <= box.top + box.height;
-        if (below || (sameRow && x > box.left + box.width / 2)) index += 1;
-      }
-      return index
-    }
-
-    /** Identity for a user-added preset. */
-    function mintPresetId() {
-      return `custom-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`
-    }
-
-    /** The built-in presets, labelled for the active language. */
-    function builtinPresets(lang) {
-      return BUILTIN_PRESETS.map((preset) => ({
-        id: preset.id,
-        label: lang === 'zh' ? preset.labelZh : preset.labelEn,
-        text: preset.text,
-        enabled: true,
-      }))
-    }
-
-    /** The first non-empty string among a stored preset's text aliases. */
-    function presetTextOf(item) {
-      for (const key of ['text', 'body', 'content', 'prompt']) {
-        const value = item[key];
-        if (typeof value === 'string' && value.trim() !== '') return value.trim()
-      }
-      return ''
-    }
-
-    /**
-     * Normalize one stored/edited preset list; invalid entries are dropped.
-     * An empty array stays empty: the user may delete every prompt, and the
-     * settings page then shows its empty state.
-     */
-    function normalizePresetList(value, lang) {
-      if (!Array.isArray(value)) return builtinPresets(lang)
-      const list = [];
-      const seen = new Set();
-      for (const raw of value) {
-        // An older build could store a bare line of text per entry.
-        const item = typeof raw === 'string' ? { text: raw } : raw;
-        if (item === null || typeof item !== 'object') continue
-        const text = presetTextOf(item);
-        if (text.length === 0) continue
-        let id = typeof item.id === 'string' && item.id.length > 0 ? item.id : mintPresetId();
-        if (seen.has(id)) id = mintPresetId();
-        seen.add(id);
-        const rawLabel =
-          typeof item.label === 'string'
-            ? item.label.trim()
-            : typeof item.name === 'string'
-              ? item.name.trim()
-              : typeof item.title === 'string'
-                ? item.title.trim()
-                : '';
-        list.push({
-          id,
-          label: rawLabel.length > 0 ? rawLabel : text.slice(0, 8),
-          text,
-          enabled: item.enabled !== false,
-        });
-      }
-      return list
-    }
-
-    /** The list inside a legacy wrapper object, or undefined. */
-    function presetListOf(value) {
-      if (Array.isArray(value)) return value
-      if (value === null || typeof value !== 'object') return undefined
-      for (const key of ['presets', 'items', 'list']) {
-        if (Array.isArray(value[key])) return value[key]
-      }
-      return undefined
-    }
-
     /**
      * Read the persisted presets; the built-in list is the fallback.
      * A legacy shape (wrapper object, bare strings, other field names) is
@@ -1326,25 +2200,6 @@ const h = React.createElement;
       const list = normalizePresetList(raw, lang);
       if (!Array.isArray(stored)) persistSetting('presets', list);
       return list
-    }
-
-    /** Read the chosen preset id, falling back to the first enabled preset. */
-    function readPresetId(presets) {
-      const firstEnabled = presets.find((preset) => preset.enabled !== false);
-      try {
-        const raw = storage()?.getItem(PRESET_KEY);
-        if (raw !== null && raw !== undefined) {
-          const chosen = presetOf(presets, raw);
-          if (chosen !== undefined) {
-            if (chosen.enabled === false) return firstEnabled?.id ?? chosen.id
-            return raw
-          }
-          console.warn(`[dsh-nudge] 忽略非法快捷输入 ${JSON.stringify(raw)}，改用第一条`);
-        }
-      } catch {
-        /* storage unavailable */
-      }
-      return firstEnabled?.id ?? presets[0]?.id ?? DEFAULT_PRESET
     }
 
     /** Read the browser delivery override; an invalid stored value is ignored with a warning. */
@@ -1411,366 +2266,13 @@ const h = React.createElement;
       return width === 3 ? 'frameThick' : 'frameNormal'
     }
 
-    /** The built-in idle lines, localized to one language. */
-    function builtinTips(lang) {
-      return BUILTIN_TIPS.map((tip) => (lang === 'zh' ? tip.zh : tip.en))
-    }
-
-    /** One idle line: whitespace collapsed, trimmed, length-capped for the row. */
-    function tidyTip(value) {
-      if (typeof value !== 'string') return ''
-      const line = value.replace(/\s+/g, ' ').trim();
-      return line.length > MAX_TIP_LENGTH ? line.slice(0, MAX_TIP_LENGTH) : line
-    }
-
-    /** Normalize a stored list: strings only, no blanks or duplicates, capped. */
-    function normalizeTipList(value, lang) {
-      const list = Array.isArray(value) ? value.map(tidyTip).filter((line) => line !== '') : [];
-      const unique = [];
-      for (const line of list) if (!unique.includes(line)) unique.push(line);
-      const capped = unique.slice(0, MAX_TIPS);
-      return capped.length > 0 ? capped : builtinTips(lang)
-    }
-
-    /** Read the idle lines; the built-in list is the fallback. */
-    function readTips(lang) {
-      return normalizeTipList(readJson(TIPS_KEY), lang)
-    }
-
-    /** Local calendar day, the bucket the counters roll over on. */
-    function dayKey(date = new Date()) {
-      const month = String(date.getMonth() + 1).padStart(2, '0');
-      const day = String(date.getDate()).padStart(2, '0');
-      return `${date.getFullYear()}-${month}-${day}`
-    }
-
-    /** Local date keys for the newest `count` days, oldest first. */
-    function recentDayKeys(count, now = new Date()) {
-      const keys = [];
-      for (let offset = count - 1; offset >= 0; offset -= 1) {
-        keys.push(dayKey(new Date(now.getFullYear(), now.getMonth(), now.getDate() - offset)));
-      }
-      return keys
-    }
-
-    /** The counters this build owns; anything else is dropped. */
-    const STAT_FIELDS = ['send', 'insert', 'annotation'];
-
-    /**
-     * Normalize a stored counter record: `{ days: { 'YYYY-MM-DD': { send, insert,
-     * annotation } } }`. Unknown fields, malformed rows and days outside the
-     * local-date shape are dropped, and only the newest days are kept.
-     */
-    function normalizeStats(value) {
-      const days = {};
-      const source = value !== null && typeof value === 'object' ? value.days : undefined;
-      if (source === null || typeof source !== 'object' || Array.isArray(source)) return { days }
-      let keys = Object.keys(source).filter((key) => /^\d{4}-\d{2}-\d{2}$/.test(key));
-      keys = keys.sort().slice(-STATS_DAYS);
-      for (const key of keys) {
-        const raw = source[key];
-        if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) continue
-        const entry = {};
-        for (const field of STAT_FIELDS) {
-          const count = raw[field];
-          if (Number.isInteger(count) && count > 0) entry[field] = count;
-        }
-        // Per-preset use is kept beside the daily totals, so the Top 3 list
-        // follows the same window and ages out with it.
-        const rawPresets = raw.presets;
-        if (rawPresets !== null && typeof rawPresets === 'object' && !Array.isArray(rawPresets)) {
-          const presets = {};
-          let kept = 0;
-          for (const id of Object.keys(rawPresets)) {
-            if (kept >= MAX_STAT_PRESETS) break
-            const count = rawPresets[id];
-            if (id.length === 0 || id.length > MAX_STAT_PRESET_ID) continue
-            if (id === '__proto__' || id === 'constructor' || id === 'prototype') continue
-            if (!Number.isInteger(count) || count <= 0) continue
-            presets[id] = count;
-            kept += 1;
-          }
-          if (kept > 0) entry.presets = presets;
-        }
-        if (Object.keys(entry).length > 0) days[key] = entry;
-      }
-      return { days }
-    }
-
-    /** Read the daily counters; an absent or malformed record reads as empty. */
-    function readStats() {
-      return normalizeStats(readJson(STATS_KEY))
-    }
-
-    /** Every stored annotation set, keyed by Session id. */
-    function readNoteStore() {
-      try {
-        const raw = storage()?.getItem(NOTES_KEY);
-        if (typeof raw !== 'string' || raw === '') return {}
-        const parsed = JSON.parse(raw);
-        return parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
-      } catch {
-        return {}
-      }
-    }
-
-    /** One Session's stored annotations, degraded to [] when malformed. */
-    function notesOfSession(sessionId) {
-      if (typeof sessionId !== 'string' || sessionId === '') return []
-      const list = readNoteStore()[sessionId];
-      if (!Array.isArray(list)) return []
-      return list.filter(
-        (item) =>
-          item !== null &&
-          typeof item === 'object' &&
-          typeof item.quote === 'string' &&
-          typeof item.id === 'string',
-      )
-    }
-
-    /** Persist one Session's annotations, dropping empty sets and old Sessions. */
-    function saveNotesOfSession(sessionId, list) {
-      if (typeof sessionId !== 'string' || sessionId === '') return
-      const store = readNoteStore();
-      if (!Array.isArray(list) || list.length === 0) delete store[sessionId];
-      else store[sessionId] = list.slice(-MAX_NOTES);
-      const keys = Object.keys(store);
-      if (keys.length > MAX_NOTE_SESSIONS) {
-        for (const key of keys.slice(0, keys.length - MAX_NOTE_SESSIONS)) delete store[key];
-      }
-      writeJson(NOTES_KEY, store);
-    }
-
-    /** Active locale id, with the browser language as the fallback. */
-    function readLang(ctx) {
-      try {
-        const snapshot = ctx.get?.('locale')?.getLocale?.();
-        const active = snapshot && typeof snapshot.active === 'string' ? snapshot.active : '';
-        if (/^zh/i.test(active)) return 'zh'
-        if (active.length > 0) return 'en'
-      } catch {
-        /* locale service absent */
-      }
-      const nav = typeof navigator !== 'undefined' ? navigator.language || '' : '';
-      return /^zh/i.test(nav) ? 'zh' : 'en'
-    }
-
-    /** The conversation the main view retains — the session a click is about. */
-    function resolveTarget(ctx) {
-      const list = ctx.get?.('sessions')?.list?.getSnapshot?.();
-      if (list === null || typeof list !== 'object' || !Array.isArray(list.ids)) return undefined
-      for (const id of list.ids) {
-        const row = list.byId?.[id];
-        const retained = row?.retainedBy?.mainView ?? 0;
-        if (retained > 0) {
-          const title = typeof row.title === 'string' && row.title.length > 0
-            ? row.title
-            : row.displayTitle;
-          return { sessionId: String(id), title: typeof title === 'string' ? title : String(id) }
-        }
-      }
-      return undefined
-    }
-
-    /** The unified session status fact for one session. */
-    function statusOf(ctx, sessionId) {
-      try {
-        return ctx.get?.('uiSession')?.sessionStatus?.getSnapshot?.()?.get(sessionId)
-      } catch {
-        return undefined
-      }
-    }
-
-    /**
-     * The shipped session Remote namespace, wherever the composition exposes it.
-     *
-     * Typert registers it both as its own service key (`remote.session`) and as
-     * a property on the `remote` face; read whichever answers so a future
-     * composition change does not take the button down silently.
-     */
-    function sessionRemoteOf(ctx) {
-      const candidates = [];
-      try {
-        candidates.push(ctx.get?.('remote.session'));
-      } catch {
-        /* unknown key */
-      }
-      try {
-        candidates.push(ctx.get?.('remote')?.session);
-      } catch {
-        /* unknown key */
-      }
-      for (const candidate of candidates) {
-        if (candidate && typeof candidate.prompt === 'function') return candidate
-      }
-      return undefined
-    }
-
-    /**
-     * The durable event window of one session, when its binding is live.
-     *
-     * The window is what the Conversation assembler reads; the window here is
-     * only used to observe *that* the probe was admitted and *that* the next
-     * assistant message arrived — never to read or render its content.
-     */
-    function eventSourceOf(ctx, sessionId) {
-      try {
-        return ctx.get?.('sessions')?.binding?.(sessionId)?.eventSource
-      } catch {
-        return undefined
-      }
-    }
-
-    /** Highest durable seq currently in one event window. */
-    function lastDurableSeq(windowSnapshot) {
-      let last = 0;
-      const entries = windowSnapshot?.entries;
-      if (!Array.isArray(entries)) return last
-      for (const item of entries) {
-        if (item?.type !== 'event') continue
-        const seq = item.event?.seq;
-        if (typeof seq === 'number' && seq > last) last = seq;
-      }
-      return last
-    }
-
-    /** Visible text blocks of one durable `user/message` event. */
-    function userMessageText(event) {
-      const content = event?.data?.content;
-      if (!Array.isArray(content)) return ''
-      let text = '';
-      for (const part of content) {
-        if (part && part.type === 'text' && typeof part.text === 'string') text += part.text;
-      }
-      return text
-    }
-
-    /** Visible text blocks of one durable `assistant/message` event. */
-    function assistantMessageText(event) {
-      const content = event?.data?.message?.content;
-      if (!Array.isArray(content)) return ''
-      let text = '';
-      for (const part of content) {
-        if (part && part.type === 'text' && typeof part.text === 'string') text += part.text;
-      }
-      return text
-    }
-
-    // ---------------------------------------------------------------------
-    // geometry
-    // ---------------------------------------------------------------------
-
-    /** Current viewport, with sane minimums for the first paint. */
-    function viewport() {
-      return {
-        width: Math.max(320, window.innerWidth || 1280),
-        height: Math.max(320, window.innerHeight || 800),
-      }
-    }
-
-    /**
-     * Horizontal inset reserved on the right.
-     *
-     * The right sidebar (shipped column) is an absolutely positioned panel over
-     * the conversation's right edge; a floating window docked at the viewport
-     * edge would cover it while it is open. The panel publishes its own width
-     * as `--dsh-sidebar-width`, so the first dock position steps left of it.
-     * This is host layout chrome, not another plugin's DOM: when the query or
-     * the variable is unavailable the dock simply stays at the plain margin.
-     */
-    function rightInset() {
-      let inset = EDGE;
-      try {
-        const panel = document.querySelector('[data-sidebar-right-open]');
-        if (panel) {
-          const raw = window.getComputedStyle(panel).getPropertyValue('--dsh-sidebar-width').trim();
-          const width = Number.parseFloat(raw);
-          if (Number.isFinite(width) && width > 0) inset += width;
-        }
-      } catch {
-        /* layout unavailable: keep the plain margin */
-      }
-      return inset
-    }
-
-    /** First-run dock position: right, above the composer, clear of the right sidebar. */
-    function dockPosition(collapsed) {
-      const vp = viewport();
-      const width = collapsed ? PILL_SIZE : CARD_WIDTH;
-      const height = collapsed ? PILL_SIZE : 220;
-      return {
-        x: Math.round(clamp(vp.width - width - rightInset(), 8, Math.max(8, vp.width - width - 8))),
-        y: Math.round(clamp(DOCK_TOP, 8, Math.max(8, vp.height - height - 8))),
-      }
-    }
-
-    /** Clamp one stored position into the current viewport. */
-    function clampPoint(point, collapsed) {
-      const vp = viewport();
-      const width = collapsed ? PILL_SIZE : CARD_WIDTH;
-      const height = collapsed ? PILL_SIZE : Math.min(360, Math.max(180, vp.height - COMPOSER_RESERVE - 16));
-      const maxY = collapsed
-        ? Math.max(8, vp.height - height - 8)
-        : Math.max(8, vp.height - height - COMPOSER_RESERVE);
-      return {
-        x: Math.round(clamp(point.x, 8, Math.max(8, vp.width - width - 8))),
-        y: Math.round(clamp(point.y, 8, maxY)),
-      }
-    }
-
-    /** Whether the window sits closer to the left edge than to the right one. */
-    function nearestEdge(point, collapsed) {
-      const vp = viewport();
-      const width = collapsed ? PILL_SIZE : CARD_WIDTH;
-      return point.x + width / 2 <= vp.width / 2 ? 'left' : 'right'
-    }
-
-    /**
-     * Pin a stored point to the side it belongs to.
-     *
-     * Only the vertical spot is the user's: the horizontal one is the edge, so
-     * a window left somewhere in the middle of a wider or narrower screen still
-     * comes back on a side instead of floating over the conversation.
-     */
-    function snapToEdge(point, collapsed) {
-      const vp = viewport();
-      const width = collapsed ? PILL_SIZE : CARD_WIDTH;
-      const edge = nearestEdge(point, collapsed);
-      const x = edge === 'left' ? EDGE : vp.width - width - rightInset();
-      return clampPoint({ x, y: point.y }, collapsed)
-    }
-
-    /** Whether a stored value looks like a point. */
-    function isPoint(point) {
-      return (
-        point !== null &&
-        typeof point === 'object' &&
-        Number.isFinite(point.x) &&
-        Number.isFinite(point.y)
-      )
-    }
-
-    /**
-     * A DOMRect-like box as plain numbers, or null when it is not a usable box.
-     * The in-place editor keeps one of these instead of a live DOMRect, so a
-     * re-render never reads geometry off a detached node.
-     */
-    function rectValue(box) {
-      if (box === null || typeof box !== 'object') return null
-      const left = Number(box.left);
-      const top = Number(box.top);
-      const right = Number(box.right);
-      const bottom = Number(box.bottom);
-      const width = Number.isFinite(Number(box.width)) ? Number(box.width) : right - left;
-      const height = Number.isFinite(Number(box.height)) ? Number(box.height) : bottom - top;
-      const values = [left, top, right, bottom, width, height];
-      if (values.some((value) => Number.isFinite(value) === false)) return null
-      return { left, top, right, bottom, width, height }
-    }
-
-    // ---------------------------------------------------------------------
-    // runtime: state + delivery, independent of the view
-    // ---------------------------------------------------------------------
+/**
+ * The window state machine.
+ *
+ * Delivery, the wait for an answer, annotations, settings, counters and the debug surface.
+ *
+ * Built into `client.js` by `scripts/build.mjs`; edit this file, not the bundle.
+ */
 
     /**
      * Build the window runtime.
@@ -4975,355 +5477,1235 @@ const h = React.createElement;
       }
     }
 
-    // ---------------------------------------------------------------------
-    // view
-    // ---------------------------------------------------------------------
+/**
+ * The Settings section's render tree.
+ *
+ * Counters, prompts, idle lines, switches and the appearance row.
+ *
+ * Built into `client.js` by `scripts/build.mjs`; edit this file, not the bundle.
+ */
 
     /**
-     * The conversation renders selection actions into this one surface, and the
-     * official 「引用文本」 action is its only occupant. While quick notes own
-     * the selection, that surface stays out of the way; turning the notes off
-     * drops the rule and hands the selection back.
+     * Build the plugin's settings section: edit, add, delete and reset the probe
+     * presets. This is the only place a preset is authored; the floating window
+     * is just a flat picker over the same list.
+     * @param runtime - the window runtime (same store the window reads).
+     * @returns the settings-slot component.
      */
-    const OFFICIAL_SELECTION_CSS = '[data-text-interaction-surface]{display:none!important}';
+    function makeSettingsView(runtime) {
+      const useSyncExternalStore =
+        React.useSyncExternalStore ??
+        function useSyncExternalStoreFallback(subscribe, getSnapshot) {
+          const [value, setValue] = React.useState(getSnapshot);
+          React.useEffect(() => {
+            setValue(getSnapshot());
+            return subscribe(() => setValue(getSnapshot()))
+          }, [subscribe, getSnapshot]);
+          return value
+        };
 
-    /** The hide rule, appended to the window stylesheet while quick notes are on. */
-    function viewCss(quick) {
-      return quick === true ? `${CSS}\n${OFFICIAL_SELECTION_CSS}` : CSS
+      /**
+       * One labelled checkbox row, shared by every boolean setting.
+       * Built eagerly (a plain element, not a component) so the settings tree
+       * stays directly inspectable by the checks.
+       */
+      function toggleRow(props) {
+        const { title, desc, checked, onChange } = props;
+        return h(
+          'label',
+          { className: 'dsh-nudge-toggle', title: desc, 'data-setting': props.key },
+          h('input', {
+            type: 'checkbox',
+            checked: checked === true,
+            onChange: (event) => onChange(event.target.checked),
+          }),
+          h(
+            'span',
+            { className: 'dsh-nudge-toggle-text' },
+            h('span', { className: 'dsh-nudge-toggle-title' }, title),
+            h('span', { className: 'dsh-nudge-toggle-desc' }, desc),
+          ),
+        )
+      }
+
+      /** A small 16px stroke icon, matching the window's own icons. */
+      function presetIcon(pathData) {
+        return h(
+          'svg',
+          {
+            width: 16,
+            height: 16,
+            viewBox: '0 0 16 16',
+            fill: 'none',
+            stroke: 'currentColor',
+            strokeWidth: 1.4,
+            strokeLinecap: 'round',
+            strokeLinejoin: 'round',
+            'aria-hidden': 'true',
+          },
+          h('path', { d: pathData }),
+        )
+      }
+
+      const PENCIL_PATH = 'M10.6 2.4l3 3-8.2 8.2-3.4.6.6-3.4 8-8.4z';
+      const CHEVRON_RIGHT = 'M6 4l4 4-4 4';
+      const CHEVRON_DOWN = 'M4 6.5l4 4 4-4';
+      const TRASH_PATH = 'M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.6 8h5.8l.6-8';
+
+      /** The preset being dragged, shared by the drag handlers of one list. */
+      let draggingId = null;
+      /** Index of the idle line being dragged, or null. */
+      let draggingTip = null;
+
+      /**
+       * One preset row: a summary line (name, expander, edit, delete, drag),
+       * an optional read-only body, and an editor that only writes on save.
+       */
+      function PresetRow(props) {
+        const { preset, t, onError, index, total } = props;
+        const snapshot = runtime.getSnapshot();
+        const open = snapshot.presetOpen.includes(preset.id);
+        const editing = snapshot.presetEditingId === preset.id;
+        const [label, setLabel] = React.useState(preset.label);
+        const [text, setText] = React.useState(preset.text);
+        React.useEffect(() => {
+          setLabel(preset.label);
+          setText(preset.text);
+        }, [preset.id, preset.label, preset.text]);
+
+        function save() {
+          const result = runtime.updatePreset(preset.id, { label, text });
+          onError(result.ok ? '' : result.error);
+        }
+
+        function cancel() {
+          setLabel(preset.label);
+          setText(preset.text);
+          runtime.cancelPresetEdit();
+          onError('');
+        }
+
+        const enabled = preset.enabled !== false;
+
+        /**
+         * Live reorder while the pointer travels: the dragged row trades slots
+         * with the row under the cursor as soon as the midpoint is crossed, so
+         * the list follows the pointer instead of waiting for the drop.
+         */
+        function dragOverRow(event) {
+          if (draggingId === null || draggingId === preset.id) return
+          if (event !== undefined && typeof event.preventDefault === 'function') event.preventDefault();
+          if (event?.dataTransfer) {
+            try {
+              event.dataTransfer.dropEffect = 'move';
+            } catch {
+              /* best effort */
+            }
+          }
+          const target = event?.currentTarget;
+          const rect = target && typeof target.getBoundingClientRect === 'function' ? target.getBoundingClientRect() : undefined;
+          if (rect === undefined) return
+          const after = Number(event.clientY) > rect.top + rect.height / 2;
+          const list = runtime.getSnapshot().presets;
+          const from = list.findIndex((item) => item.id === draggingId);
+          if (from < 0) return
+          const to = after ? (from < index ? index : index + 1) : from < index ? index - 1 : index;
+          if (to === from || to < 0 || to >= list.length) return
+          if (runtime.movePresetTo(draggingId, to)) onError('');
+        }
+
+        function dropOn(event) {
+          if (event !== undefined && typeof event.preventDefault === 'function') event.preventDefault();
+          draggingId = null;
+        }
+
+        function nudge(delta) {
+          if (runtime.movePresetTo(preset.id, index + delta)) onError('');
+        }
+
+        const summary = h(
+          'div',
+          {
+            className: 'dsh-nudge-preset-summary',
+            draggable: true,
+            onDragStart: (event) => {
+              draggingId = preset.id;
+              const row =
+                event?.currentTarget && typeof event.currentTarget.closest === 'function'
+                  ? event.currentTarget.closest('.dsh-nudge-preset-row')
+                  : null;
+              if (row) row.classList.add('dragging');
+              if (event?.dataTransfer) {
+                try {
+                  event.dataTransfer.effectAllowed = 'move';
+                  event.dataTransfer.setData('text/plain', preset.id);
+                } catch {
+                  /* best effort */
+                }
+              }
+            },
+            onDragEnd: (event) => {
+              draggingId = null;
+              const row =
+                event?.currentTarget && typeof event.currentTarget.closest === 'function'
+                  ? event.currentTarget.closest('.dsh-nudge-preset-row')
+                  : null;
+              if (row) row.classList.remove('dragging');
+            },
+          },
+          h(
+            'span',
+            {
+              className: 'dsh-nudge-preset-grip',
+              title: t('dragPreset'),
+              role: 'button',
+              tabIndex: 0,
+              'aria-label': t('dragPreset'),
+              onKeyDown: (event) => {
+                if (event.key === 'ArrowUp') nudge(-1);
+                if (event.key === 'ArrowDown') nudge(1);
+              },
+            },
+            '⠿',
+          ),
+          h(
+            'button',
+            {
+              type: 'button',
+              className: 'dsh-nudge-preset-toggle',
+              title: open ? t('collapsePreset') : t('expandPreset'),
+              'aria-label': open ? t('collapsePreset') : t('expandPreset'),
+              'aria-expanded': open ? 'true' : 'false',
+              onClick: () => runtime.togglePresetOpen(preset.id),
+            },
+            h('span', { className: 'dsh-nudge-preset-name' }, preset.label),
+            presetIcon(open ? CHEVRON_DOWN : CHEVRON_RIGHT),
+          ),
+          h(
+            'div',
+            { className: 'dsh-nudge-preset-tools' },
+            h(
+              'button',
+              {
+                type: 'button',
+                className: `dsh-nudge-preset-state${enabled ? ' on' : ''}`,
+                title: enabled ? t('presetEnabledHint') : t('presetDisabledHint'),
+                role: 'switch',
+                'aria-checked': enabled ? 'true' : 'false',
+                'aria-label': enabled ? t('presetEnabledHint') : t('presetDisabledHint'),
+                onClick: () => {
+                  runtime.togglePresetEnabled(preset.id);
+                  onError('');
+                },
+              },
+              enabled ? t('presetEnabled') : t('presetDisabled'),
+            ),
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'dsh-nudge-btn icon',
+                title: t('editPreset'),
+                'aria-label': t('editPreset'),
+                'aria-pressed': editing ? 'true' : 'false',
+                onClick: () => {
+                  if (editing) cancel();
+                  else {
+                    onError('');
+                    runtime.startPresetEdit(preset.id);
+                  }
+                },
+              },
+              presetIcon(PENCIL_PATH),
+            ),
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'dsh-nudge-btn icon danger',
+                title: t('deletePreset'),
+                'aria-label': t('deletePreset'),
+                onClick: () => {
+                  onError(runtime.removePreset(preset.id) ? '' : t('presetTextRequired'));
+                },
+              },
+              presetIcon(TRASH_PATH),
+            ),
+          ),
+        );
+
+        const body =
+          open && !editing
+            ? h('div', { className: 'dsh-nudge-preset-body' }, preset.text)
+            : null;
+
+        const editor = editing
+          ? h(
+              'div',
+              { className: 'dsh-nudge-preset-editor' },
+              h('input', {
+                type: 'text',
+                value: label,
+                placeholder: t('presetLabel'),
+                'aria-label': t('presetLabel'),
+                onChange: (event) => setLabel(event.target.value),
+                onKeyDown: (event) => {
+                  if (event.key === 'Enter') save();
+                  if (event.key === 'Escape') cancel();
+                },
+              }),
+              h('textarea', {
+                value: text,
+                placeholder: t('presetText'),
+                'aria-label': t('presetText'),
+                onChange: (event) => setText(event.target.value),
+                onKeyDown: (event) => {
+                  if (event.key === 'Enter' && event.shiftKey !== true) save();
+                  if (event.key === 'Escape') cancel();
+                },
+              }),
+              h(
+                'div',
+                { className: 'dsh-nudge-preset-actions' },
+                h(
+                  'button',
+                  { type: 'button', className: 'dsh-nudge-btn primary', onClick: save },
+                  t('savePreset'),
+                ),
+                h(
+                  'button',
+                  { type: 'button', className: 'dsh-nudge-btn', onClick: cancel },
+                  t('cancelPreset'),
+                ),
+              ),
+            )
+          : null;
+
+        return h(
+          'div',
+          {
+            className: `dsh-nudge-preset-row${editing ? ' editing' : ''}${enabled ? '' : ' disabled'}`,
+            'data-preset-id': preset.id,
+            'data-open': open ? 'true' : 'false',
+            onDragOver: dragOverRow,
+            onDragEnter: dragOverRow,
+            onDrop: dropOn,
+          },
+          summary,
+          body,
+          editor,
+        )
+      }
+
+      /**
+       * One idle line: the text as a row, an editor behind the pencil icon,
+       * and drag (or ↑ ↓ on the handle) for order. No body of its own.
+       */
+      function TipRow(props) {
+        const { value, t, onError, index } = props;
+        const snapshot = runtime.getSnapshot();
+        const editing = snapshot.tipEditingIndex === index;
+        const [line, setLine] = React.useState(value);
+        React.useEffect(() => {
+          setLine(value);
+        }, [value]);
+
+        function save() {
+          if (!runtime.updateTip(index, line)) {
+            setLine(value);
+            onError(t('tipTextRequired'));
+            return
+          }
+          onError('');
+        }
+
+        function cancel() {
+          setLine(value);
+          runtime.cancelTipEdit();
+          onError('');
+        }
+
+        function nudge(delta) {
+          if (runtime.moveTipTo(index, index + delta)) onError('');
+        }
+
+        function dropOn(event) {
+          if (event !== undefined && typeof event.preventDefault === 'function') event.preventDefault();
+          const from = draggingTip;
+          draggingTip = null;
+          if (from === null || from === index) return
+          if (runtime.moveTipTo(from, index)) onError('');
+        }
+
+        const summary = h(
+          'div',
+          {
+            className: 'dsh-nudge-preset-summary',
+            draggable: true,
+            onDragStart: () => {
+              draggingTip = index;
+            },
+            onDragEnd: () => {
+              draggingTip = null;
+            },
+            onDragOver: (event) => {
+              if (draggingTip === null) return
+              if (typeof event.preventDefault === 'function') event.preventDefault();
+            },
+            onDrop: dropOn,
+          },
+          h(
+            'span',
+            {
+              className: 'dsh-nudge-preset-grip',
+              title: t('dragPreset'),
+              role: 'button',
+              tabIndex: 0,
+              'aria-label': t('dragPreset'),
+              onKeyDown: (event) => {
+                if (event.key === 'ArrowUp') nudge(-1);
+                if (event.key === 'ArrowDown') nudge(1);
+              },
+            },
+            '⠿',
+          ),
+          h('span', { className: 'dsh-nudge-tip-name' }, value),
+          h(
+            'div',
+            { className: 'dsh-nudge-preset-tools' },
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'dsh-nudge-btn icon',
+                title: t('editTip'),
+                'aria-label': t('editTip'),
+                'aria-pressed': editing ? 'true' : 'false',
+                onClick: () => {
+                  if (editing) cancel();
+                  else {
+                    onError('');
+                    runtime.startTipEdit(index);
+                  }
+                },
+              },
+              presetIcon(PENCIL_PATH),
+            ),
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'dsh-nudge-btn icon danger',
+                title: t('deleteTip'),
+                'aria-label': t('deleteTip'),
+                onClick: () => {
+                  onError(runtime.removeTip(index) ? '' : t('tipLast'));
+                },
+              },
+              presetIcon(TRASH_PATH),
+            ),
+          ),
+        );
+
+        const editor = editing
+          ? h(
+              'div',
+              { className: 'dsh-nudge-preset-editor' },
+              h('input', {
+                type: 'text',
+                value: line,
+                placeholder: t('tipsPlaceholder'),
+                'aria-label': t('tipsPlaceholder'),
+                onChange: (event) => setLine(event.target.value),
+                onKeyDown: (event) => {
+                  if (event.key === 'Enter') save();
+                  if (event.key === 'Escape') cancel();
+                },
+              }),
+              h(
+                'div',
+                { className: 'dsh-nudge-preset-actions' },
+                h(
+                  'button',
+                  { type: 'button', className: 'dsh-nudge-btn primary', onClick: save },
+                  t('savePreset'),
+                ),
+                h(
+                  'button',
+                  { type: 'button', className: 'dsh-nudge-btn', onClick: cancel },
+                  t('cancelPreset'),
+                ),
+              ),
+            )
+          : null;
+
+        return h(
+          'div',
+          { className: 'dsh-nudge-preset-row dsh-nudge-tip-row', 'data-tip-index': index },
+          summary,
+          editor,
+        )
+      }
+
+      /** Fill `{n}` in a message template. */
+      function fill(template, count) {
+        return template.replace('{n}', String(count))
+      }
+
+      return function NudgeSettings() {
+        const state = useSyncExternalStore(runtime.subscribe, runtime.getSnapshot, runtime.getSnapshot);
+        const [error, setError] = React.useState('');
+        /** What the last paste into each list did, shown under that list's own box. */
+        const [presetNote, setPresetNote] = React.useState('');
+        const [tipNote, setTipNote] = React.useState('');
+        const [draftLabel, setDraftLabel] = React.useState('');
+        const [draftText, setDraftText] = React.useState('');
+        const [draftTip, setDraftTip] = React.useState('');
+        const [importOpen, setImportOpen] = React.useState(false);
+        const [draftImport, setDraftImport] = React.useState('');
+        const [copyNote, setCopyNote] = React.useState('');
+        const t = runtime.text;
+        const delivery = runtime.effectiveDelivery();
+      /**
+       * The settings dashboard: today's split, a 15-day trend and the prompts
+       * used in the same window. Pure over the counters, so it reads on its own.
+       */
+      function StatsBoard(props) {
+        const { t } = props;
+        const today = dayKey();
+        const statsDays = props.stats?.days ?? {};
+        /** The trend window, oldest first; the chart and Top 3 share it. */
+        const windowKeys = recentDayKeys(15);
+        const windowTotals = { send: 0, insert: 0, annotation: 0 };
+        for (const key of windowKeys) {
+          for (const field of STAT_FIELDS) windowTotals[field] += statsDays[key]?.[field] ?? 0;
+        }
+        const windowTotal = STAT_FIELDS.reduce((sum, field) => sum + windowTotals[field], 0);
+        const windowInputs = windowTotals.send + windowTotals.insert;
+        // Two series: everything typed into or sent to the composer is one
+        // prompt use; notes stay separate because they answer a different
+        // question ("how much did I annotate?").
+        const inputSeries = windowKeys.map((key) => (statsDays[key]?.send ?? 0) + (statsDays[key]?.insert ?? 0));
+        const noteSeries = windowKeys.map((key) => statsDays[key]?.annotation ?? 0);
+        // Today splits the same two ways as the chart: a quick input counts
+        // once whether it was sent or written, and notes stay their own number.
+        const todayInputs = inputSeries[windowKeys.length - 1] ?? 0;
+        const todayNotes = noteSeries[windowKeys.length - 1] ?? 0;
+        const hasActivity = inputSeries.some((value) => value > 0) || noteSeries.some((value) => value > 0);
+        /** Tallest value in either series; both lines share one scale. */
+        const peak = Math.max(1, ...inputSeries, ...noteSeries);
+
+        // Rank the prompts used in this same window. Counts live beside the
+        // daily totals, so deleted prompts simply fall out of the list.
+        const presetTotals = new Map();
+        for (const key of windowKeys) {
+          const presets = statsDays[key]?.presets;
+          if (presets === null || typeof presets !== 'object') continue
+          for (const [id, count] of Object.entries(presets)) {
+            presetTotals.set(id, (presetTotals.get(id) ?? 0) + count);
+          }
+        }
+        const topPresets = [...presetTotals.entries()]
+          .map(([id, total]) => ({ preset: props.presets.find((item) => item.id === id), total }))
+          .filter((item) => item.preset !== undefined)
+          .sort((a, b) => b.total - a.total || String(a.preset.id).localeCompare(String(b.preset.id)))
+          .slice(0, 3);
+        const topTotal = topPresets.reduce((sum, item) => sum + item.total, 0);
+
+        // Hand-rolled SVG: the plugin ships no chart dependency. The days are
+        // discrete, so the line runs straight between them and every day that
+        // actually carries a count gets a marker: no invented smooth curve, and
+        // the reader can still see where the data really is.
+        const CHART_W = 320;
+        const CHART_H = 168;
+        const CHART_PAD_X = 6;
+        const CHART_PAD_TOP = 12;
+        const CHART_PAD_BOTTOM = 8;
+        const round = (value) => Math.round(value * 10) / 10;
+        const baseline = CHART_H - CHART_PAD_BOTTOM;
+        const plotHeight = CHART_H - CHART_PAD_TOP - CHART_PAD_BOTTOM;
+        /** The scale tops out at the busiest day; the top padding is the headroom. */
+        const scaleMax = Math.max(1, peak);
+        const xAt = (index) =>
+          windowKeys.length <= 1
+            ? CHART_PAD_X
+            : CHART_PAD_X + (index * (CHART_W - CHART_PAD_X * 2)) / (windowKeys.length - 1);
+        const yAt = (value) => baseline - (Math.max(0, value) / scaleMax) * plotHeight;
+        /** Straight segments between days: the value between two days is unknown. */
+        function linePath(series) {
+          return series
+            .map((value, index) => `${index === 0 ? 'M' : 'L'} ${round(xAt(index))} ${round(yAt(value))}`)
+            .join(' ')
+        }
+        /** The same line closed down to the baseline, for the soft fill. */
+        function areaPath(series) {
+          const first = round(xAt(0));
+          const last = round(xAt(series.length - 1));
+          return `${linePath(series)} L ${last} ${baseline} L ${first} ${baseline} Z`
+        }
+        /** One marker per day that really carries a count. */
+        function pointsOf(series, className) {
+          return series.flatMap((value, index) =>
+            value <= 0
+              ? []
+              : [
+                  h('circle', {
+                    key: `point-${className}-${index}`,
+                    className: `dsh-nudge-chart-point ${className}`,
+                    cx: round(xAt(index)),
+                    cy: round(yAt(value)),
+                    r: className === 'input' ? '2.9' : '2.5',
+                  }),
+                ],
+          )
+        }
+        /** Gridlines at half and full height, so the scale is readable. */
+        const gridValues = [1, 0.5];
+        const inputLine = linePath(inputSeries);
+        const noteLine = linePath(noteSeries);
+        const inputArea = areaPath(inputSeries);
+        const noteArea = areaPath(noteSeries);
+        const todayIndex = windowKeys.length - 1;
+
+        // The dashboard leads the settings page: it answers "am I using this?"
+        // before the switches that change how it behaves.
+        // before the switches that change how it behaves.
+        return h(
+          'div',
+          { key: 'stats', className: 'dsh-nudge-stats-group' },
+          h(
+            'div',
+            { className: 'dsh-nudge-stats-head' },
+            h('span', { className: 'dsh-nudge-toggle-title' }, t('statsTitle')),
+          ),
+          h('span', { className: 'dsh-nudge-toggle-desc' }, t('statsHint')),
+          h(
+            'div',
+            { className: 'dsh-nudge-stats-board' },
+            h(
+              'div',
+              { className: 'dsh-nudge-stats-chart-pane' },
+              h(
+                'div',
+                { className: 'dsh-nudge-stats-trend-head' },
+                h('span', { className: 'dsh-nudge-chart-peak' }, fill(t('statsPeak'), peak)),
+                h('span', { className: 'dsh-nudge-stats-total' }, fill(t('statsTimes'), windowTotal)),
+              ),
+              h(
+                'div',
+                { className: 'dsh-nudge-chart-wrap' },
+                h(
+                  'svg',
+                  {
+                    className: 'dsh-nudge-chart-svg',
+                    viewBox: `0 0 ${CHART_W} ${CHART_H}`,
+                    preserveAspectRatio: 'none',
+                    'aria-hidden': 'true',
+                  },
+                  h(
+                    'defs',
+                    null,
+                    h(
+                      'linearGradient',
+                      { id: 'dsh-nudge-fill-input', x1: '0', y1: '0', x2: '0', y2: '1' },
+                      h('stop', { offset: '0%', stopColor: 'var(--dsw-static-deepseek-450,#5686fe)', stopOpacity: '0.14' }),
+                      h('stop', { offset: '100%', stopColor: 'var(--dsw-static-deepseek-450,#5686fe)', stopOpacity: '0' }),
+                    ),
+                    h(
+                      'linearGradient',
+                      { id: 'dsh-nudge-fill-note', x1: '0', y1: '0', x2: '0', y2: '1' },
+                      h('stop', { offset: '0%', stopColor: 'var(--dn-note)', stopOpacity: '0.10' }),
+                      h('stop', { offset: '100%', stopColor: 'var(--dn-note)', stopOpacity: '0' }),
+                    ),
+                  ),
+                  ...gridValues.map((fraction) =>
+                    h('line', {
+                      key: `grid-${fraction}`,
+                      className: 'dsh-nudge-chart-grid',
+                      x1: '0',
+                      y1: round(baseline - fraction * plotHeight),
+                      x2: CHART_W,
+                      y2: round(baseline - fraction * plotHeight),
+                      vectorEffect: 'non-scaling-stroke',
+                    }),
+                  ),
+                  h('line', {
+                    className: 'dsh-nudge-chart-axis-line',
+                    x1: '0',
+                    y1: baseline,
+                    x2: CHART_W,
+                    y2: baseline,
+                    vectorEffect: 'non-scaling-stroke',
+                  }),
+                  hasActivity
+                    ? h('path', {
+                        className: 'dsh-nudge-chart-area note',
+                        d: noteArea,
+                        fill: 'url(#dsh-nudge-fill-note)',
+                      })
+                    : null,
+                  hasActivity
+                    ? h('path', {
+                        className: 'dsh-nudge-chart-area input',
+                        d: inputArea,
+                        fill: 'url(#dsh-nudge-fill-input)',
+                      })
+                    : null,
+                  hasActivity
+                    ? h('path', {
+                        className: 'dsh-nudge-chart-line note',
+                        d: noteLine,
+                        fill: 'none',
+                        stroke: 'var(--dn-note)',
+                        strokeWidth: '1.6',
+                        strokeLinejoin: 'round',
+                        strokeLinecap: 'round',
+                        vectorEffect: 'non-scaling-stroke',
+                      })
+                    : null,
+                  hasActivity
+                    ? h('path', {
+                        className: 'dsh-nudge-chart-line input',
+                        d: inputLine,
+                        fill: 'none',
+                        stroke: 'var(--dsw-static-deepseek-450,#5686fe)',
+                        strokeWidth: '1.8',
+                        strokeLinejoin: 'round',
+                        strokeLinecap: 'round',
+                        vectorEffect: 'non-scaling-stroke',
+                      })
+                    : null,
+                  ...(hasActivity ? pointsOf(noteSeries, 'note') : []),
+                  ...(hasActivity ? pointsOf(inputSeries, 'input') : []),
+                ),
+                hasActivity
+                  ? null
+                  : h('div', { className: 'dsh-nudge-chart-empty' }, t('statsEmpty')),
+                h(
+                  'div',
+                  { className: 'dsh-nudge-chart-hits' },
+                  ...windowKeys.map((key, index) =>
+                    h(
+                      'div',
+                      { key, className: 'dsh-nudge-chart-hit' },
+                      h(
+                        'span',
+                        { className: 'dsh-nudge-chart-tip' },
+                        h(
+                          'span',
+                          { className: 'dsh-nudge-chart-tip-date' },
+                          key === today ? t('statsToday') : key.slice(5),
+                        ),
+                        h(
+                          'span',
+                          { className: 'dsh-nudge-chart-tip-values' },
+                          `${t('statsLegendInput')} ${inputSeries[index]} · ${t('statsAnnotation')} ${noteSeries[index]}`,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+              h(
+                'div',
+                { className: 'dsh-nudge-stats-axis' },
+                h('span', null, windowKeys[0].slice(5)),
+                h('span', null, windowKeys[7].slice(5)),
+                h('span', null, t('statsToday')),
+              ),
+              h(
+                'div',
+                { className: 'dsh-nudge-chart-legend' },
+                h(
+                  'span',
+                  { className: 'dsh-nudge-chart-legend-item' },
+                  h('i', { className: 'dsh-nudge-chart-dot input' }),
+                  t('statsLegendInput'),
+                ),
+                h(
+                  'span',
+                  { className: 'dsh-nudge-chart-legend-item' },
+                  h('i', { className: 'dsh-nudge-chart-dot note' }),
+                  t('statsAnnotation'),
+                ),
+              ),
+            ),
+            h(
+              'div',
+              { className: 'dsh-nudge-stats-side' },
+              h(
+                'div',
+                { className: 'dsh-nudge-stats-today' },
+                h(
+                  'div',
+                  { className: 'dsh-nudge-stats-today-head' },
+                  h('span', { className: 'dsh-nudge-stats-today-label' }, t('statsToday')),
+                  h('span', { className: 'dsh-nudge-stats-today-date' }, today.slice(5)),
+                ),
+                h(
+                  'div',
+                  { className: 'dsh-nudge-stats' },
+                  ...[
+                    { key: 'input', value: todayInputs, label: t('statsLegendInput') },
+                    { key: 'note', value: todayNotes, label: t('statsAnnotation') },
+                  ].map((item) =>
+                    h(
+                      'div',
+                      { key: item.key, className: 'dsh-nudge-stat' },
+                      h('span', { className: 'dsh-nudge-stat-value' }, String(item.value)),
+                      h('span', { className: 'dsh-nudge-stat-label' }, item.label),
+                    ),
+                  ),
+                ),
+              ),
+              h('div', { className: 'dsh-nudge-stats-side-head' }, h('span', null, t('statsTopTitle'))),
+              topPresets.length === 0
+                ? h(
+                    'div',
+                    { className: 'dsh-nudge-stats-side-empty' },
+                    windowInputs > 0 ? t('statsTopSince') : t('statsTopEmpty'),
+                  )
+                : h(
+                    'ol',
+                    { className: 'dsh-nudge-top-list' },
+                    ...topPresets.map((item, index) =>
+                      h(
+                        'li',
+                        { key: item.preset.id, className: 'dsh-nudge-top-item' },
+                        h('span', { className: 'dsh-nudge-top-rank' }, String(index + 1)),
+                        h('span', { className: 'dsh-nudge-top-label', title: item.preset.text }, item.preset.label),
+                        h('span', { className: 'dsh-nudge-top-count' }, fill(t('statsCountUnit'), item.total)),
+                      ),
+                    ),
+                  ),
+              topPresets.length > 0
+                ? h('div', { className: 'dsh-nudge-stats-share' }, fill(t('statsTopShare'), topTotal))
+                : null,
+            ),
+          ),
+        )
+      }
+
+
+        function add() {
+          const result = runtime.addPreset(draftLabel, draftText);
+          if (!result.ok) {
+            setError(result.error);
+            return
+          }
+          setDraftLabel('');
+          setDraftText('');
+          setError('');
+        }
+
+        /** Take one paste (or one typed block) and report what landed. */
+        function addTipLines(raw) {
+          const result = runtime.addTips(raw);
+          if (!result.ok) {
+            setError(result.error);
+            setTipNote('');
+            return false
+          }
+          const parts = [fill(t('tipsAdded'), result.added)];
+          if (result.skipped > 0) parts.push(fill(t('tipsSkipped'), result.skipped));
+          setError('');
+          setTipNote(parts.join('，'));
+          setDraftTip('');
+          return true
+        }
+
+        function addTipLine() {
+          addTipLines(draftTip);
+        }
+
+        /** Take one pasted block list and report what landed. */
+        function importLines(raw) {
+          const result = runtime.importPresets(raw);
+          if (!result.ok) {
+            setError(result.error);
+            setPresetNote('');
+            return false
+          }
+          const parts = [fill(t('importAdded'), result.added)];
+          if (result.skipped > 0) parts.push(fill(t('importSkipped'), result.skipped));
+          setError('');
+          setPresetNote(parts.join('，'));
+          setDraftImport('');
+          return true
+        }
+
+        /** Copy every configured prompt and report the outcome in place. */
+        function exportLines() {
+          Promise.resolve(runtime.exportPresets()).then((result) => {
+            if (result?.ok !== true) {
+              setError(result?.error ?? t('exportFailed'));
+              setCopyNote('');
+              return
+            }
+            setError('');
+            setCopyNote(fill(t('exportDone'), result.count));
+          });
+        }
+
+        /** A pasted list is split right away: no extra click needed. */
+        function onTipPaste(event) {
+          const text = event?.clipboardData?.getData?.('text');
+          if (typeof text !== 'string' || text.trim() === '') return
+          event.preventDefault?.();
+          addTipLines(text);
+        }
+
+        /**
+         * One settings block with the same heading rhythm as a floating-window
+         * module: accent bar, title, optional one-line description.
+         */
+        function settingsSection(key, title, desc, children, options) {
+          const collapsible = options?.collapsible === true;
+          const head = h(
+            collapsible ? 'summary' : 'div',
+            { className: 'dsh-nudge-settings-section-head' },
+            h('span', { className: 'dsh-nudge-settings-section-title' }, title),
+            options?.meta ? h('span', { className: 'dsh-nudge-settings-section-meta' }, options.meta) : null,
+          );
+          return h(
+            collapsible ? 'details' : 'section',
+            { key, className: `dsh-nudge-settings-section${collapsible ? ' collapsible' : ''}` },
+            head,
+            desc ? h('div', { className: 'dsh-nudge-settings-section-desc' }, desc) : null,
+            ...children,
+          )
+        }
+
+        /** A nested, closed-by-default editor (the long prompt list). */
+        function foldGroup(key, title, meta, children, hint) {
+          return h(
+            'details',
+            { key, className: 'dsh-nudge-settings-fold' },
+            h(
+              'summary',
+              {
+                className: 'dsh-nudge-settings-fold-head',
+                ...(typeof hint === 'string' && hint !== '' ? { title: hint } : null),
+              },
+              h('span', null, title),
+              meta ? h('span', { className: 'dsh-nudge-settings-fold-meta' }, meta) : null,
+            ),
+            ...children,
+          )
+        }
+
+        const statsSection = StatsBoard({ stats: state.stats, presets: state.presets, t });
+
+        return h(
+          'div',
+          { className: 'dsh-nudge-settings' },
+          h('style', { key: 'dsh-nudge-css' }, viewCss(state.quick)),
+          statsSection,
+          // The settings page follows the floating window: notes, quick input,
+          // then appearance (border and status line). Both long editors start
+          // folded so the switches stay in view.
+          settingsSection('annotations', t('annotationsTitle'), null, [
+            toggleRow({
+              key: 'quick',
+              title: t('quickTitle'),
+              desc: t('quickHint'),
+              checked: state.quick === true,
+              onChange: (value) => runtime.setQuick(value),
+            }),
+            toggleRow({
+              key: 'autopaste',
+              title: t('autoPasteTitle'),
+              desc: t('autoPasteDesc'),
+              checked: state.autoPaste === true,
+              onChange: (value) => runtime.setAutoPaste(value),
+            }),
+          ]),
+          settingsSection('quickinput', t('nudgeModule'), t('presetsHint'), [
+            foldGroup('presets', t('presetList'), t('presetCount').replace('{n}', String(state.presets.length)), [
+            // The list is a table of contents: names only, bodies on demand.
+            h(
+              'div',
+              { className: 'dsh-nudge-preset-toolbar' },
+              h('span', { className: 'dsh-nudge-preset-count' }, t('presetCount').replace('{n}', String(state.presets.length))),
+              h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'dsh-nudge-btn',
+                  disabled: state.presets.length === 0,
+                  onClick: () => runtime.setPresetsOpen(true),
+                },
+                t('expandAllPresets'),
+              ),
+              h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'dsh-nudge-btn',
+                  disabled: state.presetOpen.length === 0,
+                  onClick: () => runtime.setPresetsOpen(false),
+                },
+                t('collapseAllPresets'),
+              ),
+              h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'dsh-nudge-btn',
+                  'aria-expanded': importOpen ? 'true' : 'false',
+                  onClick: () => setImportOpen(importOpen !== true),
+                },
+                t('importPresets'),
+              ),
+              h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'dsh-nudge-btn',
+                  title: t('exportHint'),
+                  disabled: state.presets.length === 0,
+                  onClick: exportLines,
+                },
+                t('exportPresets'),
+              ),
+            ),
+            copyNote.length > 0
+              ? h('div', { key: 'preset-copy-note', className: 'dsh-nudge-settings-note' }, copyNote)
+              : null,
+            state.presets.length === 0
+              ? h('div', { className: 'dsh-nudge-preset-empty' }, t('presetsEmpty'))
+              : null,
+            ...state.presets.map((preset, index) =>
+              h(PresetRow, {
+                key: preset.id,
+                preset,
+                t,
+                onError: setError,
+                index,
+                total: state.presets.length,
+              }),
+            ),
+            h(
+              'div',
+              { className: 'dsh-nudge-preset-row dsh-nudge-preset-add' },
+              h(
+                'div',
+                { className: 'dsh-nudge-preset-line' },
+                h('input', {
+                  type: 'text',
+                  value: draftLabel,
+                  placeholder: t('presetLabel'),
+                  'aria-label': t('presetLabel'),
+                  onChange: (event) => setDraftLabel(event.target.value),
+                }),
+              ),
+              h('textarea', {
+                value: draftText,
+                placeholder: t('presetText'),
+                'aria-label': t('presetText'),
+                onChange: (event) => setDraftText(event.target.value),
+              }),
+              h(
+                'div',
+                { className: 'dsh-nudge-preset-actions' },
+                h('button', { type: 'button', className: 'dsh-nudge-btn primary', onClick: add }, t('addPreset')),
+              ),
+            ),
+            importOpen
+              ? h(
+                  'div',
+                  { className: 'dsh-nudge-preset-import' },
+                  h('div', { className: 'dsh-nudge-settings-hint' }, t('importHint')),
+                  h('textarea', {
+                    value: draftImport,
+                    placeholder: t('importPlaceholder'),
+                    'aria-label': t('importPresets'),
+                    onChange: (event) => setDraftImport(event.target.value),
+                  }),
+                  h(
+                    'div',
+                    { className: 'dsh-nudge-preset-actions' },
+                    h(
+                      'button',
+                      { type: 'button', className: 'dsh-nudge-btn primary', onClick: () => importLines(draftImport) },
+                      t('importSubmit'),
+                    ),
+                    h(
+                      'button',
+                      {
+                        type: 'button',
+                        className: 'dsh-nudge-btn',
+                        onClick: () => {
+                          setImportOpen(false);
+                          setDraftImport('');
+                          setPresetNote('');
+                          setError('');
+                        },
+                      },
+                      t('cancelPreset'),
+                    ),
+                  ),
+                )
+              : null,
+            // The import count belongs under the import box, not under the
+            // idle-line box further down the page.
+            presetNote.length > 0
+              ? h('div', { key: 'preset-import-note', className: 'dsh-nudge-settings-note' }, presetNote)
+              : null,
+            h(
+              'div',
+              { className: 'dsh-nudge-preset-actions' },
+              h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'dsh-nudge-btn',
+                  onClick: () => {
+                    runtime.resetPresets();
+                    setPresetNote('');
+                    setError('');
+                  },
+                },
+                t('resetPresets'),
+              ),
+            ),
+            ]),
+            h(
+              'div',
+              {
+                key: 'delivery',
+                className: 'dsh-nudge-settings-group dsh-nudge-settings-inline',
+                title: t('deliveryDesc'),
+              },
+              h('span', { className: 'dsh-nudge-toggle-title' }, t('deliveryTitle')),
+              h(
+                'div',
+                { className: 'dsh-nudge-presets', role: 'group', 'aria-label': t('deliveryTitle') },
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    className: `dsh-nudge-chip${delivery === 'steer' ? ' active' : ''}`,
+                    title: t('deliveryTipSteer'),
+                    'aria-pressed': delivery === 'steer' ? 'true' : 'false',
+                    onClick: () => runtime.setDelivery('steer'),
+                  },
+                  t('steer'),
+                ),
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    className: `dsh-nudge-chip${delivery === 'steer' ? '' : ' active'}`,
+                    title: t('deliveryTipQueue'),
+                    'aria-pressed': delivery === 'steer' ? 'false' : 'true',
+                    onClick: () => runtime.setDelivery('followup'),
+                  },
+                  t('queue'),
+                ),
+              ),
+            ),
+            toggleRow({
+              key: 'turbo',
+              title: t('turboTitle'),
+              desc: t('turboDesc'),
+              checked: state.turbo === true,
+              onChange: (value) => runtime.setTurbo(value),
+            }),
+          ]),
+          settingsSection('appearance', t('appearanceTitle'), null, [
+            h(
+              'div',
+              {
+                key: 'frame',
+                className: 'dsh-nudge-settings-group dsh-nudge-settings-inline',
+                title: t('frameDesc'),
+              },
+              h('span', { className: 'dsh-nudge-toggle-title' }, t('frameTitle')),
+              h(
+                'div',
+                { className: 'dsh-nudge-presets', role: 'group', 'aria-label': t('frameTitle') },
+                ...FRAME_CHOICES.map((width) =>
+                  h(
+                    'button',
+                    {
+                      key: `frame-${width}`,
+                      type: 'button',
+                      className: `dsh-nudge-chip${state.frame === width ? ' active' : ''}`,
+                      'aria-pressed': state.frame === width ? 'true' : 'false',
+                      onClick: () => runtime.setFrame(width),
+                    },
+                    t(frameLabelKey(width)),
+                  ),
+                ),
+              ),
+            ),
+            // The status row belongs to how the window looks, so it lives with
+            // the border. Its list is long: the editor starts folded.
+            foldGroup('tips', t('tipsTitle'), t('tipsCount').replace('{n}', String(state.tips.length)), [
+              // The paste box sits above the list: it is the way in, so it must
+              // not hide under a dozen existing lines.
+              h(
+                'div',
+                { key: 'tip-draft', className: 'dsh-nudge-tip-draft' },
+                h('textarea', {
+                  value: draftTip,
+                  placeholder: t('tipsPastePlaceholder'),
+                  'aria-label': t('tipsPastePlaceholder'),
+                  onChange: (event) => setDraftTip(event.target.value),
+                  onPaste: onTipPaste,
+                  onKeyDown: (event) => {
+                    if (event.key === 'Enter' && (event.ctrlKey === true || event.metaKey === true)) {
+                      addTipLine();
+                    }
+                  },
+                }),
+                h('button', { type: 'button', className: 'dsh-nudge-btn primary', onClick: addTipLine }, t('addTip')),
+              ),
+              tipNote.length > 0 ? h('div', { key: 'tips-note', className: 'dsh-nudge-settings-note' }, tipNote) : null,
+              // Keyed by the line (the list holds no duplicates), not by the slot:
+              // a row that moves keeps its own half-typed text instead of handing
+              // it to whichever line lands where it used to be.
+              ...state.tips.map((line, index) =>
+                h(TipRow, {
+                  key: `tip:${line}`,
+                  value: line,
+                  t,
+                  onError: setError,
+                  index,
+                }),
+              ),
+              h(
+                'div',
+                { key: 'tips-reset', className: 'dsh-nudge-preset-actions' },
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    className: 'dsh-nudge-btn',
+                    onClick: () => {
+                      runtime.resetTips();
+                      setError('');
+                      setTipNote('');
+                    },
+                  },
+                  t('resetTips'),
+                ),
+              ),
+            ], t('tipsHint')),
+          ]),
+          error.length > 0 ? h('div', { className: 'dsh-nudge-settings-error' }, error) : null,
+        )
+      }
     }
 
-    const CSS = `
-.dsh-nudge-card,.dsh-nudge-pill,.dsh-nudge-settings,.dsh-nudge-popup{--dn-accent:color-mix(in srgb,var(--dsw-static-deepseek-450,#5686fe) 78%,var(--dsw-alias-label-primary,#1a1a1a) 22%);--dn-accent-soft:color-mix(in srgb,var(--dsw-static-deepseek-450,#5686fe) 14%,transparent);--dn-accent-line:color-mix(in srgb,var(--dsw-static-deepseek-450,#5686fe) 38%,transparent);--dn-accent-edge:color-mix(in srgb,var(--dsw-static-deepseek-450,#5686fe) 62%,transparent);--dn-line:var(--dsw-alias-border-l1,rgba(127,127,127,.25));--dn-line-strong:color-mix(in srgb,var(--dsw-alias-label-primary,#1a1a1a) 28%,transparent);--dn-hover:color-mix(in srgb,var(--dsw-alias-label-primary,#1a1a1a) 6%,transparent);--dn-agree:#2e7d32;--dn-note:#8b5cf6;--dn-frame:1px}
-.dsh-nudge-card{position:fixed;z-index:${Z_INDEX};width:min(304px,calc(100vw - 24px));display:flex;flex-direction:column;border-radius:16px;border:var(--dn-frame) solid var(--dn-accent-edge);background:var(--dsw-alias-bg-layer-1,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);box-shadow:0 1px 2px rgba(15,23,42,.04),0 18px 44px -22px rgba(15,23,42,.3);font:13px/1.55 ui-sans-serif,system-ui,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;overflow:hidden;pointer-events:auto;animation:dsh-nudge-in .18s ease-out}
-@keyframes dsh-nudge-in{from{opacity:0;transform:translateY(-5px) scale(.985)}to{opacity:1;transform:none}}
-.dsh-nudge-title{display:flex;align-items:center;gap:8px;padding:12px 12px 10px 14px;cursor:grab;user-select:none;touch-action:none;border-bottom:1px solid var(--dn-line)}
-.dsh-nudge-title:active{cursor:grabbing}
-.dsh-nudge-name{font-size:12.5px;font-weight:600;letter-spacing:.2px;cursor:pointer;border-radius:5px;padding:2px 4px;margin:-2px -4px;transition:background .15s ease,color .15s ease}
-.dsh-nudge-name:hover{background:var(--dn-hover);color:var(--dsw-alias-label-primary,#1a1a1a)}
-.dsh-nudge-name:focus-visible{outline:2px solid var(--dn-accent-line);outline-offset:1px}
-.dsh-nudge-spacer{flex:1 1 auto}
-.dsh-nudge-mark{display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;width:16px;height:16px;color:var(--dsw-alias-state-idle-primary,#9a9aa4);transition:color .2s ease}
-.dsh-nudge-mark svg{display:block;overflow:visible}
-.dsh-nudge-mark .dsh-nudge-mark-tap{opacity:.55;transition:opacity .2s ease}
-.dsh-nudge-mark.waiting{color:var(--dsw-alias-state-warn-primary,#d99b1e)}
-.dsh-nudge-mark.waiting .dsh-nudge-mark-tap{opacity:1;transform-box:fill-box;transform-origin:center;animation:dsh-nudge-tap 2s ease-in-out infinite}
-.dsh-nudge-mark.done{color:var(--dsw-alias-state-success-primary,#2f9e63)}
-.dsh-nudge-mark.done .dsh-nudge-mark-tap{opacity:0}
-.dsh-nudge-mark.error{color:var(--dsw-alias-state-error-primary,#c8433c)}
-.dsh-nudge-mark.error .dsh-nudge-mark-tap{opacity:0}
-@keyframes dsh-nudge-tap{0%{opacity:.45;transform:scale(.94)}55%{opacity:.8;transform:scale(1)}100%{opacity:0;transform:scale(1)}}
-@keyframes dsh-nudge-pulse{0%,100%{opacity:1}50%{opacity:.35}}
-.dsh-nudge-icon{width:24px;height:24px;display:inline-flex;align-items:center;justify-content:center;padding:0;border:0;border-radius:8px;background:transparent;color:var(--dsw-alias-label-secondary,#5a5a66);cursor:pointer;transition:background .15s ease,color .15s ease}
-.dsh-nudge-icon:hover{background:var(--dn-hover);color:var(--dsw-alias-label-primary,#1a1a1a)}
-.dsh-nudge-icon:focus-visible{outline:2px solid var(--dn-accent-line);outline-offset:2px}
-.dsh-nudge-alert{margin:10px 14px 0;padding:8px 10px;border-radius:10px;font-size:12px;line-height:1.5;word-break:break-word}
-.dsh-nudge-alert.error{background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#c8433c) 10%,transparent);color:var(--dsw-alias-state-error-primary,#c8433c)}
-.dsh-nudge-alert.note{background:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#d99b1e) 12%,transparent);color:var(--dsw-alias-state-warn-primary,#a06a00)}
-.dsh-nudge-flash{margin:8px 14px 0;font-size:11.5px;line-height:1.4;min-height:16px;color:var(--dn-accent);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.dsh-nudge-flash.active{animation:dsh-nudge-flash-in .16s ease-out}
-@keyframes dsh-nudge-flash-in{from{opacity:0;transform:translateY(-2px)}to{opacity:1;transform:none}}
-.dsh-nudge-content{display:flex;flex-direction:column;gap:12px;padding:12px 14px 14px}
-.dsh-nudge-field{display:flex;flex-direction:column;gap:7px;min-width:0}
-.dsh-nudge-field-inline{flex-direction:row;align-items:center;gap:10px}
-.dsh-nudge-field-inline .dsh-nudge-field-label{flex:0 0 auto}
-.dsh-nudge-field-label{font-size:11px;font-weight:600;letter-spacing:.4px;color:var(--dsw-alias-label-secondary,#6a6a76)}
-.dsh-nudge-presets{display:flex;flex-wrap:wrap;gap:6px;position:relative}
-.dsh-nudge-presets-empty{font-size:12px;line-height:1.6;color:var(--dsw-alias-label-secondary,#8a8a8a)}
-.dsh-nudge-chip{height:28px;padding:0 12px;border-radius:999px;border:1px solid var(--dn-line);background:transparent;color:var(--dsw-alias-label-secondary,#5a5a66);font:inherit;font-size:12px;line-height:1;cursor:pointer;transition:background .15s ease,color .15s ease,border-color .15s ease;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.dsh-nudge-chip:hover{border-color:var(--dn-accent-line);color:var(--dsw-alias-label-primary,#1a1a1a);background:var(--dn-accent-soft)}
-.dsh-nudge-chip:focus-visible{outline:2px solid var(--dn-accent-line);outline-offset:2px}
-.dsh-nudge-chip.active{background:var(--dn-accent-soft);border-color:var(--dn-accent-line);color:var(--dn-accent);font-weight:600}
-.dsh-nudge-chip.dsh-nudge-chip-add{border-style:dashed;color:var(--dn-accent)}
-.dsh-nudge-chip.dsh-nudge-chip-edit{border-style:dashed;color:var(--dn-accent)}
-/* Edit mode: a chip is a handle and a target, so the pointer owns its motion
-   and text selection stays out of the way. */
-.dsh-nudge-presets.editing .dsh-nudge-chip{touch-action:none}
-.dsh-nudge-presets.editing .dsh-nudge-chip:not(.dsh-nudge-chip-edit):not(.dsh-nudge-chip-add){cursor:grab;user-select:none}
-.dsh-nudge-chip-grip{display:inline-block;margin-right:4px;font-size:10px;line-height:1;opacity:.6;pointer-events:none}
-/* The drop caret: where the dragged chip lands. It is the only thing that
-   moves while dragging — the row itself stays frozen. */
-.dsh-nudge-chip-caret{position:absolute;z-index:2;width:3px;border-radius:2px;background:var(--dn-accent);pointer-events:none;animation:dsh-nudge-caret-in .12s ease-out;transition:left .1s ease,top .1s ease,height .1s ease}
-@keyframes dsh-nudge-caret-in{from{opacity:0}to{opacity:1}}
-@media (prefers-reduced-motion:reduce){.dsh-nudge-chip-caret{animation:none;transition:none}}
-.dsh-nudge-chip.dsh-nudge-chip-drag{position:relative;z-index:1;will-change:transform}
-.dsh-nudge-chip.dsh-nudge-chip-drag.dragging{z-index:3;cursor:grabbing;border-color:var(--dn-accent-line);background:var(--dsw-alias-bg-layer-1,#fff);box-shadow:0 10px 22px -10px rgba(15,23,42,.55)}
-.dsh-nudge-chip.dsh-nudge-chip-drag.editing{border-color:var(--dn-accent-line);background:var(--dn-accent-soft);color:var(--dn-accent)}
-.dsh-nudge-quick-add{display:flex;flex-direction:column;gap:8px;padding:10px;border:1px solid var(--dn-accent-line);border-radius:12px;background:var(--dn-accent-soft)}
-.dsh-nudge-quick-add-field{display:flex;flex-direction:column;gap:4px}
-.dsh-nudge-quick-add input,.dsh-nudge-quick-add textarea{width:100%;box-sizing:border-box;border:1px solid var(--dn-line);border-radius:8px;background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);font:inherit;font-size:12px;padding:6px 9px;outline:none}
-.dsh-nudge-quick-add input{height:30px}
-.dsh-nudge-quick-add textarea{min-height:64px;max-height:132px;line-height:1.5;resize:none;overflow-y:auto}
-.dsh-nudge-quick-add input:focus,.dsh-nudge-quick-add textarea:focus{border-color:var(--dn-accent-line);box-shadow:0 0 0 3px var(--dn-accent-soft)}
-/* The in-window editor for one quick input: the add form's shape, its own
-   class so the add block keeps one meaning per selector. */
-.dsh-nudge-quick-edit{display:flex;flex-direction:column;gap:8px;padding:10px;border:1px solid var(--dn-accent-line);border-radius:12px;background:var(--dn-accent-soft)}
-.dsh-nudge-quick-edit input,.dsh-nudge-quick-edit textarea{width:100%;box-sizing:border-box;border:1px solid var(--dn-line);border-radius:8px;background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);font:inherit;font-size:12px;padding:6px 9px;outline:none}
-.dsh-nudge-quick-edit input{height:30px}
-.dsh-nudge-quick-edit textarea{min-height:64px;max-height:132px;line-height:1.5;resize:none;overflow-y:auto}
-.dsh-nudge-quick-edit input:focus,.dsh-nudge-quick-edit textarea:focus{border-color:var(--dn-accent-line);box-shadow:0 0 0 3px var(--dn-accent-soft)}
-.dsh-nudge-ask{height:38px;border:0;border-radius:11px;cursor:pointer;font:inherit;font-size:13px;font-weight:600;letter-spacing:.2px;color:var(--dsw-alias-label-primary-inverted,#fff);background:var(--dn-accent);box-shadow:0 8px 20px -10px color-mix(in srgb,var(--dsw-static-deepseek-450,#5686fe) 55%,transparent);transition:filter .15s ease,transform .1s ease,box-shadow .15s ease}
-.dsh-nudge-ask:hover{filter:brightness(1.05);box-shadow:0 10px 24px -10px color-mix(in srgb,var(--dsw-static-deepseek-450,#5686fe) 65%,transparent)}
-.dsh-nudge-ask:active{transform:translateY(1px)}
-.dsh-nudge-ask:disabled{opacity:.55;cursor:default;box-shadow:none;filter:none}
-.dsh-nudge-ask:focus-visible{outline:2px solid var(--dn-accent-line);outline-offset:2px}
-.dsh-nudge-annotation-quote{font-size:11.5px;line-height:1.5;color:var(--dsw-alias-label-secondary,#5a5a66);white-space:pre-wrap;word-break:break-word;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
-.dsh-nudge-annotation-hint{font-size:11px;line-height:1.5;color:var(--dsw-alias-label-secondary,#5a5a66)}
-.dsh-nudge-popup{position:fixed;z-index:${Z_INDEX + 1};box-sizing:border-box;width:280px;max-width:calc(100vw - 16px);display:flex;flex-direction:column;gap:8px;padding:10px;border-radius:12px;border:1px solid var(--dn-line);background:var(--dsw-alias-bg-layer-1,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);box-shadow:0 10px 30px rgba(0,0,0,.16),0 2px 8px rgba(0,0,0,.08);font:13px/1.45 ui-sans-serif,system-ui,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;pointer-events:auto;opacity:.72;transition:opacity .22s ease;animation:dsh-nudge-popup-in .12s cubic-bezier(.16,1,.3,1)}
-.dsh-nudge-popup:hover,.dsh-nudge-popup:focus-within{opacity:1}
-/* The end state stays open on purpose: the card takes the focus in the frame
-   it mounts, so :focus-within makes its resting opacity 1 — a fixed
-   to{opacity:.72} would snap to the real value on the last frame. scale is
-   its own property so it never overwrites the inline translateY that places
-   an upward-opening card. */
-@keyframes dsh-nudge-popup-in{from{opacity:0;scale:.97}}
-@media (prefers-reduced-motion:reduce){.dsh-nudge-popup{animation:none;transition:none}}
-.dsh-nudge-popup-close{position:absolute;top:6px;right:6px;width:22px;height:22px;padding:0;border:0;border-radius:6px;background:transparent;color:var(--dsw-alias-label-secondary,#5a5a66);font:inherit;font-size:16px;line-height:20px;cursor:pointer}
-.dsh-nudge-popup-close:hover{background:var(--dn-hover);color:var(--dsw-alias-label-primary,#1a1a1a)}
-.dsh-nudge-settings-panel{display:flex;flex-direction:column;gap:10px;padding:12px;flex:1 1 auto;min-height:0;max-height:min(520px,72vh);overflow:auto}
-.dsh-nudge-settings-head{display:flex;align-items:center;gap:8px}
-.dsh-nudge-settings-name{font:inherit;font-size:12px;font-weight:600;color:var(--dsw-alias-label-primary,#1a1a1a)}
-.dsh-nudge-popup-row{display:flex;align-items:center;gap:6px}
-.dsh-nudge-popup-row button{height:28px;padding:0 8px;border:1px solid var(--dn-line);border-radius:8px;background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);font:inherit;font-size:12px;line-height:1;white-space:nowrap;cursor:pointer;transition:background-color .12s ease,border-color .12s ease,transform .12s ease}
-.dsh-nudge-popup-row button:active{transform:scale(.97)}
-.dsh-nudge-popup-row button:focus-visible{outline:2px solid var(--dn-accent-line);outline-offset:2px}
-.dsh-nudge-popup-mic{display:inline-flex;align-items:center;gap:5px;height:26px;padding:0 9px;border:1px solid var(--dn-line);border-radius:999px;background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-secondary,#5a5a66);font:inherit;font-size:11px;line-height:1;cursor:pointer}
-.dsh-nudge-popup-mic-hint{font-size:11px;line-height:1.4;color:var(--dsw-alias-label-secondary,#5a5a66)}
-.dsh-nudge-popup-quick{display:inline-flex;align-items:center;justify-content:center;gap:5px;min-width:0;padding:0 6px}
-.dsh-nudge-popup-quick .emoji{font-size:15px;line-height:1}
-.dsh-nudge-popup-quick:hover{background:var(--dn-hover)}
-.dsh-nudge-popup-quick.agree{border-color:var(--dn-agree);background:var(--dn-agree);color:#fff;font-weight:600}
-.dsh-nudge-popup-quick.agree:hover{filter:brightness(.94)}
-.dsh-nudge-popup-row .dsh-nudge-popup-save{border-color:var(--dn-accent-line);background:var(--dn-accent-soft);color:var(--dn-accent);font-weight:600}
-.dsh-nudge-popup-row .dsh-nudge-popup-save:hover{background:color-mix(in srgb,var(--dn-accent) 20%,transparent)}
-.dsh-nudge-popup-row .dsh-nudge-popup-copy{color:var(--dn-accent)}
-.dsh-nudge-popup-copy[data-copied="true"]{border-color:var(--dn-accent-line);background:var(--dn-accent-soft)}
-.dsh-nudge-popup-hint{display:flex;justify-content:space-between;gap:8px;font-size:11px;line-height:1.5;color:var(--dsw-alias-label-secondary,#5a5a66)}
-.dsh-nudge-popup-hint kbd{font:inherit;padding:0 3px;border:1px solid var(--dn-line);border-radius:4px;background:color-mix(in srgb,var(--dsw-alias-label-primary,#1a1a1a) 4%,transparent)}
-/* The in-place note editor: the capture card's shape, hung off the passage.
-   It sits fully opaque because it holds a field the user types into, and its
-   field starts two lines tall so a stored note is readable at a glance. */
-.dsh-nudge-edit-popup{opacity:1}
-.dsh-nudge-edit-quote{max-height:34px;-webkit-line-clamp:2;min-height:0}
-.dsh-nudge-edit-popup .dsh-nudge-annotation-input{min-height:56px}
-.dsh-nudge-popup-row .dsh-nudge-edit-delete{margin-right:auto;border-color:transparent;background:transparent;color:var(--dsw-alias-state-error-primary,#c8433c)}
-.dsh-nudge-popup-row .dsh-nudge-edit-delete:hover{background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#c8433c) 10%,transparent)}
-.dsh-nudge-annotation-input{width:100%;box-sizing:border-box;min-height:34px;field-sizing:content;max-height:132px;resize:none;overflow-y:auto;border:1px solid var(--dn-line);border-radius:8px;background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);font:inherit;font-size:13px;line-height:20px;padding:7px 10px}
-.dsh-nudge-annotation-input:disabled{opacity:.6;cursor:not-allowed}
-.dsh-nudge-btn:disabled{opacity:.45;cursor:default}
-.dsh-nudge-annotation-input:focus{outline:none;border-color:var(--dn-accent-line);box-shadow:0 0 0 3px var(--dn-accent-soft)}
-.dsh-nudge-annotation-actions{display:flex;justify-content:flex-end;gap:8px}
-.dsh-nudge-annotations-count{min-width:16px;height:16px;padding:0 5px;border-radius:999px;background:var(--dn-accent-soft);color:var(--dn-accent);font-size:10px;line-height:16px;text-align:center}
-/* One fixed-height tray: rows scroll inside it, so adding a note never grows
-   the floating window. The guide line and the action row keep their own rows. */
-.dsh-nudge-annotation-tray{display:flex;flex-direction:column;gap:8px;height:216px}
-.dsh-nudge-annotation-list{flex:1 1 auto;min-height:0;display:flex;flex-direction:column;gap:6px;overflow-y:auto;scrollbar-gutter:stable}
-.dsh-nudge-annotation-empty{display:flex;align-items:center;justify-content:center;box-sizing:border-box;height:100%;padding:0 10px;border:1px dashed var(--dn-line);border-radius:12px;color:var(--dsw-alias-label-secondary,#8a8a8a);text-align:center}
-.dsh-nudge-annotation-guide{flex:0 0 auto;min-height:16px;max-height:33px;overflow:hidden}
-.dsh-nudge-annotation-item{display:flex;flex-direction:column;gap:3px;padding:7px 8px;border-radius:9px;background:color-mix(in srgb,var(--dsw-alias-label-primary,#1a1a1a) 5%,transparent)}
-.dsh-nudge-annotation-item-head{display:flex;align-items:flex-start;gap:6px}
-.dsh-nudge-annotation-item-head .dsh-nudge-annotation-quote{flex:1 1 auto;min-width:0;-webkit-line-clamp:2}
-.dsh-nudge-annotation-written{flex:0 0 auto;font-size:10px;line-height:1.6;padding:0 4px;border-radius:4px;color:color-mix(in srgb,var(--dn-accent) 70%,#fff);background:color-mix(in srgb,var(--dn-accent) 18%,transparent)}
-.dsh-nudge-annotation-note{font-size:12px;line-height:1.5;color:var(--dsw-alias-label-primary,#1a1a1a);white-space:pre-wrap;word-break:break-word;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
-.dsh-nudge-annotation-remove{flex:0 0 auto;width:20px;height:20px;padding:0;border:0;border-radius:6px;background:transparent;color:var(--dsw-alias-label-secondary,#5a5a66);font-size:14px;line-height:1;cursor:pointer}
-.dsh-nudge-annotation-remove:hover{background:var(--dn-hover);color:var(--dsw-alias-label-primary,#1a1a1a)}
-.dsh-nudge-annotation-open{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;gap:2px;padding:0;border:0;background:transparent;color:inherit;text-align:left;font:inherit;cursor:pointer}
-.dsh-nudge-annotation-open .dsh-nudge-annotation-quote{-webkit-line-clamp:1}
-.dsh-nudge-annotation-open .dsh-nudge-annotation-note{-webkit-line-clamp:1}
-.dsh-nudge-annotation-open:hover .dsh-nudge-annotation-quote{color:var(--dsw-alias-label-primary,#1a1a1a)}
-.dsh-nudge-module{display:flex;flex-direction:column;gap:8px}
-.dsh-nudge-module-head{display:flex;align-items:center;gap:7px;padding:1px 0 8px;border:0;border-bottom:1px solid var(--dn-line);background:transparent;color:var(--dsw-alias-label-primary,#1a1a1a);font:inherit;font-size:12.5px;font-weight:700;letter-spacing:.2px;text-align:left;user-select:none}
-.dsh-nudge-module-head::before{content:'';flex:0 0 auto;width:3px;height:13px;border-radius:2px;background:var(--dn-accent);margin-left:2px}
-.dsh-nudge-module-title{white-space:nowrap}
-.dsh-nudge-module-main{display:inline-flex;align-items:center;gap:6px;min-width:0;padding:2px 4px;margin-left:-4px;border:0;border-radius:6px;background:transparent;color:inherit;font:inherit;letter-spacing:inherit;cursor:pointer;transition:color .15s ease,background .15s ease}
-.dsh-nudge-module-main:hover{color:var(--dn-accent);background:var(--dn-hover)}
-.dsh-nudge-module-main:focus-visible{outline:2px solid var(--dn-accent-line);outline-offset:1px}
-.dsh-nudge-module-actions{display:inline-flex;align-items:center;gap:2px;flex:0 0 auto}
-.dsh-nudge-head-btn,.dsh-nudge-head-icon{display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;height:22px;padding:0 8px;border:0;border-radius:6px;background:transparent;color:var(--dsw-alias-label-secondary,#5a5a66);font:inherit;font-size:11.5px;font-weight:600;letter-spacing:0;line-height:1;white-space:nowrap;cursor:pointer;transition:background .15s ease,color .15s ease}
-.dsh-nudge-head-icon{width:22px;padding:0}
-.dsh-nudge-head-btn:hover,.dsh-nudge-head-icon:hover{background:var(--dn-hover);color:var(--dsw-alias-label-primary,#1a1a1a)}
-.dsh-nudge-head-btn:focus-visible,.dsh-nudge-head-icon:focus-visible{outline:2px solid var(--dn-accent-line);outline-offset:1px}
-.dsh-nudge-head-btn.active,.dsh-nudge-head-icon.active{background:var(--dn-accent-soft);color:var(--dn-accent)}
-.dsh-nudge-head-btn.inactive,.dsh-nudge-head-btn:disabled{opacity:.45;cursor:default;background:transparent;color:var(--dsw-alias-label-secondary,#5a5a66)}
-.dsh-nudge-module-body{display:flex;flex-direction:column;gap:10px;padding-top:2px}
-.dsh-nudge-icon.active{background:var(--dn-accent-soft);color:var(--dn-accent)}
-@keyframes dsh-nudge-attention{0%{box-shadow:inset 0 0 0 0 var(--dn-accent-line);opacity:0}20%{box-shadow:inset 0 0 0 3px var(--dn-accent-soft);opacity:1}100%{box-shadow:inset 0 0 0 0 transparent;opacity:0}}
-.dsh-nudge-attention-ring{position:absolute;inset:0;border-radius:inherit;pointer-events:none;animation:dsh-nudge-attention .9s ease-out}
-::highlight(dsh-nudge-notes){background:#fde68a;color:#1f2937}
-/* Same colours as the browser's own selection on Chromium/Windows, because
-   focusing the note field collapses the real selection before it can be kept.
-   --dsh-nudge-capture-bg / -fg stay overridable for other platforms/themes. */
-::highlight(dsh-nudge-capture){background:var(--dsh-nudge-capture-bg,#3367d1);color:var(--dsh-nudge-capture-fg,#fff)}
-.dsh-nudge-pill{position:fixed;z-index:${Z_INDEX};display:inline-flex;align-items:center;justify-content:center;width:36px;height:36px;padding:0;border-radius:50%;border:var(--dn-frame) solid var(--dn-accent-edge);background:var(--dsw-alias-bg-layer-1,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);box-shadow:0 1px 2px rgba(15,23,42,.04),0 10px 26px -14px rgba(15,23,42,.3);font:600 12px/1 ui-sans-serif,system-ui,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;cursor:grab;pointer-events:auto;touch-action:none;user-select:none;transition:transform .15s ease,box-shadow .15s ease;animation:dsh-nudge-in .18s ease-out}
-.dsh-nudge-pill:active{cursor:grabbing}
-.dsh-nudge-pill:hover{transform:translateY(-1px);box-shadow:0 1px 2px rgba(15,23,42,.04),0 14px 30px -14px rgba(15,23,42,.35)}
-.dsh-nudge-pill:focus-visible{outline:2px solid var(--dn-accent-line);outline-offset:2px}
-.dsh-nudge-unread{position:absolute;top:5px;right:5px;width:6px;height:6px;border-radius:50%;background:var(--dn-accent);box-shadow:0 0 0 3px var(--dn-accent-soft)}
-.dsh-nudge-settings{display:flex;flex-direction:column;gap:14px;font:inherit;color:var(--dsw-alias-label-primary,#1a1a1a)}
-/* The shell Settings panel caps the body at 800px and scrolls it. While this
-   section is mounted, let the panel grow with the section instead (never
-   smaller than the shell's own height, never taller than the viewport); the
-   shell's internal options area still scrolls once that cap is reached. The
-   :has() scope is what keeps the override from affecting other sections. */
-body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-height:min(800px,calc(100vh - 2 * max(24px,var(--dsh-frame-overlay-top,24px))));max-height:calc(100vh - 2 * max(24px,var(--dsh-frame-overlay-top,24px)))}
-.dsh-nudge-settings-hint{font-size:12px;line-height:1.6;color:var(--dsw-alias-label-secondary,#5a5a66)}
-.dsh-nudge-settings-section{display:flex;flex-direction:column;gap:8px}
-.dsh-nudge-settings-section-head{display:flex;align-items:center;gap:7px;padding:0 2px 7px;border-bottom:1px solid var(--dn-line)}
-.dsh-nudge-settings-section-head::before{content:'';flex:0 0 auto;width:3px;height:13px;border-radius:2px;background:var(--dn-accent);margin-left:2px}
-.dsh-nudge-settings-section-title{font-size:12.5px;font-weight:700;letter-spacing:.2px;color:var(--dsw-alias-label-primary,#1a1a1a)}
-.dsh-nudge-settings-section-desc{margin:-2px 2px 0;font-size:12px;line-height:1.5;color:var(--dsw-alias-label-secondary,#5a5a66)}
-.dsh-nudge-settings-section-meta{margin-left:auto;font-size:11px;line-height:1.4;color:var(--dsw-alias-label-secondary,#8a8a8a);font-variant-numeric:tabular-nums}
-.dsh-nudge-settings-section.collapsible .dsh-nudge-settings-section-head{cursor:pointer;user-select:none;list-style:none}
-.dsh-nudge-settings-section.collapsible .dsh-nudge-settings-section-head::-webkit-details-marker{display:none}
-.dsh-nudge-settings-section.collapsible .dsh-nudge-settings-section-head::after{content:'';flex:0 0 auto;width:6px;height:6px;margin-left:6px;border-right:1.5px solid var(--dsw-alias-label-secondary,#8a8a8a);border-bottom:1.5px solid var(--dsw-alias-label-secondary,#8a8a8a);opacity:.7;transform:rotate(45deg);transition:transform .15s ease}
-.dsh-nudge-settings-section.collapsible:not([open]) .dsh-nudge-settings-section-head::after{transform:rotate(-45deg)}
-.dsh-nudge-settings-section.collapsible .dsh-nudge-settings-section-head:hover,.dsh-nudge-settings-fold-head:hover{background:var(--dn-hover);border-radius:6px}
-.dsh-nudge-settings-section.collapsible .dsh-nudge-settings-section-head:focus-visible,.dsh-nudge-settings-fold-head:focus-visible{outline:2px solid var(--dn-accent-line);outline-offset:2px;border-radius:6px}
-.dsh-nudge-settings-section.collapsible[open] .dsh-nudge-settings-section-desc{margin-top:2px}
-.dsh-nudge-settings-fold{display:flex;flex-direction:column;gap:8px;padding-top:2px;border-top:1px solid var(--dn-line)}
-.dsh-nudge-settings-fold-head{display:flex;align-items:center;gap:8px;padding:5px 2px;cursor:pointer;list-style:none;font-size:11.5px;font-weight:600;letter-spacing:.2px;color:var(--dsw-alias-label-secondary,#6a6a76);user-select:none}
-.dsh-nudge-settings-fold-head::-webkit-details-marker{display:none}
-.dsh-nudge-settings-fold-head::after{content:'';flex:0 0 auto;width:6px;height:6px;margin-left:6px;border-right:1.5px solid var(--dsw-alias-label-secondary,#8a8a8a);border-bottom:1.5px solid var(--dsw-alias-label-secondary,#8a8a8a);opacity:.7;transform:rotate(45deg);transition:transform .15s ease}
-.dsh-nudge-settings-fold:not([open]) .dsh-nudge-settings-fold-head::after{transform:rotate(-45deg)}
-.dsh-nudge-settings-fold-meta{margin-left:auto;font-size:11px;font-weight:400;color:var(--dsw-alias-label-secondary,#8a8a8a);font-variant-numeric:tabular-nums}
-.dsh-nudge-settings-note{font-size:12px;line-height:1.6;color:var(--dn-accent-line,var(--dsw-alias-label-secondary,#5a5a66))}
-.dsh-nudge-toggle{display:flex;align-items:flex-start;gap:10px;padding:12px;border-radius:12px;border:1px solid var(--dn-line);background:color-mix(in srgb,var(--dsw-alias-label-primary,#1a1a1a) 3%,transparent);cursor:pointer}
-.dsh-nudge-toggle input{accent-color:var(--dn-accent);margin:2px 0 0;flex:0 0 auto;width:14px;height:14px}
-.dsh-nudge-toggle-text{display:flex;flex-direction:column;gap:3px;min-width:0}
-.dsh-nudge-toggle-title{font-size:12px;font-weight:600;line-height:1.4;color:var(--dsw-alias-label-primary,#1a1a1a)}
-.dsh-nudge-toggle-desc{font-size:12px;line-height:1.5;color:var(--dsw-alias-label-secondary,#5a5a66)}
-.dsh-nudge-preset-row{display:flex;flex-direction:column;gap:8px;padding:12px;border-radius:12px;border:1px solid var(--dn-line);background:color-mix(in srgb,var(--dsw-alias-label-primary,#1a1a1a) 3%,transparent)}
-.dsh-nudge-preset-line{display:flex;align-items:center;gap:8px}
-.dsh-nudge-preset-row input{flex:1 1 auto;min-width:0;height:32px;box-sizing:border-box;border:1px solid var(--dn-line);border-radius:9px;background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);font:inherit;font-size:12px;padding:0 10px;transition:border-color .15s ease,box-shadow .15s ease}
-.dsh-nudge-preset-row textarea{width:100%;box-sizing:border-box;min-height:56px;field-sizing:content;max-height:min(320px,40vh);overflow-y:auto;border:1px solid var(--dn-line);border-radius:9px;background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);font:inherit;font-size:12px;line-height:1.55;padding:8px 10px;transition:border-color .15s ease,box-shadow .15s ease}
-.dsh-nudge-preset-row input:focus,.dsh-nudge-preset-row textarea:focus{outline:none;border-color:var(--dn-accent-line);box-shadow:0 0 0 3px var(--dn-accent-soft)}
-.dsh-nudge-preset-actions{display:flex;flex-wrap:wrap;gap:8px}
-/* Preset rows are a table of contents: one name per line, bodies on demand. */
-.dsh-nudge-preset-row:has(> .dsh-nudge-preset-summary){gap:4px;padding:6px 8px}
-.dsh-nudge-preset-toolbar{display:flex;align-items:center;flex-wrap:wrap;gap:8px}
-.dsh-nudge-stats-head{display:flex;align-items:center;gap:8px}
-.dsh-nudge-stats-today{display:flex;flex-direction:column;gap:5px}
-.dsh-nudge-stats-today-head{display:flex;align-items:baseline;gap:6px;font-size:11px;line-height:1.4;color:var(--dsw-alias-label-secondary,#8a8a8a)}
-.dsh-nudge-stats-today-label{font-weight:600}
-.dsh-nudge-stats-today-date{font-variant-numeric:tabular-nums}
-.dsh-nudge-stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
-.dsh-nudge-stat{display:flex;flex-direction:column;gap:1px;min-width:0;padding-left:12px;border-left:1px solid var(--dn-line)}
-.dsh-nudge-stat:first-child{padding-left:0;border-left:0}
-.dsh-nudge-stat-value{font-size:22px;line-height:1.15;font-weight:600;font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-primary,#1a1a1a)}
-.dsh-nudge-stat-label{font-size:11px;line-height:1.4;color:var(--dsw-alias-label-secondary,#8a8a8a)}
-/* One board: trend on the left, prompt ranking on the right. Narrow panels
-   (the in-window fallback) stack the two instead of squeezing the chart. */
-.dsh-nudge-stats-board{display:grid;grid-template-columns:minmax(0,1fr);gap:14px;margin-top:2px;padding-top:12px;border-top:1px solid var(--dn-line)}
-.dsh-nudge-stats-chart-pane{display:flex;flex-direction:column;gap:6px;min-width:0}
-.dsh-nudge-stats-trend-head{display:flex;align-items:baseline;justify-content:space-between;gap:8px;font-size:11px;line-height:1.4;color:var(--dsw-alias-label-secondary,#8a8a8a)}
-.dsh-nudge-stats-total{font-variant-numeric:tabular-nums}
-.dsh-nudge-chart-peak{color:var(--dsw-alias-label-secondary,#9a9aa4)}
-.dsh-nudge-chart-wrap{position:relative;flex:0 0 auto;width:100%;aspect-ratio:320/168;min-height:150px;overflow:visible}
-.dsh-nudge-chart-svg{display:block;width:100%;height:100%;overflow:visible}
-.dsh-nudge-chart-grid{stroke:var(--dn-line);stroke-width:1;stroke-dasharray:2 4;opacity:.7}
-.dsh-nudge-chart-axis-line{stroke:var(--dn-line);stroke-width:1}
-.dsh-nudge-chart-point{stroke:var(--dsw-alias-bg-layer-1,#fff);stroke-width:1.2}
-.dsh-nudge-chart-point.input{fill:var(--dsw-static-deepseek-450,#5686fe)}
-.dsh-nudge-chart-point.note{fill:var(--dn-note)}
-.dsh-nudge-chart-empty{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;padding:0 12px;font-size:11px;line-height:1.5;color:var(--dsw-alias-label-secondary,#8a8a8a);text-align:center}
-.dsh-nudge-chart-hits{position:absolute;inset:0;display:flex}
-.dsh-nudge-chart-hit{flex:1 1 0;position:relative;min-width:0}
-.dsh-nudge-chart-tip{position:absolute;top:2px;left:50%;transform:translateX(-50%);z-index:2;display:flex;flex-direction:column;gap:1px;padding:5px 8px;border-radius:8px;border:1px solid var(--dn-line);background:var(--dsw-alias-bg-layer-1,#fff);box-shadow:0 8px 22px -12px rgba(15,23,42,.45);font-size:11px;line-height:1.4;white-space:nowrap;opacity:0;pointer-events:none;transition:opacity .12s ease}
-.dsh-nudge-chart-hit:hover .dsh-nudge-chart-tip{opacity:1}
-.dsh-nudge-chart-hit:nth-child(-n+3) .dsh-nudge-chart-tip{left:0;transform:none}
-.dsh-nudge-chart-hit:nth-last-child(-n+3) .dsh-nudge-chart-tip{left:auto;right:0;transform:none}
-.dsh-nudge-chart-tip-date{font-weight:600;color:var(--dsw-alias-label-primary,#1a1a1a);font-variant-numeric:tabular-nums}
-.dsh-nudge-chart-tip-values{color:var(--dsw-alias-label-secondary,#8a8a8a)}
-.dsh-nudge-stats-axis{display:flex;justify-content:space-between;gap:8px;font-size:10.5px;line-height:1.4;color:var(--dsw-alias-label-secondary,#8a8a8a);font-variant-numeric:tabular-nums}
-.dsh-nudge-chart-legend{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:11px;line-height:1.5;color:var(--dsw-alias-label-secondary,#8a8a8a)}
-.dsh-nudge-chart-legend-item{display:inline-flex;align-items:center;gap:5px;white-space:nowrap}
-.dsh-nudge-chart-dot{flex:0 0 auto;width:11px;height:3px;border-radius:2px}
-.dsh-nudge-chart-dot.input{background:var(--dsw-static-deepseek-450,#5686fe)}
-.dsh-nudge-chart-dot.note{background:var(--dn-note)}
-.dsh-nudge-stats-side{display:flex;flex-direction:column;gap:6px;min-width:0}
-/* Today sits above the ranking and stays compact: the board is a summary, not
-   a second settings page. */
-.dsh-nudge-stats-side .dsh-nudge-stats-today{gap:4px;padding-bottom:8px;border-bottom:1px solid var(--dn-line)}
-.dsh-nudge-stats-side .dsh-nudge-stats-today-head{justify-content:space-between}
-.dsh-nudge-stats-side .dsh-nudge-stats{gap:6px}
-.dsh-nudge-stats-side .dsh-nudge-stat{padding-left:7px}
-.dsh-nudge-stats-side .dsh-nudge-stat:first-child{padding-left:0}
-.dsh-nudge-stats-side .dsh-nudge-stat-value{font-size:18px;line-height:1.1}
-.dsh-nudge-stats-side .dsh-nudge-stat-label{font-size:10px;line-height:1.3}
-.dsh-nudge-stats-side-head{margin-top:1px}
-.dsh-nudge-stats-side-head{display:flex;align-items:baseline;justify-content:space-between;gap:8px;font-size:11px;line-height:1.4;font-weight:600;color:var(--dsw-alias-label-secondary,#8a8a8a)}
-.dsh-nudge-stats-side-empty{font-size:11px;line-height:1.6;color:var(--dsw-alias-label-secondary,#8a8a8a)}
-.dsh-nudge-top-list{display:flex;flex-direction:column;gap:2px;margin:0;padding:0;list-style:none}
-.dsh-nudge-top-item{display:flex;align-items:center;gap:8px;min-width:0;padding:3px 6px;border-radius:8px;transition:background .15s ease}
-.dsh-nudge-top-item:hover{background:var(--dn-hover)}
-.dsh-nudge-top-rank{flex:0 0 18px;height:18px;border-radius:6px;background:color-mix(in srgb,var(--dsw-alias-label-primary,#1a1a1a) 6%,transparent);color:var(--dsw-alias-label-secondary,#8a8a8a);font-size:10.5px;font-weight:600;line-height:18px;text-align:center;font-variant-numeric:tabular-nums}
-.dsh-nudge-top-item:first-child .dsh-nudge-top-rank{background:var(--dn-accent-soft);color:var(--dn-accent)}
-.dsh-nudge-top-label{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;line-height:1.5;color:var(--dsw-alias-label-primary,#1a1a1a)}
-.dsh-nudge-top-count{flex:0 0 auto;font-size:11px;line-height:1.4;color:var(--dsw-alias-label-secondary,#8a8a8a);font-variant-numeric:tabular-nums;white-space:nowrap}
-.dsh-nudge-stats-share{margin-top:auto;padding:4px 6px 0;font-size:10.5px;line-height:1.5;color:var(--dsw-alias-label-secondary,#8a8a8a)}
-@container dsh-nudge-stats (min-width: 430px){
-  .dsh-nudge-stats-board{grid-template-columns:minmax(0,1.55fr) minmax(150px,1fr);gap:18px}
-  .dsh-nudge-stats-side{padding-left:18px;border-left:1px solid var(--dn-line)}
-}
-.dsh-nudge-preset-count{margin-right:auto;font-size:11px;color:var(--dsw-alias-label-secondary,#8a8a8a);font-variant-numeric:tabular-nums}
-.dsh-nudge-preset-summary{display:flex;align-items:center;gap:6px;min-width:0}
-.dsh-nudge-preset-grip{cursor:grab;padding:2px;border-radius:6px;color:var(--dsw-alias-label-secondary,#8a8a8a);font-size:13px;line-height:1;user-select:none}
-.dsh-nudge-preset-grip:active{cursor:grabbing}
-.dsh-nudge-preset-grip:focus-visible{outline:2px solid var(--dn-accent-line);outline-offset:1px}
-.dsh-nudge-preset-toggle{flex:1 1 auto;min-width:0;display:flex;align-items:center;gap:6px;padding:4px 6px;border:0;border-radius:8px;background:transparent;color:inherit;font:inherit;font-size:12px;text-align:left;cursor:pointer}
-.dsh-nudge-preset-toggle:hover{background:var(--dn-hover)}
-.dsh-nudge-preset-toggle:focus-visible{outline:2px solid var(--dn-accent-line);outline-offset:1px}
-.dsh-nudge-preset-toggle svg{flex:0 0 auto;color:var(--dsw-alias-label-secondary,#8a8a8a)}
-.dsh-nudge-preset-name{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dsw-alias-label-primary,#1a1a1a);font-weight:600}
-.dsh-nudge-tip-name{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dsw-alias-label-primary,#1a1a1a);font-size:12px;line-height:1.6}
-.dsh-nudge-preset-tools{display:flex;align-items:center;gap:4px;flex:0 0 auto}
-/* Drag: the summary is the handle, and the row follows the pointer live. */
-.dsh-nudge-preset-summary{cursor:grab}
-.dsh-nudge-preset-summary:active{cursor:grabbing}
-.dsh-nudge-preset-row.dragging{opacity:.65;border-color:var(--dn-accent-line);box-shadow:0 6px 18px rgba(0,0,0,.08)}
-.dsh-nudge-preset-row.disabled{opacity:.72}
-.dsh-nudge-preset-row.disabled .dsh-nudge-preset-name{color:var(--dsw-alias-label-secondary,#8a8a8a);font-weight:500}
-.dsh-nudge-preset-state{flex:0 0 auto;height:22px;padding:0 8px;border-radius:999px;border:1px solid var(--dn-line);background:transparent;color:var(--dsw-alias-label-secondary,#8a8a8a);font:inherit;font-size:11px;line-height:1;cursor:pointer;white-space:nowrap;transition:background .15s ease,color .15s ease,border-color .15s ease}
-.dsh-nudge-preset-state:hover{background:var(--dn-hover)}
-.dsh-nudge-preset-state.on{background:var(--dn-accent-soft);border-color:var(--dn-accent-line);color:var(--dn-accent)}
-.dsh-nudge-preset-state:focus-visible{outline:2px solid var(--dn-accent-line);outline-offset:1px}
-.dsh-nudge-preset-body{margin:0 6px 2px 30px;padding:8px 10px;border-radius:9px;background:color-mix(in srgb,var(--dsw-alias-label-primary,#1a1a1a) 4%,transparent);color:var(--dsw-alias-label-secondary,#555);font-size:12px;line-height:1.6;white-space:pre-wrap;word-break:break-word;max-height:min(280px,36vh);overflow-y:auto}
-.dsh-nudge-preset-editor{display:flex;flex-direction:column;gap:8px;padding:2px 6px 2px 30px}
-.dsh-nudge-preset-editor input{flex:0 0 auto}
-.dsh-nudge-preset-empty{padding:14px;border:1px dashed var(--dn-line);border-radius:12px;color:var(--dsw-alias-label-secondary,#8a8a8a);font-size:12px;line-height:1.6;text-align:center}
-.dsh-nudge-preset-import{display:flex;flex-direction:column;gap:8px;padding:10px;border:1px dashed var(--dn-accent-line);border-radius:12px}
-.dsh-nudge-preset-import textarea{width:100%;box-sizing:border-box;min-height:96px;max-height:min(320px,40vh);overflow-y:auto;border:1px solid var(--dn-line);border-radius:9px;background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);font:inherit;font-size:12px;line-height:1.55;padding:8px 10px;transition:border-color .15s ease,box-shadow .15s ease}
-.dsh-nudge-preset-import textarea:focus{outline:none;border-color:var(--dn-accent-line);box-shadow:0 0 0 3px var(--dn-accent-soft)}
-.dsh-nudge-tip-draft{display:flex;flex-direction:column;gap:8px}
-.dsh-nudge-tip-draft textarea{width:100%;box-sizing:border-box;min-height:64px;max-height:min(240px,32vh);overflow-y:auto;border:1px solid var(--dn-line);border-radius:9px;background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);font:inherit;font-size:12px;line-height:1.55;padding:8px 10px;transition:border-color .15s ease,box-shadow .15s ease}
-.dsh-nudge-tip-draft textarea:focus{outline:none;border-color:var(--dn-accent-line);box-shadow:0 0 0 3px var(--dn-accent-soft)}
-.dsh-nudge-tip-draft .dsh-nudge-btn{align-self:flex-start}
-.dsh-nudge-btn{height:30px;padding:0 12px;border:1px solid var(--dn-line);border-radius:9px;background:transparent;color:var(--dsw-alias-label-primary,#1a1a1a);font:inherit;font-size:12px;cursor:pointer;transition:background .15s ease,border-color .15s ease,color .15s ease}
-.dsh-nudge-btn:hover{background:var(--dn-hover)}
-.dsh-nudge-btn.primary{background:var(--dn-accent);border-color:transparent;color:var(--dsw-alias-label-primary-inverted,#fff);font-weight:600}
-.dsh-nudge-btn.primary:hover{filter:brightness(1.05);background:var(--dn-accent)}
-.dsh-nudge-btn.danger{color:var(--dsw-alias-state-error-primary,#c8433c);border-color:color-mix(in srgb,var(--dsw-alias-state-error-primary,#c8433c) 28%,transparent)}
-.dsh-nudge-btn.danger:hover{background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#c8433c) 10%,transparent)}
-.dsh-nudge-btn.icon{width:30px;padding:0;font-size:13px;line-height:1}
-.dsh-nudge-btn:disabled{opacity:.4;cursor:default}
-.dsh-nudge-btn:disabled:hover{background:transparent}
-.dsh-nudge-settings-group,.dsh-nudge-stats-group{display:flex;flex-direction:column;gap:7px;padding:12px;border-radius:12px;border:1px solid var(--dn-line);background:color-mix(in srgb,var(--dsw-alias-label-primary,#1a1a1a) 3%,transparent)}
-/* A setting that is one control wide enough to sit on a single row: label on
-   the left, its choices on the right, no separate description line. */
-.dsh-nudge-settings-inline{flex-direction:row;align-items:center;justify-content:space-between;gap:10px;padding:8px 12px}
-.dsh-nudge-settings-inline .dsh-nudge-toggle-title{flex:0 0 auto}
-.dsh-nudge-settings-inline .dsh-nudge-presets{flex-wrap:nowrap}
-/* The stats board is the page's hero: slightly raised, and a container so the
-   chart/ranking split only kicks in when the panel is actually wide enough. */
-.dsh-nudge-stats-group{container-type:inline-size;container-name:dsh-nudge-stats;background:var(--dsw-alias-bg-layer-1,#fff);box-shadow:0 1px 2px rgba(15,23,42,.04)}
-.dsh-nudge-settings-error{color:var(--dsw-alias-state-error-primary,#c8433c);font-size:12px;line-height:1.5}
-.dsh-nudge-tip{position:fixed;z-index:${Z_INDEX + 2};box-sizing:border-box;padding:7px 10px;border-radius:9px;background:color-mix(in srgb,var(--dsw-alias-label-primary,#1a1a1a) 92%,#000);color:#fff;font:12px/1.45 ui-sans-serif,system-ui,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;box-shadow:0 10px 26px -8px rgba(15,23,42,.45);pointer-events:none;animation:dsh-nudge-tip-in .12s ease-out}
-@keyframes dsh-nudge-tip-in{from{opacity:0;transform:translateY(-2px)}to{opacity:1;transform:none}}
-.dsh-nudge-tip-head{display:flex;align-items:baseline;gap:6px;white-space:nowrap}
-.dsh-nudge-tip-title{font-weight:600}
-.dsh-nudge-tip-state{color:color-mix(in srgb,var(--dn-accent) 55%,#fff);font-weight:600}
-.dsh-nudge-tip-hint{margin-top:2px;font-size:11px;line-height:1.5;opacity:.78}
-@media (prefers-reduced-motion:reduce){.dsh-nudge-tip{animation:none}}
-`.trim();
+/**
+ * The floating window's render tree.
+ *
+ * The pill, the card, the modules and the overlays that hang off it.
+ *
+ * Built into `client.js` by `scripts/build.mjs`; edit this file, not the bundle.
+ */
 
     /**
      * Build the React view over one runtime.
@@ -7102,1293 +8484,26 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
       }
     }
 
-    // ---------------------------------------------------------------------
-    // settings view
-    // ---------------------------------------------------------------------
-
-    /**
-     * Build the plugin's settings section: edit, add, delete and reset the probe
-     * presets. This is the only place a preset is authored; the floating window
-     * is just a flat picker over the same list.
-     * @param runtime - the window runtime (same store the window reads).
-     * @returns the settings-slot component.
-     */
-    function makeSettingsView(runtime) {
-      const useSyncExternalStore =
-        React.useSyncExternalStore ??
-        function useSyncExternalStoreFallback(subscribe, getSnapshot) {
-          const [value, setValue] = React.useState(getSnapshot);
-          React.useEffect(() => {
-            setValue(getSnapshot());
-            return subscribe(() => setValue(getSnapshot()))
-          }, [subscribe, getSnapshot]);
-          return value
-        };
-
-      /**
-       * One labelled checkbox row, shared by every boolean setting.
-       * Built eagerly (a plain element, not a component) so the settings tree
-       * stays directly inspectable by the checks.
-       */
-      function toggleRow(props) {
-        const { title, desc, checked, onChange } = props;
-        return h(
-          'label',
-          { className: 'dsh-nudge-toggle', title: desc, 'data-setting': props.key },
-          h('input', {
-            type: 'checkbox',
-            checked: checked === true,
-            onChange: (event) => onChange(event.target.checked),
-          }),
-          h(
-            'span',
-            { className: 'dsh-nudge-toggle-text' },
-            h('span', { className: 'dsh-nudge-toggle-title' }, title),
-            h('span', { className: 'dsh-nudge-toggle-desc' }, desc),
-          ),
-        )
-      }
-
-      /** A small 16px stroke icon, matching the window's own icons. */
-      function presetIcon(pathData) {
-        return h(
-          'svg',
-          {
-            width: 16,
-            height: 16,
-            viewBox: '0 0 16 16',
-            fill: 'none',
-            stroke: 'currentColor',
-            strokeWidth: 1.4,
-            strokeLinecap: 'round',
-            strokeLinejoin: 'round',
-            'aria-hidden': 'true',
-          },
-          h('path', { d: pathData }),
-        )
-      }
-
-      const PENCIL_PATH = 'M10.6 2.4l3 3-8.2 8.2-3.4.6.6-3.4 8-8.4z';
-      const CHEVRON_RIGHT = 'M6 4l4 4-4 4';
-      const CHEVRON_DOWN = 'M4 6.5l4 4 4-4';
-      const TRASH_PATH = 'M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.6 8h5.8l.6-8';
-
-      /** The preset being dragged, shared by the drag handlers of one list. */
-      let draggingId = null;
-      /** Index of the idle line being dragged, or null. */
-      let draggingTip = null;
-
-      /**
-       * One preset row: a summary line (name, expander, edit, delete, drag),
-       * an optional read-only body, and an editor that only writes on save.
-       */
-      function PresetRow(props) {
-        const { preset, t, onError, index, total } = props;
-        const snapshot = runtime.getSnapshot();
-        const open = snapshot.presetOpen.includes(preset.id);
-        const editing = snapshot.presetEditingId === preset.id;
-        const [label, setLabel] = React.useState(preset.label);
-        const [text, setText] = React.useState(preset.text);
-        React.useEffect(() => {
-          setLabel(preset.label);
-          setText(preset.text);
-        }, [preset.id, preset.label, preset.text]);
-
-        function save() {
-          const result = runtime.updatePreset(preset.id, { label, text });
-          onError(result.ok ? '' : result.error);
-        }
-
-        function cancel() {
-          setLabel(preset.label);
-          setText(preset.text);
-          runtime.cancelPresetEdit();
-          onError('');
-        }
-
-        const enabled = preset.enabled !== false;
-
-        /**
-         * Live reorder while the pointer travels: the dragged row trades slots
-         * with the row under the cursor as soon as the midpoint is crossed, so
-         * the list follows the pointer instead of waiting for the drop.
-         */
-        function dragOverRow(event) {
-          if (draggingId === null || draggingId === preset.id) return
-          if (event !== undefined && typeof event.preventDefault === 'function') event.preventDefault();
-          if (event?.dataTransfer) {
-            try {
-              event.dataTransfer.dropEffect = 'move';
-            } catch {
-              /* best effort */
-            }
-          }
-          const target = event?.currentTarget;
-          const rect = target && typeof target.getBoundingClientRect === 'function' ? target.getBoundingClientRect() : undefined;
-          if (rect === undefined) return
-          const after = Number(event.clientY) > rect.top + rect.height / 2;
-          const list = runtime.getSnapshot().presets;
-          const from = list.findIndex((item) => item.id === draggingId);
-          if (from < 0) return
-          const to = after ? (from < index ? index : index + 1) : from < index ? index - 1 : index;
-          if (to === from || to < 0 || to >= list.length) return
-          if (runtime.movePresetTo(draggingId, to)) onError('');
-        }
-
-        function dropOn(event) {
-          if (event !== undefined && typeof event.preventDefault === 'function') event.preventDefault();
-          draggingId = null;
-        }
-
-        function nudge(delta) {
-          if (runtime.movePresetTo(preset.id, index + delta)) onError('');
-        }
-
-        const summary = h(
-          'div',
-          {
-            className: 'dsh-nudge-preset-summary',
-            draggable: true,
-            onDragStart: (event) => {
-              draggingId = preset.id;
-              const row =
-                event?.currentTarget && typeof event.currentTarget.closest === 'function'
-                  ? event.currentTarget.closest('.dsh-nudge-preset-row')
-                  : null;
-              if (row) row.classList.add('dragging');
-              if (event?.dataTransfer) {
-                try {
-                  event.dataTransfer.effectAllowed = 'move';
-                  event.dataTransfer.setData('text/plain', preset.id);
-                } catch {
-                  /* best effort */
-                }
-              }
-            },
-            onDragEnd: (event) => {
-              draggingId = null;
-              const row =
-                event?.currentTarget && typeof event.currentTarget.closest === 'function'
-                  ? event.currentTarget.closest('.dsh-nudge-preset-row')
-                  : null;
-              if (row) row.classList.remove('dragging');
-            },
-          },
-          h(
-            'span',
-            {
-              className: 'dsh-nudge-preset-grip',
-              title: t('dragPreset'),
-              role: 'button',
-              tabIndex: 0,
-              'aria-label': t('dragPreset'),
-              onKeyDown: (event) => {
-                if (event.key === 'ArrowUp') nudge(-1);
-                if (event.key === 'ArrowDown') nudge(1);
-              },
-            },
-            '⠿',
-          ),
-          h(
-            'button',
-            {
-              type: 'button',
-              className: 'dsh-nudge-preset-toggle',
-              title: open ? t('collapsePreset') : t('expandPreset'),
-              'aria-label': open ? t('collapsePreset') : t('expandPreset'),
-              'aria-expanded': open ? 'true' : 'false',
-              onClick: () => runtime.togglePresetOpen(preset.id),
-            },
-            h('span', { className: 'dsh-nudge-preset-name' }, preset.label),
-            presetIcon(open ? CHEVRON_DOWN : CHEVRON_RIGHT),
-          ),
-          h(
-            'div',
-            { className: 'dsh-nudge-preset-tools' },
-            h(
-              'button',
-              {
-                type: 'button',
-                className: `dsh-nudge-preset-state${enabled ? ' on' : ''}`,
-                title: enabled ? t('presetEnabledHint') : t('presetDisabledHint'),
-                role: 'switch',
-                'aria-checked': enabled ? 'true' : 'false',
-                'aria-label': enabled ? t('presetEnabledHint') : t('presetDisabledHint'),
-                onClick: () => {
-                  runtime.togglePresetEnabled(preset.id);
-                  onError('');
-                },
-              },
-              enabled ? t('presetEnabled') : t('presetDisabled'),
-            ),
-            h(
-              'button',
-              {
-                type: 'button',
-                className: 'dsh-nudge-btn icon',
-                title: t('editPreset'),
-                'aria-label': t('editPreset'),
-                'aria-pressed': editing ? 'true' : 'false',
-                onClick: () => {
-                  if (editing) cancel();
-                  else {
-                    onError('');
-                    runtime.startPresetEdit(preset.id);
-                  }
-                },
-              },
-              presetIcon(PENCIL_PATH),
-            ),
-            h(
-              'button',
-              {
-                type: 'button',
-                className: 'dsh-nudge-btn icon danger',
-                title: t('deletePreset'),
-                'aria-label': t('deletePreset'),
-                onClick: () => {
-                  onError(runtime.removePreset(preset.id) ? '' : t('presetTextRequired'));
-                },
-              },
-              presetIcon(TRASH_PATH),
-            ),
-          ),
-        );
-
-        const body =
-          open && !editing
-            ? h('div', { className: 'dsh-nudge-preset-body' }, preset.text)
-            : null;
-
-        const editor = editing
-          ? h(
-              'div',
-              { className: 'dsh-nudge-preset-editor' },
-              h('input', {
-                type: 'text',
-                value: label,
-                placeholder: t('presetLabel'),
-                'aria-label': t('presetLabel'),
-                onChange: (event) => setLabel(event.target.value),
-                onKeyDown: (event) => {
-                  if (event.key === 'Enter') save();
-                  if (event.key === 'Escape') cancel();
-                },
-              }),
-              h('textarea', {
-                value: text,
-                placeholder: t('presetText'),
-                'aria-label': t('presetText'),
-                onChange: (event) => setText(event.target.value),
-                onKeyDown: (event) => {
-                  if (event.key === 'Enter' && event.shiftKey !== true) save();
-                  if (event.key === 'Escape') cancel();
-                },
-              }),
-              h(
-                'div',
-                { className: 'dsh-nudge-preset-actions' },
-                h(
-                  'button',
-                  { type: 'button', className: 'dsh-nudge-btn primary', onClick: save },
-                  t('savePreset'),
-                ),
-                h(
-                  'button',
-                  { type: 'button', className: 'dsh-nudge-btn', onClick: cancel },
-                  t('cancelPreset'),
-                ),
-              ),
-            )
-          : null;
-
-        return h(
-          'div',
-          {
-            className: `dsh-nudge-preset-row${editing ? ' editing' : ''}${enabled ? '' : ' disabled'}`,
-            'data-preset-id': preset.id,
-            'data-open': open ? 'true' : 'false',
-            onDragOver: dragOverRow,
-            onDragEnter: dragOverRow,
-            onDrop: dropOn,
-          },
-          summary,
-          body,
-          editor,
-        )
-      }
-
-      /**
-       * One idle line: the text as a row, an editor behind the pencil icon,
-       * and drag (or ↑ ↓ on the handle) for order. No body of its own.
-       */
-      function TipRow(props) {
-        const { value, t, onError, index } = props;
-        const snapshot = runtime.getSnapshot();
-        const editing = snapshot.tipEditingIndex === index;
-        const [line, setLine] = React.useState(value);
-        React.useEffect(() => {
-          setLine(value);
-        }, [value]);
-
-        function save() {
-          if (!runtime.updateTip(index, line)) {
-            setLine(value);
-            onError(t('tipTextRequired'));
-            return
-          }
-          onError('');
-        }
-
-        function cancel() {
-          setLine(value);
-          runtime.cancelTipEdit();
-          onError('');
-        }
-
-        function nudge(delta) {
-          if (runtime.moveTipTo(index, index + delta)) onError('');
-        }
-
-        function dropOn(event) {
-          if (event !== undefined && typeof event.preventDefault === 'function') event.preventDefault();
-          const from = draggingTip;
-          draggingTip = null;
-          if (from === null || from === index) return
-          if (runtime.moveTipTo(from, index)) onError('');
-        }
-
-        const summary = h(
-          'div',
-          {
-            className: 'dsh-nudge-preset-summary',
-            draggable: true,
-            onDragStart: () => {
-              draggingTip = index;
-            },
-            onDragEnd: () => {
-              draggingTip = null;
-            },
-            onDragOver: (event) => {
-              if (draggingTip === null) return
-              if (typeof event.preventDefault === 'function') event.preventDefault();
-            },
-            onDrop: dropOn,
-          },
-          h(
-            'span',
-            {
-              className: 'dsh-nudge-preset-grip',
-              title: t('dragPreset'),
-              role: 'button',
-              tabIndex: 0,
-              'aria-label': t('dragPreset'),
-              onKeyDown: (event) => {
-                if (event.key === 'ArrowUp') nudge(-1);
-                if (event.key === 'ArrowDown') nudge(1);
-              },
-            },
-            '⠿',
-          ),
-          h('span', { className: 'dsh-nudge-tip-name' }, value),
-          h(
-            'div',
-            { className: 'dsh-nudge-preset-tools' },
-            h(
-              'button',
-              {
-                type: 'button',
-                className: 'dsh-nudge-btn icon',
-                title: t('editTip'),
-                'aria-label': t('editTip'),
-                'aria-pressed': editing ? 'true' : 'false',
-                onClick: () => {
-                  if (editing) cancel();
-                  else {
-                    onError('');
-                    runtime.startTipEdit(index);
-                  }
-                },
-              },
-              presetIcon(PENCIL_PATH),
-            ),
-            h(
-              'button',
-              {
-                type: 'button',
-                className: 'dsh-nudge-btn icon danger',
-                title: t('deleteTip'),
-                'aria-label': t('deleteTip'),
-                onClick: () => {
-                  onError(runtime.removeTip(index) ? '' : t('tipLast'));
-                },
-              },
-              presetIcon(TRASH_PATH),
-            ),
-          ),
-        );
-
-        const editor = editing
-          ? h(
-              'div',
-              { className: 'dsh-nudge-preset-editor' },
-              h('input', {
-                type: 'text',
-                value: line,
-                placeholder: t('tipsPlaceholder'),
-                'aria-label': t('tipsPlaceholder'),
-                onChange: (event) => setLine(event.target.value),
-                onKeyDown: (event) => {
-                  if (event.key === 'Enter') save();
-                  if (event.key === 'Escape') cancel();
-                },
-              }),
-              h(
-                'div',
-                { className: 'dsh-nudge-preset-actions' },
-                h(
-                  'button',
-                  { type: 'button', className: 'dsh-nudge-btn primary', onClick: save },
-                  t('savePreset'),
-                ),
-                h(
-                  'button',
-                  { type: 'button', className: 'dsh-nudge-btn', onClick: cancel },
-                  t('cancelPreset'),
-                ),
-              ),
-            )
-          : null;
-
-        return h(
-          'div',
-          { className: 'dsh-nudge-preset-row dsh-nudge-tip-row', 'data-tip-index': index },
-          summary,
-          editor,
-        )
-      }
-
-      /** Fill `{n}` in a message template. */
-      function fill(template, count) {
-        return template.replace('{n}', String(count))
-      }
-
-      return function NudgeSettings() {
-        const state = useSyncExternalStore(runtime.subscribe, runtime.getSnapshot, runtime.getSnapshot);
-        const [error, setError] = React.useState('');
-        /** What the last paste into each list did, shown under that list's own box. */
-        const [presetNote, setPresetNote] = React.useState('');
-        const [tipNote, setTipNote] = React.useState('');
-        const [draftLabel, setDraftLabel] = React.useState('');
-        const [draftText, setDraftText] = React.useState('');
-        const [draftTip, setDraftTip] = React.useState('');
-        const [importOpen, setImportOpen] = React.useState(false);
-        const [draftImport, setDraftImport] = React.useState('');
-        const [copyNote, setCopyNote] = React.useState('');
-        const t = runtime.text;
-        const delivery = runtime.effectiveDelivery();
-      /**
-       * The settings dashboard: today's split, a 15-day trend and the prompts
-       * used in the same window. Pure over the counters, so it reads on its own.
-       */
-      function StatsBoard(props) {
-        const { t } = props;
-        const today = dayKey();
-        const statsDays = props.stats?.days ?? {};
-        /** The trend window, oldest first; the chart and Top 3 share it. */
-        const windowKeys = recentDayKeys(15);
-        const windowTotals = { send: 0, insert: 0, annotation: 0 };
-        for (const key of windowKeys) {
-          for (const field of STAT_FIELDS) windowTotals[field] += statsDays[key]?.[field] ?? 0;
-        }
-        const windowTotal = STAT_FIELDS.reduce((sum, field) => sum + windowTotals[field], 0);
-        const windowInputs = windowTotals.send + windowTotals.insert;
-        // Two series: everything typed into or sent to the composer is one
-        // prompt use; notes stay separate because they answer a different
-        // question ("how much did I annotate?").
-        const inputSeries = windowKeys.map((key) => (statsDays[key]?.send ?? 0) + (statsDays[key]?.insert ?? 0));
-        const noteSeries = windowKeys.map((key) => statsDays[key]?.annotation ?? 0);
-        // Today splits the same two ways as the chart: a quick input counts
-        // once whether it was sent or written, and notes stay their own number.
-        const todayInputs = inputSeries[windowKeys.length - 1] ?? 0;
-        const todayNotes = noteSeries[windowKeys.length - 1] ?? 0;
-        const hasActivity = inputSeries.some((value) => value > 0) || noteSeries.some((value) => value > 0);
-        /** Tallest value in either series; both lines share one scale. */
-        const peak = Math.max(1, ...inputSeries, ...noteSeries);
-
-        // Rank the prompts used in this same window. Counts live beside the
-        // daily totals, so deleted prompts simply fall out of the list.
-        const presetTotals = new Map();
-        for (const key of windowKeys) {
-          const presets = statsDays[key]?.presets;
-          if (presets === null || typeof presets !== 'object') continue
-          for (const [id, count] of Object.entries(presets)) {
-            presetTotals.set(id, (presetTotals.get(id) ?? 0) + count);
-          }
-        }
-        const topPresets = [...presetTotals.entries()]
-          .map(([id, total]) => ({ preset: props.presets.find((item) => item.id === id), total }))
-          .filter((item) => item.preset !== undefined)
-          .sort((a, b) => b.total - a.total || String(a.preset.id).localeCompare(String(b.preset.id)))
-          .slice(0, 3);
-        const topTotal = topPresets.reduce((sum, item) => sum + item.total, 0);
-
-        // Hand-rolled SVG: the plugin ships no chart dependency. The days are
-        // discrete, so the line runs straight between them and every day that
-        // actually carries a count gets a marker: no invented smooth curve, and
-        // the reader can still see where the data really is.
-        const CHART_W = 320;
-        const CHART_H = 168;
-        const CHART_PAD_X = 6;
-        const CHART_PAD_TOP = 12;
-        const CHART_PAD_BOTTOM = 8;
-        const round = (value) => Math.round(value * 10) / 10;
-        const baseline = CHART_H - CHART_PAD_BOTTOM;
-        const plotHeight = CHART_H - CHART_PAD_TOP - CHART_PAD_BOTTOM;
-        /** The scale tops out at the busiest day; the top padding is the headroom. */
-        const scaleMax = Math.max(1, peak);
-        const xAt = (index) =>
-          windowKeys.length <= 1
-            ? CHART_PAD_X
-            : CHART_PAD_X + (index * (CHART_W - CHART_PAD_X * 2)) / (windowKeys.length - 1);
-        const yAt = (value) => baseline - (Math.max(0, value) / scaleMax) * plotHeight;
-        /** Straight segments between days: the value between two days is unknown. */
-        function linePath(series) {
-          return series
-            .map((value, index) => `${index === 0 ? 'M' : 'L'} ${round(xAt(index))} ${round(yAt(value))}`)
-            .join(' ')
-        }
-        /** The same line closed down to the baseline, for the soft fill. */
-        function areaPath(series) {
-          const first = round(xAt(0));
-          const last = round(xAt(series.length - 1));
-          return `${linePath(series)} L ${last} ${baseline} L ${first} ${baseline} Z`
-        }
-        /** One marker per day that really carries a count. */
-        function pointsOf(series, className) {
-          return series.flatMap((value, index) =>
-            value <= 0
-              ? []
-              : [
-                  h('circle', {
-                    key: `point-${className}-${index}`,
-                    className: `dsh-nudge-chart-point ${className}`,
-                    cx: round(xAt(index)),
-                    cy: round(yAt(value)),
-                    r: className === 'input' ? '2.9' : '2.5',
-                  }),
-                ],
-          )
-        }
-        /** Gridlines at half and full height, so the scale is readable. */
-        const gridValues = [1, 0.5];
-        const inputLine = linePath(inputSeries);
-        const noteLine = linePath(noteSeries);
-        const inputArea = areaPath(inputSeries);
-        const noteArea = areaPath(noteSeries);
-        const todayIndex = windowKeys.length - 1;
-
-        // The dashboard leads the settings page: it answers "am I using this?"
-        // before the switches that change how it behaves.
-        // before the switches that change how it behaves.
-        return h(
-          'div',
-          { key: 'stats', className: 'dsh-nudge-stats-group' },
-          h(
-            'div',
-            { className: 'dsh-nudge-stats-head' },
-            h('span', { className: 'dsh-nudge-toggle-title' }, t('statsTitle')),
-          ),
-          h('span', { className: 'dsh-nudge-toggle-desc' }, t('statsHint')),
-          h(
-            'div',
-            { className: 'dsh-nudge-stats-board' },
-            h(
-              'div',
-              { className: 'dsh-nudge-stats-chart-pane' },
-              h(
-                'div',
-                { className: 'dsh-nudge-stats-trend-head' },
-                h('span', { className: 'dsh-nudge-chart-peak' }, fill(t('statsPeak'), peak)),
-                h('span', { className: 'dsh-nudge-stats-total' }, fill(t('statsTimes'), windowTotal)),
-              ),
-              h(
-                'div',
-                { className: 'dsh-nudge-chart-wrap' },
-                h(
-                  'svg',
-                  {
-                    className: 'dsh-nudge-chart-svg',
-                    viewBox: `0 0 ${CHART_W} ${CHART_H}`,
-                    preserveAspectRatio: 'none',
-                    'aria-hidden': 'true',
-                  },
-                  h(
-                    'defs',
-                    null,
-                    h(
-                      'linearGradient',
-                      { id: 'dsh-nudge-fill-input', x1: '0', y1: '0', x2: '0', y2: '1' },
-                      h('stop', { offset: '0%', stopColor: 'var(--dsw-static-deepseek-450,#5686fe)', stopOpacity: '0.14' }),
-                      h('stop', { offset: '100%', stopColor: 'var(--dsw-static-deepseek-450,#5686fe)', stopOpacity: '0' }),
-                    ),
-                    h(
-                      'linearGradient',
-                      { id: 'dsh-nudge-fill-note', x1: '0', y1: '0', x2: '0', y2: '1' },
-                      h('stop', { offset: '0%', stopColor: 'var(--dn-note)', stopOpacity: '0.10' }),
-                      h('stop', { offset: '100%', stopColor: 'var(--dn-note)', stopOpacity: '0' }),
-                    ),
-                  ),
-                  ...gridValues.map((fraction) =>
-                    h('line', {
-                      key: `grid-${fraction}`,
-                      className: 'dsh-nudge-chart-grid',
-                      x1: '0',
-                      y1: round(baseline - fraction * plotHeight),
-                      x2: CHART_W,
-                      y2: round(baseline - fraction * plotHeight),
-                      vectorEffect: 'non-scaling-stroke',
-                    }),
-                  ),
-                  h('line', {
-                    className: 'dsh-nudge-chart-axis-line',
-                    x1: '0',
-                    y1: baseline,
-                    x2: CHART_W,
-                    y2: baseline,
-                    vectorEffect: 'non-scaling-stroke',
-                  }),
-                  hasActivity
-                    ? h('path', {
-                        className: 'dsh-nudge-chart-area note',
-                        d: noteArea,
-                        fill: 'url(#dsh-nudge-fill-note)',
-                      })
-                    : null,
-                  hasActivity
-                    ? h('path', {
-                        className: 'dsh-nudge-chart-area input',
-                        d: inputArea,
-                        fill: 'url(#dsh-nudge-fill-input)',
-                      })
-                    : null,
-                  hasActivity
-                    ? h('path', {
-                        className: 'dsh-nudge-chart-line note',
-                        d: noteLine,
-                        fill: 'none',
-                        stroke: 'var(--dn-note)',
-                        strokeWidth: '1.6',
-                        strokeLinejoin: 'round',
-                        strokeLinecap: 'round',
-                        vectorEffect: 'non-scaling-stroke',
-                      })
-                    : null,
-                  hasActivity
-                    ? h('path', {
-                        className: 'dsh-nudge-chart-line input',
-                        d: inputLine,
-                        fill: 'none',
-                        stroke: 'var(--dsw-static-deepseek-450,#5686fe)',
-                        strokeWidth: '1.8',
-                        strokeLinejoin: 'round',
-                        strokeLinecap: 'round',
-                        vectorEffect: 'non-scaling-stroke',
-                      })
-                    : null,
-                  ...(hasActivity ? pointsOf(noteSeries, 'note') : []),
-                  ...(hasActivity ? pointsOf(inputSeries, 'input') : []),
-                ),
-                hasActivity
-                  ? null
-                  : h('div', { className: 'dsh-nudge-chart-empty' }, t('statsEmpty')),
-                h(
-                  'div',
-                  { className: 'dsh-nudge-chart-hits' },
-                  ...windowKeys.map((key, index) =>
-                    h(
-                      'div',
-                      { key, className: 'dsh-nudge-chart-hit' },
-                      h(
-                        'span',
-                        { className: 'dsh-nudge-chart-tip' },
-                        h(
-                          'span',
-                          { className: 'dsh-nudge-chart-tip-date' },
-                          key === today ? t('statsToday') : key.slice(5),
-                        ),
-                        h(
-                          'span',
-                          { className: 'dsh-nudge-chart-tip-values' },
-                          `${t('statsLegendInput')} ${inputSeries[index]} · ${t('statsAnnotation')} ${noteSeries[index]}`,
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-              h(
-                'div',
-                { className: 'dsh-nudge-stats-axis' },
-                h('span', null, windowKeys[0].slice(5)),
-                h('span', null, windowKeys[7].slice(5)),
-                h('span', null, t('statsToday')),
-              ),
-              h(
-                'div',
-                { className: 'dsh-nudge-chart-legend' },
-                h(
-                  'span',
-                  { className: 'dsh-nudge-chart-legend-item' },
-                  h('i', { className: 'dsh-nudge-chart-dot input' }),
-                  t('statsLegendInput'),
-                ),
-                h(
-                  'span',
-                  { className: 'dsh-nudge-chart-legend-item' },
-                  h('i', { className: 'dsh-nudge-chart-dot note' }),
-                  t('statsAnnotation'),
-                ),
-              ),
-            ),
-            h(
-              'div',
-              { className: 'dsh-nudge-stats-side' },
-              h(
-                'div',
-                { className: 'dsh-nudge-stats-today' },
-                h(
-                  'div',
-                  { className: 'dsh-nudge-stats-today-head' },
-                  h('span', { className: 'dsh-nudge-stats-today-label' }, t('statsToday')),
-                  h('span', { className: 'dsh-nudge-stats-today-date' }, today.slice(5)),
-                ),
-                h(
-                  'div',
-                  { className: 'dsh-nudge-stats' },
-                  ...[
-                    { key: 'input', value: todayInputs, label: t('statsLegendInput') },
-                    { key: 'note', value: todayNotes, label: t('statsAnnotation') },
-                  ].map((item) =>
-                    h(
-                      'div',
-                      { key: item.key, className: 'dsh-nudge-stat' },
-                      h('span', { className: 'dsh-nudge-stat-value' }, String(item.value)),
-                      h('span', { className: 'dsh-nudge-stat-label' }, item.label),
-                    ),
-                  ),
-                ),
-              ),
-              h('div', { className: 'dsh-nudge-stats-side-head' }, h('span', null, t('statsTopTitle'))),
-              topPresets.length === 0
-                ? h(
-                    'div',
-                    { className: 'dsh-nudge-stats-side-empty' },
-                    windowInputs > 0 ? t('statsTopSince') : t('statsTopEmpty'),
-                  )
-                : h(
-                    'ol',
-                    { className: 'dsh-nudge-top-list' },
-                    ...topPresets.map((item, index) =>
-                      h(
-                        'li',
-                        { key: item.preset.id, className: 'dsh-nudge-top-item' },
-                        h('span', { className: 'dsh-nudge-top-rank' }, String(index + 1)),
-                        h('span', { className: 'dsh-nudge-top-label', title: item.preset.text }, item.preset.label),
-                        h('span', { className: 'dsh-nudge-top-count' }, fill(t('statsCountUnit'), item.total)),
-                      ),
-                    ),
-                  ),
-              topPresets.length > 0
-                ? h('div', { className: 'dsh-nudge-stats-share' }, fill(t('statsTopShare'), topTotal))
-                : null,
-            ),
-          ),
-        )
-      }
-
-
-        function add() {
-          const result = runtime.addPreset(draftLabel, draftText);
-          if (!result.ok) {
-            setError(result.error);
-            return
-          }
-          setDraftLabel('');
-          setDraftText('');
-          setError('');
-        }
-
-        /** Take one paste (or one typed block) and report what landed. */
-        function addTipLines(raw) {
-          const result = runtime.addTips(raw);
-          if (!result.ok) {
-            setError(result.error);
-            setTipNote('');
-            return false
-          }
-          const parts = [fill(t('tipsAdded'), result.added)];
-          if (result.skipped > 0) parts.push(fill(t('tipsSkipped'), result.skipped));
-          setError('');
-          setTipNote(parts.join('，'));
-          setDraftTip('');
-          return true
-        }
-
-        function addTipLine() {
-          addTipLines(draftTip);
-        }
-
-        /** Take one pasted block list and report what landed. */
-        function importLines(raw) {
-          const result = runtime.importPresets(raw);
-          if (!result.ok) {
-            setError(result.error);
-            setPresetNote('');
-            return false
-          }
-          const parts = [fill(t('importAdded'), result.added)];
-          if (result.skipped > 0) parts.push(fill(t('importSkipped'), result.skipped));
-          setError('');
-          setPresetNote(parts.join('，'));
-          setDraftImport('');
-          return true
-        }
-
-        /** Copy every configured prompt and report the outcome in place. */
-        function exportLines() {
-          Promise.resolve(runtime.exportPresets()).then((result) => {
-            if (result?.ok !== true) {
-              setError(result?.error ?? t('exportFailed'));
-              setCopyNote('');
-              return
-            }
-            setError('');
-            setCopyNote(fill(t('exportDone'), result.count));
-          });
-        }
-
-        /** A pasted list is split right away: no extra click needed. */
-        function onTipPaste(event) {
-          const text = event?.clipboardData?.getData?.('text');
-          if (typeof text !== 'string' || text.trim() === '') return
-          event.preventDefault?.();
-          addTipLines(text);
-        }
-
-        /**
-         * One settings block with the same heading rhythm as a floating-window
-         * module: accent bar, title, optional one-line description.
-         */
-        function settingsSection(key, title, desc, children, options) {
-          const collapsible = options?.collapsible === true;
-          const head = h(
-            collapsible ? 'summary' : 'div',
-            { className: 'dsh-nudge-settings-section-head' },
-            h('span', { className: 'dsh-nudge-settings-section-title' }, title),
-            options?.meta ? h('span', { className: 'dsh-nudge-settings-section-meta' }, options.meta) : null,
-          );
-          return h(
-            collapsible ? 'details' : 'section',
-            { key, className: `dsh-nudge-settings-section${collapsible ? ' collapsible' : ''}` },
-            head,
-            desc ? h('div', { className: 'dsh-nudge-settings-section-desc' }, desc) : null,
-            ...children,
-          )
-        }
-
-        /** A nested, closed-by-default editor (the long prompt list). */
-        function foldGroup(key, title, meta, children, hint) {
-          return h(
-            'details',
-            { key, className: 'dsh-nudge-settings-fold' },
-            h(
-              'summary',
-              {
-                className: 'dsh-nudge-settings-fold-head',
-                ...(typeof hint === 'string' && hint !== '' ? { title: hint } : null),
-              },
-              h('span', null, title),
-              meta ? h('span', { className: 'dsh-nudge-settings-fold-meta' }, meta) : null,
-            ),
-            ...children,
-          )
-        }
-
-        const statsSection = StatsBoard({ stats: state.stats, presets: state.presets, t });
-
-        return h(
-          'div',
-          { className: 'dsh-nudge-settings' },
-          h('style', { key: 'dsh-nudge-css' }, viewCss(state.quick)),
-          statsSection,
-          // The settings page follows the floating window: notes, quick input,
-          // then appearance (border and status line). Both long editors start
-          // folded so the switches stay in view.
-          settingsSection('annotations', t('annotationsTitle'), null, [
-            toggleRow({
-              key: 'quick',
-              title: t('quickTitle'),
-              desc: t('quickHint'),
-              checked: state.quick === true,
-              onChange: (value) => runtime.setQuick(value),
-            }),
-            toggleRow({
-              key: 'autopaste',
-              title: t('autoPasteTitle'),
-              desc: t('autoPasteDesc'),
-              checked: state.autoPaste === true,
-              onChange: (value) => runtime.setAutoPaste(value),
-            }),
-          ]),
-          settingsSection('quickinput', t('nudgeModule'), t('presetsHint'), [
-            foldGroup('presets', t('presetList'), t('presetCount').replace('{n}', String(state.presets.length)), [
-            // The list is a table of contents: names only, bodies on demand.
-            h(
-              'div',
-              { className: 'dsh-nudge-preset-toolbar' },
-              h('span', { className: 'dsh-nudge-preset-count' }, t('presetCount').replace('{n}', String(state.presets.length))),
-              h(
-                'button',
-                {
-                  type: 'button',
-                  className: 'dsh-nudge-btn',
-                  disabled: state.presets.length === 0,
-                  onClick: () => runtime.setPresetsOpen(true),
-                },
-                t('expandAllPresets'),
-              ),
-              h(
-                'button',
-                {
-                  type: 'button',
-                  className: 'dsh-nudge-btn',
-                  disabled: state.presetOpen.length === 0,
-                  onClick: () => runtime.setPresetsOpen(false),
-                },
-                t('collapseAllPresets'),
-              ),
-              h(
-                'button',
-                {
-                  type: 'button',
-                  className: 'dsh-nudge-btn',
-                  'aria-expanded': importOpen ? 'true' : 'false',
-                  onClick: () => setImportOpen(importOpen !== true),
-                },
-                t('importPresets'),
-              ),
-              h(
-                'button',
-                {
-                  type: 'button',
-                  className: 'dsh-nudge-btn',
-                  title: t('exportHint'),
-                  disabled: state.presets.length === 0,
-                  onClick: exportLines,
-                },
-                t('exportPresets'),
-              ),
-            ),
-            copyNote.length > 0
-              ? h('div', { key: 'preset-copy-note', className: 'dsh-nudge-settings-note' }, copyNote)
-              : null,
-            state.presets.length === 0
-              ? h('div', { className: 'dsh-nudge-preset-empty' }, t('presetsEmpty'))
-              : null,
-            ...state.presets.map((preset, index) =>
-              h(PresetRow, {
-                key: preset.id,
-                preset,
-                t,
-                onError: setError,
-                index,
-                total: state.presets.length,
-              }),
-            ),
-            h(
-              'div',
-              { className: 'dsh-nudge-preset-row dsh-nudge-preset-add' },
-              h(
-                'div',
-                { className: 'dsh-nudge-preset-line' },
-                h('input', {
-                  type: 'text',
-                  value: draftLabel,
-                  placeholder: t('presetLabel'),
-                  'aria-label': t('presetLabel'),
-                  onChange: (event) => setDraftLabel(event.target.value),
-                }),
-              ),
-              h('textarea', {
-                value: draftText,
-                placeholder: t('presetText'),
-                'aria-label': t('presetText'),
-                onChange: (event) => setDraftText(event.target.value),
-              }),
-              h(
-                'div',
-                { className: 'dsh-nudge-preset-actions' },
-                h('button', { type: 'button', className: 'dsh-nudge-btn primary', onClick: add }, t('addPreset')),
-              ),
-            ),
-            importOpen
-              ? h(
-                  'div',
-                  { className: 'dsh-nudge-preset-import' },
-                  h('div', { className: 'dsh-nudge-settings-hint' }, t('importHint')),
-                  h('textarea', {
-                    value: draftImport,
-                    placeholder: t('importPlaceholder'),
-                    'aria-label': t('importPresets'),
-                    onChange: (event) => setDraftImport(event.target.value),
-                  }),
-                  h(
-                    'div',
-                    { className: 'dsh-nudge-preset-actions' },
-                    h(
-                      'button',
-                      { type: 'button', className: 'dsh-nudge-btn primary', onClick: () => importLines(draftImport) },
-                      t('importSubmit'),
-                    ),
-                    h(
-                      'button',
-                      {
-                        type: 'button',
-                        className: 'dsh-nudge-btn',
-                        onClick: () => {
-                          setImportOpen(false);
-                          setDraftImport('');
-                          setPresetNote('');
-                          setError('');
-                        },
-                      },
-                      t('cancelPreset'),
-                    ),
-                  ),
-                )
-              : null,
-            // The import count belongs under the import box, not under the
-            // idle-line box further down the page.
-            presetNote.length > 0
-              ? h('div', { key: 'preset-import-note', className: 'dsh-nudge-settings-note' }, presetNote)
-              : null,
-            h(
-              'div',
-              { className: 'dsh-nudge-preset-actions' },
-              h(
-                'button',
-                {
-                  type: 'button',
-                  className: 'dsh-nudge-btn',
-                  onClick: () => {
-                    runtime.resetPresets();
-                    setPresetNote('');
-                    setError('');
-                  },
-                },
-                t('resetPresets'),
-              ),
-            ),
-            ]),
-            h(
-              'div',
-              {
-                key: 'delivery',
-                className: 'dsh-nudge-settings-group dsh-nudge-settings-inline',
-                title: t('deliveryDesc'),
-              },
-              h('span', { className: 'dsh-nudge-toggle-title' }, t('deliveryTitle')),
-              h(
-                'div',
-                { className: 'dsh-nudge-presets', role: 'group', 'aria-label': t('deliveryTitle') },
-                h(
-                  'button',
-                  {
-                    type: 'button',
-                    className: `dsh-nudge-chip${delivery === 'steer' ? ' active' : ''}`,
-                    title: t('deliveryTipSteer'),
-                    'aria-pressed': delivery === 'steer' ? 'true' : 'false',
-                    onClick: () => runtime.setDelivery('steer'),
-                  },
-                  t('steer'),
-                ),
-                h(
-                  'button',
-                  {
-                    type: 'button',
-                    className: `dsh-nudge-chip${delivery === 'steer' ? '' : ' active'}`,
-                    title: t('deliveryTipQueue'),
-                    'aria-pressed': delivery === 'steer' ? 'false' : 'true',
-                    onClick: () => runtime.setDelivery('followup'),
-                  },
-                  t('queue'),
-                ),
-              ),
-            ),
-            toggleRow({
-              key: 'turbo',
-              title: t('turboTitle'),
-              desc: t('turboDesc'),
-              checked: state.turbo === true,
-              onChange: (value) => runtime.setTurbo(value),
-            }),
-          ]),
-          settingsSection('appearance', t('appearanceTitle'), null, [
-            h(
-              'div',
-              {
-                key: 'frame',
-                className: 'dsh-nudge-settings-group dsh-nudge-settings-inline',
-                title: t('frameDesc'),
-              },
-              h('span', { className: 'dsh-nudge-toggle-title' }, t('frameTitle')),
-              h(
-                'div',
-                { className: 'dsh-nudge-presets', role: 'group', 'aria-label': t('frameTitle') },
-                ...FRAME_CHOICES.map((width) =>
-                  h(
-                    'button',
-                    {
-                      key: `frame-${width}`,
-                      type: 'button',
-                      className: `dsh-nudge-chip${state.frame === width ? ' active' : ''}`,
-                      'aria-pressed': state.frame === width ? 'true' : 'false',
-                      onClick: () => runtime.setFrame(width),
-                    },
-                    t(frameLabelKey(width)),
-                  ),
-                ),
-              ),
-            ),
-            // The status row belongs to how the window looks, so it lives with
-            // the border. Its list is long: the editor starts folded.
-            foldGroup('tips', t('tipsTitle'), t('tipsCount').replace('{n}', String(state.tips.length)), [
-              // The paste box sits above the list: it is the way in, so it must
-              // not hide under a dozen existing lines.
-              h(
-                'div',
-                { key: 'tip-draft', className: 'dsh-nudge-tip-draft' },
-                h('textarea', {
-                  value: draftTip,
-                  placeholder: t('tipsPastePlaceholder'),
-                  'aria-label': t('tipsPastePlaceholder'),
-                  onChange: (event) => setDraftTip(event.target.value),
-                  onPaste: onTipPaste,
-                  onKeyDown: (event) => {
-                    if (event.key === 'Enter' && (event.ctrlKey === true || event.metaKey === true)) {
-                      addTipLine();
-                    }
-                  },
-                }),
-                h('button', { type: 'button', className: 'dsh-nudge-btn primary', onClick: addTipLine }, t('addTip')),
-              ),
-              tipNote.length > 0 ? h('div', { key: 'tips-note', className: 'dsh-nudge-settings-note' }, tipNote) : null,
-              // Keyed by the line (the list holds no duplicates), not by the slot:
-              // a row that moves keeps its own half-typed text instead of handing
-              // it to whichever line lands where it used to be.
-              ...state.tips.map((line, index) =>
-                h(TipRow, {
-                  key: `tip:${line}`,
-                  value: line,
-                  t,
-                  onError: setError,
-                  index,
-                }),
-              ),
-              h(
-                'div',
-                { key: 'tips-reset', className: 'dsh-nudge-preset-actions' },
-                h(
-                  'button',
-                  {
-                    type: 'button',
-                    className: 'dsh-nudge-btn',
-                    onClick: () => {
-                      runtime.resetTips();
-                      setError('');
-                      setTipNote('');
-                    },
-                  },
-                  t('resetTips'),
-                ),
-              ),
-            ], t('tipsHint')),
-          ]),
-          error.length > 0 ? h('div', { className: 'dsh-nudge-settings-error' }, error) : null,
-        )
-      }
-    }
-
-    // ---------------------------------------------------------------------
-    // composer bridge
-    // ---------------------------------------------------------------------
-
-    /**
-     * Zero-DOM registrant in the conversation input overlay. The slot composes
-     * the composer's public action face (`inputActions`) and the input store
-     * hook (`useInput`) into the entry's props; this bridge hands both to the
-     * window runtime so the window can append a chosen prompt, or write notes
-     * with the shell's own quote previews, instead of sending. The editor DOM
-     * is never touched.
-     * @param runtime - the window runtime.
-     * @returns the slot component.
-     */
-    function makeComposerBridge(runtime) {
-      return function NudgeComposerBridge(props) {
-        const inputActions = props?.inputActions;
-        const useInput = props?.useInput;
-        const latest = React.useRef(undefined);
-        if (typeof useInput === 'function') {
-          latest.current = useInput((snapshot) => snapshot);
-        }
-        const handle = React.useRef(undefined);
-        if (handle.current === undefined) {
-          handle.current = {
-            setDraft:
-              typeof inputActions?.setDraft === 'function'
-                ? (value) => inputActions.setDraft(value)
-                : undefined,
-            readDraft: () => latest.current?.draft ?? '',
-            // The phase tells a sent message apart from a deleted quote; the
-            // input state publishes it next to the draft.
-            readPhase: () => latest.current?.phase,
-            // Insertion at the caret: the shell's own splice, which leaves
-            // the rest of the document (and its undo step) alone. The write
-            // path prefers it over rebuilding the whole draft.
-            captureInsertion:
-              typeof inputActions?.captureInsertion === 'function'
-                ? () => inputActions.captureInsertion()
-                : undefined,
-            insertText:
-              typeof inputActions?.insertText === 'function'
-                ? (text, span) => inputActions.insertText(text, span)
-                : undefined,
-            // The shell's own quote node: the passage is shown as its quote
-            // preview (quote mark, hover for the full text, click to remove)
-            // and still serializes to the Markdown a plain write produced.
-            insertQuote:
-              typeof inputActions?.insertQuote === 'function'
-                ? (value, summary) => inputActions.insertQuote(value, summary)
-                : undefined,
-          };
-        }
-        // Render only stores the handle (no store update, so React never sees
-        // a cross-component update during render); the effect activates it and
-        // refreshes the focus flag, and releases it on unmount.
-        runtime.attachComposer(handle.current, false);
-        React.useEffect(() => {
-          const current = handle.current;
-          runtime.attachComposer(current);
-          return () => runtime.detachComposer(current)
-        }, [inputActions]);
-        return null
-      }
-    }
-
-    // ---------------------------------------------------------------------
-    // module
-    // ---------------------------------------------------------------------
+/**
+ * dsh-nudge — Client half.
+ *
+ * A floating control over the conversation: pick one of the built-in probe
+ * presets (or the delivery mode), press 询问状态, and the agent answers in the
+ * conversation. The plugin owns the trigger, the presets and the visible
+ * outcome; it never parses or repeats the answer, because the conversation
+ * already is the place where the answer belongs.
+ *
+ * Extension points used:
+ *  - `shell.overlay`            — frame-wide floating layer, outside every scroll container.
+ *  - `ctx.sessions.list`        — which session the main view retains (the click target).
+ *  - `ctx.uiSession.sessionStatus` — running / pending-interaction facts for the wait state.
+ *  - `ctx.remote.session.prompt` — the composer's own delivery path (mode: queue = followup, steer).
+ *
+ * Nothing is written to the page outside this component's own root, and the
+ * bundle keeps no DOM of its own: unmounting the slot removes the window.
+ *
+ * Built into `client.js` by `scripts/build.mjs`; edit this file, not the bundle.
+ */
 
     const name = ENTRY;
     const inject = ['slots', 'sessions', 'uiSession', 'remote', 'locale', 'shortcuts'];

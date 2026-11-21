@@ -1,0 +1,3228 @@
+/**
+ * The window state machine.
+ *
+ * Delivery, the wait for an answer, annotations, settings, counters and the debug surface.
+ *
+ * Built into `client.js` by `scripts/build.mjs`; edit this file, not the bundle.
+ */
+import { ANCHOR_SELECTOR, CAPTURE_HIGHLIGHT, CONTEXT_CHARS, DEFAULT_DELIVERY, DEFAULT_PRESET, DIAG_SAMPLES, EVENT_RECEIPT_MS, FLASH_HOLD_MS, HIGHLIGHT_NAME, IDLE_CONFIRM_MS, MAX_STAT_PRESET_ID, MAX_TIPS, MISS_RESCAN_MS, PILL_SIZE, SELF_SELECTOR, SETTLE_MS, UI_KEY, WAIT_TIMEOUT_MS } from './constants.js'
+import { assistantMessageText, eventSourceOf, lastDurableSeq, mintRequestId, readLang, resolveTarget, sessionRemoteOf, statusOf, timeZoneOf, userMessageText } from './context.js'
+import { CSS } from './css.js'
+import { anchorFromQuote, anchorFromRange, locateAnchor, packedMapOf, packedText, rangeFromPacked, sameRanges } from './dom.js'
+import { chipSlotAt, clampPoint, dockPosition, isPoint, rectValue, snapToEdge, viewport } from './geometry.js'
+import { EN, ZH } from './locale.js'
+import { notesOfSession, saveNotesOfSession } from './notes.js'
+import { builtinPresets, mintPresetId, normalizePresetList, presetOf } from './presets.js'
+import { SETTINGS, adoptFromHost, applySettingsStore, clearSetting, commitSettingsToHost, flushSettingsMirror, frameLabelKey, hasStoredSettings, isDelivery, isFrameWidth, loadStoreFromHost, markSettingsDirty, markSettingsRead, markSettingsSynced, persistSetting, readSettings, settingsSnapshot } from './settings.js'
+import { STAT_FIELDS, dayKey, normalizeStats } from './stats.js'
+import { readJson, storage, writeJson } from './storage.js'
+import { builtinTips, normalizeTipList, tidyTip } from './tips.js'
+
+    /**
+     * Build the window runtime.
+     *
+     * The view is a thin renderer over this object; the checks drive the same
+     * object without a browser renderer.
+     * @param ctx - plugin context.
+     * @returns the runtime handle.
+     */
+    function createRuntime(ctx) {
+      const saved = readJson(UI_KEY) ?? {}
+      const language = readLang(ctx)
+      const initialTarget = resolveTarget(ctx)
+      // Every persisted preference comes from the settings table, so the launch
+      // state and a later restore cannot drift apart.
+      const savedSettings = readSettings({ lang: language, sessionId: initialTarget?.sessionId })
+
+      /**
+       * The annotation surface at rest: no draft, nothing stowed, no editor, no
+       * half-typed note. The launch state and every closing transition spread
+       * this instead of listing the fields again, so a field added to the
+       * surface is reset in one place.
+       */
+      const IDLE_ANNOTATION = {
+        annotationDraft: null,
+        annotationCardHidden: false,
+        annotationNote: '',
+        annotationEditingId: null,
+        annotationEditRect: null,
+      }
+      /**
+       * The window's direct-edit surface for the quick inputs: whether the 编辑
+       * chip is armed, which entry's form is open, and the form's fields. One
+       * object so leaving the mode clears every part of it at once.
+       */
+      const IDLE_NUDGE_EDIT = {
+        nudgeEditing: false,
+        nudgeEditId: null,
+        nudgeEditLabel: '',
+        nudgeEditText: '',
+        nudgeEditError: '',
+      }
+
+      let state = {
+        phase: 'idle',
+        note: '',
+        error: '',
+        /** Short-lived confirmation of a toggle, cleared on a timer. */
+        flash: '',
+        lastAt: undefined,
+        lastSessionId: undefined,
+        unread: false,
+        // Every launch starts as the pill: the window is a reminder to look at
+        // the conversation, not a panel to close first.
+        collapsed: true,
+        // One anchor for both shapes: collapsing keeps the window in place and
+        // expanding returns it to the same spot. The stored record only says
+        // how far down it sat and which side it was on.
+        pos: isPoint(saved.pos) ? snapToEdge(saved.pos, true) : dockPosition(true),
+        /**
+         * Every persisted preference — the three switches, the delivery mode,
+         * the border width, the prompts and the chosen one, the idle lines, the
+         * counters and the collected notes — arrives from the settings table by
+         * field name, so the launch state cannot miss a row.
+         */
+        ...savedSettings,
+        /** Ids whose body is expanded in the settings list. */
+        presetOpen: [],
+        /** The preset opened in the settings editor, or null. */
+        presetEditingId: null,
+        target: initialTarget,
+        pendingQuestion: false,
+        /** True while the conversation composer is mounted and holds the caret. */
+        composerFocused: false,
+        /** Which idle line is showing; not persisted, so the launch restarts at the first. */
+        tipIndex: 0,
+        /** The idle line opened in its editor, or null. */
+        tipEditingIndex: null,
+        /**
+         * The annotation surface: the selection being annotated, whether its
+         * card is stowed, the note being written, and the collected note opened
+         * in the editor. A card and an editor never coexist.
+         */
+        ...IDLE_ANNOTATION,
+        /** Whether the annotation module shows its body (row summary when false). */
+        annotationExpanded: false,
+        /** Whether the nudge module (prompts / mode / primary) shows its body. */
+        nudgeExpanded: true,
+        /** The in-window "new prompt" form (title + body). */
+        nudgeDraftOpen: false,
+        nudgeDraftLabel: '',
+        nudgeDraftText: '',
+        nudgeDraftError: '',
+        ...IDLE_NUDGE_EDIT,
+        /** Whether the window shows the settings form in place of its body. */
+        settingsOpen: false,
+        /** Timestamp of the last capture, used to restart the attention pulse. */
+        attentionAt: 0,
+        /** The window control whose explanation bubble is showing, or null. */
+        tip: null,
+        lang: language,
+      }
+      const listeners = new Set()
+      /** One immutable snapshot per change, as `useSyncExternalStore` requires. */
+      function getSnapshot() {
+        return state
+      }
+
+      /** Replace state and notify every renderer. */
+      function setState(patch) {
+        let changed = false
+        for (const key of Object.keys(patch)) {
+          if (!Object.is(state[key], patch[key])) {
+            changed = true
+            break
+          }
+        }
+        if (!changed) return
+        state = { ...state, ...patch }
+        for (const listener of [...listeners]) {
+          try {
+            listener()
+          } catch (error) {
+            console.warn('[dsh-nudge] listener failed', error)
+          }
+        }
+      }
+
+      /** Subscribe one renderer. */
+      function subscribe(listener) {
+        listeners.add(listener)
+        return () => listeners.delete(listener)
+      }
+
+      /** Visible text for the current locale. */
+      function text(key) {
+        const dict = state.lang === 'zh' ? ZH : EN
+        return dict[key] ?? key
+      }
+
+      // --- delivery -------------------------------------------------------
+
+      let waiting = null
+
+      function clearWaitTimers(entry) {
+        if (!entry) return
+        if (entry.settleTimer !== undefined) clearTimeout(entry.settleTimer)
+        if (entry.idleTimer !== undefined) clearTimeout(entry.idleTimer)
+        if (entry.receiptTimer !== undefined) clearTimeout(entry.receiptTimer)
+        if (entry.timeoutTimer !== undefined) clearTimeout(entry.timeoutTimer)
+        entry.settleTimer = undefined
+        entry.idleTimer = undefined
+        entry.receiptTimer = undefined
+        entry.timeoutTimer = undefined
+      }
+
+      function endWaiting() {
+        if (waiting) {
+          clearWaitTimers(waiting)
+          if (typeof waiting.unsubscribeEvents === 'function') {
+            try {
+              waiting.unsubscribeEvents()
+            } catch {
+              /* already released */
+            }
+          }
+          waiting.unsubscribeEvents = undefined
+          waiting = null
+        }
+      }
+
+      function finishDone(note) {
+        if (!waiting) return
+        const sessionId = waiting.sessionId
+        endWaiting()
+        setState({
+          phase: 'done',
+          note: note ?? '',
+          error: '',
+          lastAt: Date.now(),
+          lastSessionId: sessionId,
+          unread: state.collapsed ? true : state.unread,
+        })
+      }
+
+      function finishError(message) {
+        endWaiting()
+        setState({ phase: 'error', error: message, note: '' })
+      }
+
+      /** Map one Host/transport failure to the visible reason (6.1 / 6.2). */
+      function describeFailure(failure) {
+        const code = failure && typeof failure.code === 'string' ? failure.code : ''
+        const message = failure && typeof failure.message === 'string' ? failure.message : ''
+        if (code === 'session/not-found') return text('sessionClosed')
+        if (code === 'gateway/bad-request') return text('badRequest')
+        return message.length > 0 ? `${text('deliveryFailed')}：${message}` : text('deliveryFailed')
+      }
+
+      /** Unwrap the generated RemoteResult wrapper (bare payloads pass through). */
+      function unwrapResult(result) {
+        if (result !== null && typeof result === 'object' && typeof result.ok === 'boolean') {
+          return result.ok ? { ok: true, value: result.value } : { ok: false, error: result.error }
+        }
+        if (result !== null && typeof result === 'object' && result.accepted === true) {
+          return { ok: true, value: result }
+        }
+        return { ok: false, error: { message: 'unexpected prompt result' } }
+      }
+
+      /**
+       * Classify a durable turn boundary that closed after the probe.
+       * @param kind - `turn/end` reason kind.
+       * @returns true when the wait was settled by the boundary.
+       */
+      function settleByTurnEnd(kind) {
+        if (kind === 'blocked') {
+          finishError(text('turnBlockedNote'))
+          return true
+        }
+        if (kind === 'failed') {
+          finishError(text('turnFailedNote'))
+          return true
+        }
+        if (kind === 'aborted') {
+          finishError(text('turnAbortedNote'))
+          return true
+        }
+        if (kind === 'completed') {
+          finishError(text('noAnswerNote'))
+          return true
+        }
+        return false
+      }
+
+      /**
+       * Read the durable window and settle the wait on the probe's own turn.
+       *
+       * Correlation is exact: the probe carries a client-minted `requestId`, the
+       * Host persists it as the user message's `source.rpcId`, and the answer is
+       * the first text-bearing assistant message of the step that consumes it.
+       * The plugin only looks at event types and seq — never at the reply text.
+       */
+      function onSessionEvents(entry) {
+        if (waiting !== entry) return
+        const snapshot = entry.eventSource?.getSnapshot?.()
+        const entries = snapshot?.entries
+        if (!Array.isArray(entries)) return
+        if (entry.probeSeq === undefined) {
+          for (const item of entries) {
+            if (item?.type !== 'event') continue
+            const event = item.event
+            if (!event || event.seq <= entry.sinceSeq) continue
+            if (event.type !== 'user/message') continue
+            const source = event.data?.source
+            if (source && source.rpcId === entry.requestId) {
+              entry.probeSeq = event.seq
+              break
+            }
+            if (entry.probeText.length > 0 && userMessageText(event) === entry.probeText) {
+              entry.probeSeq = event.seq
+              break
+            }
+          }
+        }
+        if (entry.probeSeq === undefined) return
+        // The step that consumes a steering message starts at the next boundary;
+        // for a queued turn it is the turn's first step. A message produced by
+        // the step already in flight is not the answer, so the reply is the
+        // first text-bearing assistant message after that step opens.
+        if (entry.stepSeq === undefined) {
+          for (const item of entries) {
+            if (item?.type !== 'event') continue
+            const event = item.event
+            if (!event || event.seq <= entry.probeSeq) continue
+            if (event.type === 'step/start') {
+              entry.stepSeq = event.seq
+              break
+            }
+          }
+        }
+        for (const item of entries) {
+          if (item?.type !== 'event') continue
+          const event = item.event
+          if (!event || event.seq <= entry.probeSeq) continue
+          if (event.type === 'assistant/message') {
+            if (entry.stepSeq === undefined || event.seq <= entry.stepSeq) continue
+            if (assistantMessageText(event).trim().length > 0) {
+              finishDone('')
+              return
+            }
+            continue
+          }
+          if (event.type === 'turn/end') {
+            const kind = event.data?.reason?.kind
+            // A blocked end names the archived gate itself, so it needs no step
+            // to prove the boundary belongs to this probe. Every other outcome
+            // only explains the step that consumed the probe.
+            if (kind === 'blocked') {
+              if (settleByTurnEnd(kind)) return
+              continue
+            }
+            if (entry.stepSeq === undefined || event.seq <= entry.stepSeq) continue
+            if (settleByTurnEnd(kind)) return
+          }
+        }
+      }
+
+      /**
+       * Watch one session's durable window for this probe's turn.
+       * @returns whether the event route is available (otherwise the running
+       *   state heuristic remains the fallback).
+       */
+      function beginEventWatch(entry) {
+        const source = eventSourceOf(ctx, entry.sessionId)
+        if (!source || typeof source.subscribe !== 'function' || typeof source.getSnapshot !== 'function') {
+          return false
+        }
+        entry.eventSource = source
+        entry.sinceSeq = lastDurableSeq(source.getSnapshot())
+        entry.unsubscribeEvents = source.subscribe(() => onSessionEvents(entry))
+        onSessionEvents(entry)
+        return true
+      }
+
+      /** True when the session's last turn closed while a wait was in flight. */
+      function onStatusChange() {
+        refreshWorld()
+        const entry = waiting
+        if (!entry) return
+        // The event route knows exactly when the probe's turn opens and closes;
+        // running-state transitions would settle it too early or too late.
+        if (entry.eventSource !== undefined) return
+        const running = statusOf(ctx, entry.sessionId)?.running === true
+        if (running) {
+          entry.sawRunning = true
+          if (entry.settleTimer !== undefined) {
+            clearTimeout(entry.settleTimer)
+            entry.settleTimer = undefined
+          }
+          return
+        }
+        // An idle session may answer before ever publishing `running`; the
+        // idle timer settles that case. A turn observed running must close
+        // once and stay closed: the queue mode may close and reopen a turn.
+        if (!entry.sawRunning || entry.settleTimer !== undefined) return
+        entry.settleTimer = setTimeout(() => {
+          entry.settleTimer = undefined
+          if (!waiting || waiting !== entry) return
+          if (statusOf(ctx, entry.sessionId)?.running === true) return
+          finishDone('')
+        }, SETTLE_MS)
+      }
+
+      // --- composer insertion ---------------------------------------------
+
+      /**
+       * The mounted composer bridge, when a conversation input is on screen.
+       * It carries the composer's public action face (`setDraft`) and a reader
+       * for the current draft; the plugin never touches the editor DOM.
+       */
+      let composer
+
+      /** The focused composer editor element, when the caret is inside it. */
+      function composerNode() {
+        try {
+          const active = document.activeElement
+          if (!active) return undefined
+          const editable =
+            active.isContentEditable === true ||
+            active.getAttribute?.('contenteditable') === 'true'
+          if (!editable) return undefined
+          // The DSH composer editor marks itself `data-composer-input`; Lexical
+          // marks its root too, and the slot host covers older shells.
+          if (typeof active.hasAttribute === 'function' && active.hasAttribute('data-composer-input')) return active
+          if (active.getAttribute?.('data-lexical-editor') === 'true') return active
+          if (typeof active.closest === 'function' && active.closest('[data-slot="conversation.composer"]')) {
+            return active
+          }
+          return undefined
+        } catch {
+          return undefined
+        }
+      }
+
+      /** Write mode is available only while a composer is mounted and focused. */
+      function canInsert() {
+        return composer !== undefined && composerNode() !== undefined
+      }
+
+      /** Keep the visible mode flag (the primary button label) in sync with focus. */
+      function syncComposerFocus() {
+        const focused = canInsert()
+        if (focused === state.composerFocused) return
+        setState({ composerFocused: focused })
+        // Auto-paste: the moment the caret lands in the composer, hand the
+        // pending notes over and empty the tray. A failed write keeps them.
+        if (focused && state.autoPaste === true && state.annotations.length > 0) {
+          writeAnnotations()
+        }
+      }
+
+      /**
+       * Attach the live composer handle handed over by the input bridge.
+       * `sync: false` stores it without a store update, for React's render
+       * phase; the bridge's effect then attaches with the focus refresh.
+       */
+      function attachComposer(handle, sync = true) {
+        composer = handle
+        if (sync) syncComposerFocus()
+      }
+
+      /** Detach only when the released handle is still the mounted one. */
+      function detachComposer(handle) {
+        if (composer !== handle) return
+        composer = undefined
+        syncComposerFocus()
+      }
+
+      /**
+       * Append the selected preset to the composer draft instead of sending it.
+       * The caret ends up past the written text; existing content is kept and
+       * separated by one newline (a blank draft gets no leading newline).
+       */
+      function insertPreset() {
+        const handle = composer
+        if (handle === undefined || typeof handle.setDraft !== 'function') {
+          setState({ note: text('insertUnavailable'), error: '' })
+          return false
+        }
+        const preset = activePreset()
+        if (!preset) return false
+        let draft = ''
+        try {
+          draft = handle.readDraft?.() ?? ''
+        } catch {
+          draft = ''
+        }
+        if (typeof draft !== 'string') draft = ''
+        const next =
+          draft.trim() === ''
+            ? preset.text
+            : `${draft}${draft.endsWith('\n') ? '' : '\n'}${preset.text}`
+        try {
+          handle.setDraft(next)
+        } catch (error) {
+          console.warn('[dsh-nudge] composer insert failed', error)
+          setState({ note: text('insertUnavailable'), error: '' })
+          return false
+        }
+        setState({ note: '', error: '' })
+        countStat('insert', preset.id)
+        return true
+      }
+
+      // --- annotations ----------------------------------------------------
+
+      /** A field being edited, a modal, and this window are never quoted. */
+      const EDITABLE_SELECTOR = 'input, textarea, select, [contenteditable="true"], [contenteditable=""]'
+      const MODAL_SELECTOR = '[role="dialog"][aria-modal="true"], [data-shortcut-modal]'
+
+      /** Trim only the trailing whitespace a selection picks up. */
+      function tidyQuote(value) {
+        return String(value ?? '').replace(/\s+$/, '')
+      }
+
+      /**
+       * One passage as the Markdown blockquote the shell serializes a quote
+       * node to; text copied out of the composer keeps this form.
+       */
+      function quoteMarkdown(value) {
+        const lines = tidyQuote(value).split('\n')
+        return lines.map((line) => (line === '' ? '>' : `> ${line}`)).join('\n')
+      }
+
+      /** The answer line under a passage, or '' when the passage stands alone. */
+      function annotationNoteLine(item) {
+        const note = typeof item.note === 'string' ? item.note.trim() : ''
+        return note === '' ? '' : `${text('answerLabel')}${note}`
+      }
+
+      /**
+       * One annotation as the Markdown block it becomes when it is sent: the
+       * quote on its own lines, the answer on the line right below it.
+       */
+      function annotationBlock(item) {
+        const quoted = quoteMarkdown(item.quote)
+        const note = annotationNoteLine(item)
+        return note === '' ? quoted : `${quoted}\n${note}`
+      }
+
+      /** The annotations still waiting to be written into a message. */
+      function pendingAnnotations() {
+        return state.annotations.filter((item) => item.written !== true)
+      }
+
+      // --- the annotation lifecycle ---------------------------------------
+      //
+      // Three surfaces share one state: the selection card (a draft), the
+      // in-place editor (one stored note) and the tray (the Session's notes). A
+      // card and an editor never coexist, and every path that ends one of them
+      // returns the same fields to rest — so the resting surface is written
+      // down once here, and a tray change is persisted and repainted in one
+      // step, instead of each transition spelling out its own subset.
+
+      /** One surface change: show it, then repaint the marks it implies. */
+      function settleAnnotation(patch) {
+        setState(patch)
+        repaintHighlights()
+      }
+
+      /** Return the surface to rest; the tray list is left as it is. */
+      function closeAnnotationSurface(extra) {
+        settleAnnotation({ ...IDLE_ANNOTATION, ...(extra ?? {}) })
+        return true
+      }
+
+      /**
+       * Replace the tray: persist it, show it, repaint its marks. A mark belongs
+       * to the conversation rather than to a draft, so the list and its painting
+       * can never drift apart.
+       */
+      function commitAnnotations(next, extra) {
+        persistNotes(next)
+        settleAnnotation({ annotations: next, ...IDLE_ANNOTATION, ...(extra ?? {}) })
+        return next
+      }
+
+      /** Whether one DOM node belongs to this window rather than to the page. */
+      function isSelfNode(node) {
+        if (!node || typeof node.closest !== 'function') return false
+        try {
+          return node.closest(SELF_SELECTOR) !== null
+        } catch {
+          return false
+        }
+      }
+
+      /** One write or send batch as one message body, notes two blank lines apart. */
+      function annotationsText(list) {
+        const items = Array.isArray(list) ? list : pendingAnnotations()
+        return items.map(annotationBlock).join('\n\n\n')
+      }
+
+      /**
+       * The break a Markdown block needs in front of it: two blank lines, so a
+       * note reads as a block of its own in the draft instead of running on from
+       * whatever it is appended to. A draft already ending with them gets no more.
+       */
+      function blockBreak(before) {
+        if (before === '') return ''
+        if (before.endsWith('\n\n\n')) return ''
+        if (before.endsWith('\n\n')) return '\n'
+        return before.endsWith('\n') ? '\n\n' : '\n\n\n'
+      }
+
+      /** Whether a node belongs to a text field rather than the transcript. */
+      function inEditable(node) {
+        if (!node || typeof node.closest !== 'function') return false
+        try {
+          return node.closest(EDITABLE_SELECTOR) !== null
+        } catch {
+          return false
+        }
+      }
+
+      /** The selection worth annotating: quote + its flow-item anchor. */
+      function readSelection() {
+        try {
+          if (typeof window.getSelection !== 'function') return null
+          const selection = window.getSelection()
+          if (!selection || selection.rangeCount === 0 || selection.isCollapsed) return null
+          const quote = tidyQuote(selection.toString())
+          if (quote.trim() === '') return null
+          const range = selection.getRangeAt(0)
+          const node = range.commonAncestorContainer
+          const element = node && node.nodeType === 1 ? node : node?.parentElement
+          if (!element || typeof element.closest !== 'function') return null
+          if (element.closest(EDITABLE_SELECTOR)) return null
+          if (element.closest(MODAL_SELECTOR)) return null
+          if (element.closest(SELF_SELECTOR)) return null
+          // The browser keeps two ends: `anchor` is where the gesture started,
+          // `focus` is where it ended. The native Shift+click grows from the
+          // anchor, so a downward drag extends forward and an upward drag
+          // extends backward. Both are kept while the range still points at
+          // live nodes.
+          let anchorPoint = null
+          let focusPoint = null
+          try {
+            if (selection.anchorNode) {
+              anchorPoint = { node: selection.anchorNode, offset: selection.anchorOffset }
+            }
+            if (selection.focusNode) {
+              focusPoint = { node: selection.focusNode, offset: selection.focusOffset }
+            }
+          } catch {
+            anchorPoint = null
+            focusPoint = null
+          }
+          return { quote, range, anchorPoint, focusPoint }
+        } catch {
+          return null
+        }
+      }
+
+      let selectionTimer
+      let attentionTimer
+      let flashTimer
+      let repaintTimer
+      let highlightObserver
+      /** Ranges painted for the current notes, used to hit-test clicks. */
+      let highlighted = []
+      /**
+       * Anchors recovered by quote instead of by key, keyed by note id.
+       *
+       * A stored key stops naming an element when the row is recycled under
+       * another key; the healed anchor keeps the next repaint on the direct path
+       * instead of re-walking every flow item again.
+       */
+      const resolvedAnchors = new Map()
+      /**
+       * Bumped when flow items are added, removed or re-keyed.
+       *
+       * A note whose stored row is gone can only find its passage again after
+       * one of those, so the whole-transcript search waits for this to change
+       * instead of running on every repaint of a streaming turn.
+       */
+      let anchorEpoch = 0
+      /** Flow-item generation of the last search, and when it ran. */
+      let searchEpoch = -1
+      let searchAt = 0
+      /** Quote → `{ anchor, epoch, at }` for notes that carry no anchor of their own. */
+      const quoteAnchors = new Map()
+      /** True while a pointer gesture is down, so no card opens mid-drag. */
+      let pointerHeld = false
+
+      /** Forget every recovered anchor; the next repaint starts from the stored ones. */
+      function resetAnchorRecovery() {
+        resolvedAnchors.clear()
+        quoteAnchors.clear()
+        searchEpoch = -1
+        searchAt = 0
+      }
+
+      /** Cancel a capture that has not fired yet (a new press is starting). */
+      function cancelPendingCapture() {
+        if (selectionTimer !== undefined) {
+          clearTimeout(selectionTimer)
+          selectionTimer = undefined
+        }
+      }
+
+      /**
+       * Read the selection once it has settled. A short debounce is what keeps
+       * double-click word selection and drag-then-adjust smooth: the browser's
+       * own finalisation, the second click and the following mouseup all land
+       * before the draft appears, and focus is not stolen mid-gesture.
+       * The pointer's own position is kept so the card can open right at the cursor.
+       */
+      function captureSelectionLater(event) {
+        if (state.quick !== true) return
+        if (selectionTimer !== undefined) clearTimeout(selectionTimer)
+        const pointer =
+          event && typeof event.clientX === 'number' && typeof event.clientY === 'number'
+            ? { x: event.clientX, y: event.clientY }
+            : null
+        selectionTimer = setTimeout(() => {
+          selectionTimer = undefined
+          captureSelection(pointer)
+        }, 200)
+      }
+
+      /**
+       * Keyboard selections end on a shifted keyup — in the transcript only.
+       *
+       * Shift+Enter makes a newline and Shift+<letter> capitalises, so a keyup
+       * inside a text field is typing, not a selection gesture. Capturing it
+       * would read a caret as a passage and pull the card (and the focus) over
+       * the field the user is typing in.
+       */
+      function onSelectionKeyup(event) {
+        if (state.quick !== true) return
+        if (event?.shiftKey !== true) return
+        if (inEditable(event?.target)) return
+        if (inEditable(document.activeElement)) return
+        captureSelectionLater()
+      }
+
+      /**
+       * A card must never open while the button is still down: dragging a
+       * selection keeps firing `selectionchange`, and opening then would steal
+       * the focus (and the caret) in the middle of the gesture. The pointer
+       * path and the safety net both wait for the release.
+       */
+      function onPointerGestureDown() {
+        pointerHeld = true
+        cancelPendingCapture()
+      }
+
+      function onPointerGestureUp() {
+        pointerHeld = false
+      }
+
+      /**
+       * Safety net for a settled selection that never reaches the pointer path:
+       * a drag that ends outside the transcript, a double-click on a boundary,
+       * or a second selection whose mouseup was swallowed by a re-render. It
+       * shares the debounce timer, so the pointer path always wins, and
+       * `captureSelection` itself refuses the quote that is already captured.
+       */
+      function onSelectionChange() {
+        if (state.quick !== true) return
+        if (pointerHeld) return
+        if (selectionTimer !== undefined) clearTimeout(selectionTimer)
+        selectionTimer = setTimeout(() => {
+          selectionTimer = undefined
+          captureSelection()
+        }, 260)
+      }
+
+      /** One short pulse so a capture is noticed wherever the eye is. */
+      function pulse() {
+        setState({ attentionAt: Date.now() })
+        if (attentionTimer !== undefined) clearTimeout(attentionTimer)
+        attentionTimer = setTimeout(() => {
+          attentionTimer = undefined
+          setState({ attentionAt: 0 })
+        }, 900)
+      }
+
+      /**
+       * Show one short confirmation line after a toggle, so a icon-only button
+       * still says in words what it just switched to.
+       */
+      function notify(message) {
+        const line = typeof message === 'string' ? message : ''
+        if (line === '') return false
+        setState({ flash: line })
+        if (flashTimer !== undefined) clearTimeout(flashTimer)
+        flashTimer = setTimeout(() => {
+          flashTimer = undefined
+          setState({ flash: '' })
+        }, FLASH_HOLD_MS)
+        return true
+      }
+
+      /** Turn the current selection into the pending annotation draft. */
+      function captureSelection(pointer = null) {
+        const selection = readSelection()
+        if (selection === null) return false
+        if (
+          state.annotationDraft !== null &&
+          state.annotationDraft.quote === selection.quote &&
+          state.annotationEditingId === null
+        ) {
+          return false
+        }
+        // The card hangs next to the selection; the nudge window does not move
+        // and keeps no focus, so the browser's own selection stays untouched.
+        let rect = null
+        try {
+          rect = selection.range.getBoundingClientRect()
+        } catch {
+          rect = null
+        }
+        if (rect !== null && rect.width === 0 && rect.height === 0) rect = null
+        // Anchor now, while the range still points at the nodes the user just
+        // selected. Waiting for the click would gamble on the page not having
+        // re-rendered in between, and a lost anchor means no highlight ever.
+        let anchor = null
+        try {
+          anchor = anchorFromRange(selection.range, selection.quote)
+        } catch {
+          anchor = null
+        }
+        settleAnnotation({
+          ...IDLE_ANNOTATION,
+          annotationDraft: {
+            quote: selection.quote,
+            anchor,
+            range: selection.range,
+            // The gesture's start end: Shift+press grows away from it, so an
+            // upward selection keeps its lower edge and an upward press extends
+            // further up instead of dropping the rows already selected.
+            anchorPoint: selection.anchorPoint,
+            rect: rect
+              ? {
+                  left: rect.left,
+                  top: rect.top,
+                  right: rect.right,
+                  bottom: rect.bottom,
+                  width: rect.width,
+                  height: rect.height,
+                }
+              : null,
+            pointer,
+          },
+          note: '',
+          error: '',
+        })
+        return true
+      }
+
+      /** Drop the browser selection only when it is still our captured quote. */
+      function clearNativeSelection(quote) {
+        try {
+          const selection = window.getSelection?.()
+          if (!selection || selection.rangeCount === 0) return
+          if (typeof quote === 'string' && quote !== '' && selection.toString() === quote) {
+            selection.removeAllRanges()
+          }
+        } catch {
+          /* no selection object */
+        }
+      }
+
+      /** Quick-annotation master switch. */
+      function setQuick(value) {
+        const next = value === true
+        persistSetting('quick', next)
+        settleAnnotation({
+          quick: next,
+          // The switch no longer unfolds the tray (its open state belongs to the
+          // user); turning it off still drops whatever the tray was holding.
+          ...(next ? null : { ...IDLE_ANNOTATION, annotationExpanded: false }),
+        })
+        notify(next ? text('quickOn') : text('quickOff'))
+        return true
+      }
+
+      /** Auto-paste switch: when on, pending notes flow into the composer on focus. */
+      function setAutoPaste(value) {
+        const next = value === true
+        persistSetting('autoPaste', next)
+        setState({ autoPaste: next })
+        notify(next ? text('autoPasteOn') : text('autoPasteOff'))
+        return true
+      }
+
+      /**
+       * Show the explanation bubble for one window control. `rect` is the
+       * control's viewport box, kept as numbers so the renderer only has to
+       * place the bubble; the text is derived from the live state, so a toggle
+       * updates the bubble without moving the pointer.
+       */
+      function showTip(key, rect) {
+        if (typeof key !== 'string' || key === '') return false
+        const box = rect && typeof rect === 'object' ? rect : null
+        const left = box === null ? NaN : Number(box.left)
+        const top = box === null ? NaN : Number(box.top)
+        const right = box === null ? NaN : Number(box.right)
+        const bottom = box === null ? NaN : Number(box.bottom)
+        if (!Number.isFinite(left) || !Number.isFinite(top) || !Number.isFinite(right) || !Number.isFinite(bottom)) {
+          return false
+        }
+        setState({ tip: { key, left, top, right, bottom } })
+        return true
+      }
+
+      /** Hide the explanation bubble. */
+      function hideTip() {
+        if (state.tip !== null) setState({ tip: null })
+        return true
+      }
+
+      /** Border width of the floating window, in px; the default is not stored. */
+      function setFrame(value) {
+        const width = Number(value)
+        if (!isFrameWidth(width)) return false
+        persistSetting('frame', width)
+        setState({ frame: width })
+        notify(`${text('frameTitle')}：${text(frameLabelKey(width))}`)
+        return true
+      }
+
+      /** Whether the annotation module shows its body. */
+      function setAnnotationExpanded(value) {
+        setState({ annotationExpanded: value === true })
+      }
+
+      /** Whether the nudge module shows its body. */
+      function setNudgeExpanded(value) {
+        setState({ nudgeExpanded: value === true })
+      }
+
+      /** Update the note for the pending annotation draft (or the edit). */
+      function setAnnotationNote(value) {
+        setState({ annotationNote: typeof value === 'string' ? value : '' })
+      }
+
+      /** The Session the annotation tray belongs to. */
+      function noteSessionId() {
+        return (resolveTarget(ctx) ?? state.target)?.sessionId
+      }
+
+      /** Persist the tray of the owning Session. */
+      function persistNotes(list) {
+        saveNotesOfSession(noteSessionId(), Array.isArray(list) ? list : state.annotations)
+      }
+
+      /** Commit the pending quote + note into the tray. */
+      function addAnnotation(noteOverride) {
+        const draft = state.annotationDraft
+        if (!draft || typeof draft.quote !== 'string' || draft.quote.trim() === '') return false
+        const note =
+          typeof noteOverride === 'string'
+            ? noteOverride
+            : typeof state.annotationNote === 'string'
+              ? state.annotationNote.trim()
+              : ''
+        // The capture already anchored the passage; the two retries cover a page
+        // that re-rendered between the selection and this click. Whatever still
+        // fails leaves a diagnostic sample, because a note without an anchor
+        // shows up only as a highlight that never appears.
+        let anchor = typeof draft.anchor?.key === 'string' ? draft.anchor : null
+        if (anchor === null && draft.range != null) {
+          try {
+            anchor = anchorFromRange(draft.range, draft.quote)
+          } catch {
+            anchor = null
+          }
+        }
+        if (anchor === null) anchor = anchorFromQuote(draft.quote)
+        if (anchor === null) recordAnchorMiss(draft.quote)
+        const annotation = {
+          id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+          quote: draft.quote,
+          note,
+          anchor,
+        }
+        const next = [...state.annotations, annotation]
+        clearNativeSelection(draft.quote)
+        // Only the text clears. A note landing never opens or resizes the tray:
+        // the window keeps its shape while several passages are annotated.
+        commitAnnotations(next, { note: '', error: '' })
+        countStat('annotation')
+        return true
+      }
+
+      /**
+       * Add the captured passage with the 同意 / 不同意 answer. A remark typed
+       * in the card is kept: the verdict comes first, then the remark.
+       */
+      function quickReply(kind) {
+        const verdict = kind === 'agree' ? text('agree') : text('disagree')
+        const remark = typeof state.annotationNote === 'string' ? state.annotationNote.trim() : ''
+        return addAnnotation(remark === '' || remark === verdict ? verdict : `${verdict}，${remark}`)
+      }
+
+      /** Drop the pending annotation draft without adding it. */
+      function dismissAnnotationDraft() {
+        return closeAnnotationSurface()
+      }
+
+      /**
+       * Open one collected annotation in the in-place bubble.
+       *
+       * `rect` is the viewport box the bubble hangs off: the clicked passage,
+       * or the tray row that was clicked. The window itself is left alone —
+       * editing a mark must never resize or unfold it.
+       */
+      function startEditAnnotation(id, rect = null) {
+        const item = state.annotations.find((candidate) => candidate.id === id)
+        if (item === undefined) return false
+        const box = rectValue(rect)
+        if (state.annotationEditingId === id) {
+          // Clicking the same mark again only moves the bubble: whatever is
+          // already typed stays in the field.
+          settleAnnotation({ annotationEditRect: box })
+          return true
+        }
+        settleAnnotation({
+          ...IDLE_ANNOTATION,
+          annotationEditingId: id,
+          annotationEditRect: box,
+          annotationNote: typeof item.note === 'string' ? item.note : '',
+          note: '',
+          error: '',
+        })
+        pulse()
+        return true
+      }
+
+      /** Persist the edited note. */
+      function saveEditedAnnotation() {
+        if (state.annotationEditingId === null) return false
+        const note = typeof state.annotationNote === 'string' ? state.annotationNote.trim() : ''
+        const next = state.annotations.map((item) =>
+          item.id === state.annotationEditingId ? { ...item, note } : item,
+        )
+        commitAnnotations(next, { note: '', error: '' })
+        return true
+      }
+
+      /** Leave the edit without saving. */
+      function cancelAnnotationEdit() {
+        return closeAnnotationSurface()
+      }
+
+      /** Remove one collected annotation (also used from the edit body). */
+      function removeAnnotation(id) {
+        const next = state.annotations.filter((item) => item.id !== id)
+        if (next.length === state.annotations.length) return false
+        // Removing the note under the editor closes it; removing any other note
+        // leaves the editor and whatever was typed in it alone.
+        persistNotes(next)
+        if (state.annotationEditingId === id) closeAnnotationSurface({ annotations: next })
+        else settleAnnotation({ annotations: next })
+        return true
+      }
+
+      /**
+       * Copy the captured passage. Resolves to whether the clipboard took it;
+       * the card reports that in place, the way ds-popup's copy button does.
+       */
+      function copyDraftQuote() {
+        const quote = state.annotationDraft?.quote
+        if (typeof quote !== 'string' || quote === '') return Promise.resolve(false)
+        try {
+          const clipboard = navigator.clipboard
+          if (typeof clipboard?.writeText !== 'function') return Promise.resolve(false)
+          return Promise.resolve(clipboard.writeText(quote)).then(
+            () => true,
+            () => false,
+          )
+        } catch {
+          return Promise.resolve(false)
+        }
+      }
+
+      // --- painted highlights ---------------------------------------------
+
+
+      /**
+       * Whether this pass may search the whole transcript for a passage whose
+       * row is gone.
+       *
+       * The transcript re-renders per token, so a repaint runs every 120 ms
+       * while the agent streams. Searching every flow item's text on each one
+       * is what made a long conversation stutter: the search is allowed once
+       * per generation of flow items, and at most once per MISS_RESCAN_MS.
+       */
+      function canSearchAnchors(now) {
+        return anchorEpoch !== searchEpoch || now - searchAt >= MISS_RESCAN_MS
+      }
+
+      /** Record that this pass searched; later passes wait for the next change. */
+      function noteAnchorSearch(now) {
+        searchEpoch = anchorEpoch
+        searchAt = now
+      }
+
+      /**
+       * The anchor of a note that carries none of its own, resolved by quote.
+       * Cached per flow-item generation, so a passage that is still absent is
+       * not looked for again on every repaint.
+       */
+      function anchorOfQuote(quote, canSearch, now) {
+        const cached = quoteAnchors.get(quote)
+        // A result is good for one flow-item generation, and no longer than the
+        // retry window: the passage can appear inside a row that already exists.
+        const fresh =
+          cached !== undefined && cached.epoch === anchorEpoch && now - cached.at < MISS_RESCAN_MS
+        if (fresh) return cached.anchor
+        if (!canSearch) return cached === undefined ? null : cached.anchor
+        const anchor = anchorFromQuote(quote)
+        quoteAnchors.set(quote, { anchor, epoch: anchorEpoch, at: now })
+        noteAnchorSearch(now)
+        return anchor
+      }
+
+      /**
+       * Paint a note whose stored offsets went stale while its text still sits
+       * in the same row. Only an unambiguous passage is painted here; an
+       * ambiguous one falls through to the recovery pass, which can prove the
+       * row is the only carrier.
+       */
+      function rangeWithinElement(entry, key, full) {
+        const packed = packedText(entry.anchor.quote)
+        if (packed === '') return null
+        const at = full.packed.indexOf(packed)
+        if (at === -1) return null
+        if (full.packed.indexOf(packed, at + 1) !== -1) return null
+        const range = rangeFromPacked(full, at, at + packed.length)
+        if (range === null) return null
+        if (entry.note !== null && typeof entry.note?.id === 'string') {
+          resolvedAnchors.set(entry.note.id, {
+            key,
+            quote: packed,
+            prefix: full.packed.slice(Math.max(0, at - CONTEXT_CHARS), at),
+            suffix: full.packed.slice(at + packed.length, at + packed.length + CONTEXT_CHARS),
+            index: at,
+          })
+        }
+        return range
+      }
+
+      /** Recompute which spans carry a note and repaint the CSS highlight. */
+      function repaintHighlights() {
+        highlighted = []
+        const registry = window.CSS?.highlights
+        if (registry === undefined) return
+        try {
+          const captureDraft = state.annotationDraft
+          const captureAnchor =
+            captureDraft !== null && captureDraft.anchor != null ? captureDraft.anchor : null
+          const sources = state.annotations
+          if (state.quick !== true || (sources.length === 0 && captureDraft === null)) {
+            registry.delete(HIGHLIGHT_NAME)
+            registry.delete(CAPTURE_HIGHLIGHT)
+            return
+          }
+          const byKey = new Map()
+          const now = Date.now()
+          const canSearch = canSearchAnchors(now)
+          // Notes saved before this build (or while the page was mid-stream) can
+          // carry no anchor. The quote still identifies the passage, so resolve
+          // it once per distinct quote and never draw a guess.
+          const recovered = new Map()
+          for (const note of sources) {
+            let anchor = resolvedAnchors.get(note.id) ?? note.anchor
+            if (typeof anchor?.key !== 'string') {
+              const quote = typeof note.quote === 'string' ? note.quote : ''
+              if (!recovered.has(quote)) recovered.set(quote, anchorOfQuote(quote, canSearch, now))
+              anchor = recovered.get(quote)
+            }
+            if (anchor === null || typeof anchor !== 'object' || typeof anchor.key !== 'string') continue
+            // A note without an anchor of its own keeps the one found here, so
+            // the next repaint takes the direct path instead of asking again.
+            if (typeof note.id === 'string') resolvedAnchors.set(note.id, anchor)
+            if (!byKey.has(anchor.key)) byKey.set(anchor.key, [])
+            byKey.get(anchor.key).push({ note, anchor, capture: false })
+          }
+          if (captureAnchor !== null && typeof captureAnchor.key === 'string') {
+            if (!byKey.has(captureAnchor.key)) byKey.set(captureAnchor.key, [])
+            byKey.get(captureAnchor.key).push({ note: null, anchor: captureAnchor, capture: true })
+          }
+          if (byKey.size === 0) {
+            registry.delete(HIGHLIGHT_NAME)
+            let painted = false
+            const fallback = captureDraft?.range
+            try {
+              if (fallback && fallback.collapsed !== true) {
+                registry.set(CAPTURE_HIGHLIGHT, new window.Highlight(fallback))
+                painted = true
+              }
+            } catch {
+              painted = false
+            }
+            if (!painted) registry.delete(CAPTURE_HIGHLIGHT)
+            return
+          }
+          const elements = document.querySelectorAll?.(ANCHOR_SELECTOR) ?? []
+          const maps = new Map()
+          const ranges = []
+          const captureRanges = []
+          const misses = []
+          for (const element of elements) {
+            const key = element.getAttribute?.('data-chat-anchor-key')
+            const wanted = byKey.get(key)
+            if (wanted === undefined) continue
+            let full = maps.get(key)
+            if (full === undefined) {
+              full = packedMapOf(element)
+              maps.set(key, full)
+            }
+            for (const entry of wanted) {
+              const span = locateAnchor(full, entry.anchor)
+              let range = span === null ? null : rangeFromPacked(full, span.start, span.end)
+              // The row is here but the stored offsets drifted: the passage is
+              // still inside it, so heal it without searching the transcript.
+              if (range === null) range = rangeWithinElement(entry, key, full)
+              if (range === null) {
+                misses.push({ entry, quote: entry.anchor.quote })
+                continue
+              }
+              if (entry.capture === true) {
+                captureRanges.push(range)
+                continue
+              }
+              ranges.push(range)
+              highlighted.push({ note: entry.note, range })
+            }
+          }
+          // A key that names no element is the other half of the same problem:
+          // the row was re-keyed between the click and this repaint. Both cases
+          // fall through to one recovery pass over the quotes — the passage is
+          // identified by its text, not by the row that happened to hold it.
+          for (const [key, wanted] of byKey) {
+            if (maps.has(key)) continue
+            for (const entry of wanted) misses.push({ entry, quote: entry.anchor.quote })
+          }
+          // The search is the expensive pass: one per flow-item generation (or
+          // per retry window), never once per repaint.
+          if (canSearch && misses.length > 0) noteAnchorSearch(now)
+          const searchable = canSearch ? misses : []
+          for (const miss of searchable) {
+            const packed = packedText(miss.quote)
+            if (packed === '') continue
+            const holders = []
+            for (const element of elements) {
+              const key = element.getAttribute?.('data-chat-anchor-key')
+              if (typeof key !== 'string') continue
+              let full = maps.get(key)
+              if (full === undefined) {
+                full = packedMapOf(element)
+                maps.set(key, full)
+              }
+              if (full.packed.indexOf(packed) === -1) continue
+              holders.push({ key, full })
+            }
+            // One holder or none: painting the wrong row is worse than letting
+            // the mark wait for the render that brings its passage back.
+            if (holders.length !== 1) continue
+            const index = holders[0].full.packed.indexOf(packed)
+            const range = rangeFromPacked(holders[0].full, index, index + packed.length)
+            if (range === null) continue
+            if (miss.entry.capture === true) {
+              captureRanges.push(range)
+              continue
+            }
+            ranges.push(range)
+            highlighted.push({ note: miss.entry.note, range })
+            // Heal the anchor so the next repaint takes the direct path.
+            if (miss.entry.note !== null && typeof miss.entry.note?.id === 'string') {
+              resolvedAnchors.set(miss.entry.note.id, {
+                key: holders[0].key,
+                quote: packed,
+                prefix: holders[0].full.packed.slice(Math.max(0, index - CONTEXT_CHARS), index),
+                suffix: holders[0].full.packed.slice(index + packed.length, index + packed.length + CONTEXT_CHARS),
+                index,
+              })
+            }
+          }
+          // An unchanged set keeps its Highlight: replacing it makes the browser
+          // repaint every mark on the page for nothing.
+          if (ranges.length === 0) registry.delete(HIGHLIGHT_NAME)
+          else if (!sameRanges(registry.get(HIGHLIGHT_NAME), ranges)) {
+            registry.set(HIGHLIGHT_NAME, new window.Highlight(...ranges))
+          }
+          if (captureAnchor === null && captureDraft !== null && captureDraft.range) {
+            try {
+              if (captureDraft.range.collapsed !== true) captureRanges.push(captureDraft.range)
+            } catch {
+              /* stale range */
+            }
+          }
+          if (captureRanges.length === 0) registry.delete(CAPTURE_HIGHLIGHT)
+          else if (!sameRanges(registry.get(CAPTURE_HIGHLIGHT), captureRanges)) {
+            registry.set(CAPTURE_HIGHLIGHT, new window.Highlight(...captureRanges))
+          }
+        } catch (error) {
+          console.warn('[dsh-nudge] highlight repaint failed', error)
+        }
+      }
+
+      /** Coalesce repaint triggers into one frame-ish task. */
+      function scheduleRepaint() {
+        if (repaintTimer !== undefined || state.quick !== true) return
+        // Nothing painted and nothing being captured: a streaming transcript
+        // mutates the DOM constantly, and this runs on every mutation.
+        if (state.annotations.length === 0 && state.annotationDraft === null) return
+        repaintTimer = setTimeout(() => {
+          repaintTimer = undefined
+          repaintHighlights()
+        }, 120)
+      }
+
+      /**
+       * Whether a painted mark lost its text. A mark is a live Range over the
+       * transcript's text nodes; when the shell re-renders that row it swaps
+       * in fresh nodes with the same text, the old range collapses, and the
+       * passage shows unpainted until the next repaint.
+       */
+      function paintedMarkBroken() {
+        for (const entry of highlighted) {
+          try {
+            const range = entry.range
+            if (range.collapsed === true) return true
+            if (range.startContainer?.isConnected === false) return true
+          } catch {
+            return true
+          }
+        }
+        return false
+      }
+
+      /**
+       * Whether one mutation record touches the transcript. A change that sits
+       * in a flow item, or that brings one in or takes one away, can move a
+       * mark; a change outside every flow item — this window, the shell's own
+       * chrome — cannot, so it must not repaint.
+       */
+      function transcriptChanged(record) {
+        let touched = false
+        const target = record?.target
+        const element = target?.nodeType === 1 ? target : (target?.parentElement ?? null)
+        if (typeof element?.closest === 'function' && element.closest(ANCHOR_SELECTOR) !== null) {
+          touched = true
+        }
+        for (const list of [record?.addedNodes, record?.removedNodes]) {
+          for (const node of list ?? []) {
+            if (node?.nodeType !== 1) continue
+            if (node.matches?.(ANCHOR_SELECTOR) || node.querySelector?.(ANCHOR_SELECTOR)) touched = true
+          }
+        }
+        return touched
+      }
+
+      /**
+       * The page changed. Only a change to the transcript can move a mark, so
+       * nothing else repaints. A broken mark is repainted right here: an
+       * observer callback runs before the browser paints the frame, so the
+       * passage never shows unpainted. Any other transcript change keeps the
+       * debounce.
+       */
+      function onTranscriptMutation(records) {
+        // A row that arrives, leaves or is re-keyed is also the only thing that
+        // can bring back a passage whose row is gone.
+        if (flowAnchorsChanged(records)) anchorEpoch += 1
+        if (state.quick !== true) return
+        let relevant = false
+        for (const record of records ?? []) {
+          if (transcriptChanged(record)) relevant = true
+        }
+        if (!relevant) return
+        if (!paintedMarkBroken()) {
+          scheduleRepaint()
+          return
+        }
+        if (repaintTimer !== undefined) {
+          clearTimeout(repaintTimer)
+          repaintTimer = undefined
+        }
+        repaintHighlights()
+      }
+
+      /**
+       * The annotated passage under a viewport point and the box the point hit,
+       * or null. The box is what the in-place editor hangs off.
+       */
+      function noteAtPoint(x, y) {
+        for (let index = highlighted.length - 1; index >= 0; index -= 1) {
+          const entry = highlighted[index]
+          let rects
+          try {
+            rects = entry.range.getClientRects()
+          } catch {
+            continue
+          }
+          for (const rect of rects) {
+            if (rect.width === 0 && rect.height === 0) continue
+            if (x >= rect.left - 2 && x <= rect.right + 2 && y >= rect.top - 2 && y <= rect.bottom + 2) {
+              return { note: entry.note, rect: rectValue(rect) }
+            }
+          }
+        }
+        return null
+      }
+
+      /** Clicking a painted passage reopens its note for editing. */
+      function onTranscriptClick(event) {
+        if (state.quick !== true || highlighted.length === 0) return
+        // Only a click that lands on a transcript row can reopen a note. A
+        // click in the composer, a menu or a control belongs to something
+        // else: taking its focus would put the next Enter in our editor.
+        const target = event?.target
+        if (!target || typeof target.closest !== 'function') return
+        if (target.closest(ANCHOR_SELECTOR) === null) return
+        if (inEditable(target)) return
+        if (target.closest(MODAL_SELECTOR) !== null) return
+        if (target.closest('button, a, input, textarea, select, [role="button"]') !== null) return
+        try {
+          const selection = window.getSelection?.()
+          if (selection && selection.isCollapsed === false) return
+        } catch {
+          /* no selection object */
+        }
+        const hit = noteAtPoint(event.clientX, event.clientY)
+        if (hit === null) return
+        startEditAnnotation(hit.note.id, hit.rect)
+      }
+
+      /**
+       * Whether a pointer that ended a selection is plausibly next to it.
+       *
+       * A `mouseup` is document-wide, so it can belong to a click that has
+       * nothing to do with the live selection (a sidebar click that does not
+       * collapse it, a drag that ends outside the transcript). Anchoring the
+       * card to such a pointer puts it wherever that click happened; the quote
+       * box is the only trustworthy anchor then.
+       */
+      function pointerNearRect(pointer, rect, slack = 24) {
+        if (!pointer || !rect) return false
+        return (
+          pointer.x >= rect.left - slack &&
+          pointer.x <= rect.right + slack &&
+          pointer.y >= rect.top - slack &&
+          pointer.y <= rect.bottom + slack
+        )
+      }
+
+      /**
+       * Viewport box for the selection card: pinned to the pointer that finished
+       * the selection, opened below-right of it when there is room and flipped to
+       * the other side when the viewport edge is near. Without a pointer — or
+       * when the pointer belongs to a click elsewhere — it falls back to the
+       * quote box, centred above/below it.
+       */
+      function popupPosition() {
+        const draft = state.annotationDraft
+        const width = 340
+        const margin = 8
+        const gap = 10
+        const offset = 12
+        const approxHeight = 280
+        const vw = viewport().width
+        const vh = viewport().height
+        const boxWidth = Math.min(width, vw - margin * 2)
+        const rect = draft?.rect ?? null
+        const pointer = pointerNearRect(draft?.pointer, rect) ? draft.pointer : null
+        const clampX = (value) => Math.max(margin, Math.min(value, vw - boxWidth - margin))
+        if (pointer) {
+          const { x, y } = pointer
+          const flipLeft = x + offset + boxWidth > vw - margin
+          const leftValue = flipLeft ? clampX(x - offset - boxWidth) : clampX(x + offset)
+          // The card grows out of the point that opened it. Horizontally only:
+          // an upward card is pinned by its bottom edge, so y is always the
+          // anchor line and a vertical origin would move the card on frame one.
+          const origin = {
+            transformOrigin: `${Math.round(Math.max(0, Math.min(x - leftValue, boxWidth)))}px 0px`,
+          }
+          const top = y + offset
+          if (top + approxHeight <= vh - margin) {
+            return { left: `${Math.round(leftValue)}px`, top: `${Math.round(top)}px`, ...origin, transform: 'none' }
+          }
+          // Not enough room below: open above the cursor instead.
+          const aboveTop = Math.max(margin, y - offset)
+          return {
+            left: `${Math.round(leftValue)}px`,
+            top: `${Math.round(aboveTop)}px`,
+            ...origin,
+            transform: 'translateY(-100%)',
+          }
+        }
+        return placeOverRect(rect, approxHeight)
+      }
+
+      /**
+       * Place a 340-wide card over one viewport box: centred on it, above when
+       * there is room, otherwise below and clamped into the viewport. Without a
+       * box it parks in the top-right corner.
+       */
+      function placeOverRect(rect, approxHeight) {
+        const width = 340
+        const margin = 8
+        const gap = 10
+        const vw = viewport().width
+        const vh = viewport().height
+        const boxWidth = Math.min(width, vw - margin * 2)
+        const clampX = (value) => Math.max(margin, Math.min(value, vw - boxWidth - margin))
+        if (!rect) {
+          return {
+            left: `${Math.max(margin, vw - boxWidth - margin)}px`,
+            top: '96px',
+            transformOrigin: '0px 0px',
+            transform: 'none',
+          }
+        }
+        // A stored quote box may lack width (an older draft); NaN here would
+        // invalidate `left` and leave the card at the overlay's origin.
+        const rectWidth = Number.isFinite(rect.width) ? rect.width : rect.right - rect.left
+        const anchorX = rect.left + rectWidth / 2
+        const left = clampX(anchorX - boxWidth / 2)
+        const origin = {
+          transformOrigin: `${Math.round(Math.max(0, Math.min(anchorX - left, boxWidth)))}px 0px`,
+        }
+        if (rect.top - gap - approxHeight >= margin) {
+          return {
+            left: `${Math.round(left)}px`,
+            top: `${Math.round(rect.top - gap)}px`,
+            ...origin,
+            transform: 'translateY(-100%)',
+          }
+        }
+        const below = rect.bottom + gap
+        const top = Math.min(below, Math.max(margin, vh - approxHeight - margin))
+        return { left: `${Math.round(left)}px`, top: `${Math.round(top)}px`, ...origin, transform: 'none' }
+      }
+
+      /** Where the in-place note editor hangs: over the box that opened it. */
+      function editPopupPosition() {
+        return placeOverRect(state.annotationEditRect, 220)
+      }
+
+      /**
+       * Close the selection card, dropping its draft. The native selection is
+       * left alone: a press outside the card is not a request to stop selecting.
+       * Committing a note clears the native selection in addAnnotation().
+       */
+      function closePopup() {
+        const draft = state.annotationDraft
+        if (draft === null && state.annotationEditingId === null) return false
+        if (typeof document !== 'undefined' && document.activeElement?.closest?.(SELF_SELECTOR)) {
+          try {
+            document.activeElement.blur()
+          } catch {
+            /* nothing focused */
+          }
+        }
+        return closeAnnotationSurface()
+      }
+
+      /**
+       * A press anywhere outside the card closes it: the popup owns no focus
+       * until its own field is clicked, so a click elsewhere is just the
+       * reader moving on. A Shift+press is the exception: it extends the
+       * captured passage, so the draft and its anchor must survive.
+       */
+      function onOuterPointerDown(event) {
+        cancelPendingCapture()
+        if (state.quick !== true) return
+        if (state.annotationDraft === null && state.annotationEditingId === null) return
+        if (event?.shiftKey === true && state.annotationDraft !== null) return
+        const target = event.target
+        if (target && typeof target.closest === 'function' && target.closest(SELF_SELECTOR)) return
+        closePopup()
+      }
+
+      /** Scroll and Escape close the selection card, like the old popup did. */
+      function onPopupDismiss(event) {
+        // Scrolling inside the card's own field/list must not dismiss it.
+        if (
+          event &&
+          event.target &&
+          typeof event.target.closest === 'function' &&
+          event.target.closest(SELF_SELECTOR)
+        ) {
+          return
+        }
+        // A scroll that trails the release (smooth scrolling, auto-scroll while
+        // dragging) is not a request to stop: a pending capture is left alone.
+        // A card that is already open stows itself instead of dropping the
+        // passage, so a following Shift+press can still extend it.
+        if (state.annotationDraft === null) return
+        if (state.annotationCardHidden === true) return
+        setState({ annotationCardHidden: true })
+      }
+
+      /** True while a Shift+drag is extending the captured passage. */
+      let extending = false
+      /** The leading edge the extension grows from, or null. */
+      let extendAnchor = null
+
+      /** The caret under a viewport point, or null when the browser cannot say. */
+      function caretRangeAt(x, y) {
+        try {
+          if (typeof document.caretRangeFromPoint === 'function') {
+            return document.caretRangeFromPoint(x, y) ?? null
+          }
+          if (typeof document.caretPositionFromPoint === 'function') {
+            const position = document.caretPositionFromPoint(x, y)
+            if (!position) return null
+            const range = document.createRange()
+            range.setStart(position.offsetNode, position.offset)
+            range.collapse(true)
+            return range
+          }
+        } catch {
+          return null
+        }
+        return null
+      }
+
+      /**
+       * Grow the captured passage away from the gesture's start end to the
+       * pointer.
+       *
+       * The card holds the focus, and focusing it collapsed the native selection,
+       * so the browser's own Shift+click has no anchor left. The end the gesture
+       * started from is the anchor (it is the lower edge for an upward drag), and
+       * the pointer is turned into a caret range; the resulting selection is
+       * written back into the draft so the card follows.
+       */
+      function extendTo(x, y) {
+        const draft = state.annotationDraft
+        if (draft === null || extendAnchor === null) return false
+        const caret = caretRangeAt(x, y)
+        if (caret === null) return false
+        const selection = window.getSelection?.()
+        if (!selection) return false
+        try {
+          selection.removeAllRanges()
+          selection.setBaseAndExtent(
+            extendAnchor.node,
+            extendAnchor.offset,
+            caret.startContainer,
+            caret.startOffset,
+          )
+        } catch {
+          return false
+        }
+        if (selection.isCollapsed) return false
+        const range = selection.getRangeAt(0)
+        const quote = tidyQuote(selection.toString())
+        if (quote.trim() === '') return false
+        let rect = null
+        try {
+          rect = range.getBoundingClientRect()
+        } catch {
+          rect = null
+        }
+        if (rect !== null && rect.width === 0 && rect.height === 0) rect = null
+        let anchor = null
+        try {
+          anchor = anchorFromRange(range, quote)
+        } catch {
+          anchor = null
+        }
+        // Only the draft changes: the note already typed and the editor stay.
+        settleAnnotation({
+          annotationDraft: {
+            quote,
+            anchor,
+            range,
+            // Keep the gesture's original start end: consecutive Shift+presses
+            // grow away from it, whichever direction the first drag ran.
+            anchorPoint: draft.anchorPoint,
+            rect: rect
+              ? {
+                  left: rect.left,
+                  top: rect.top,
+                  right: rect.right,
+                  bottom: rect.bottom,
+                  width: rect.width,
+                  height: rect.height,
+                }
+              : null,
+            pointer: null,
+          },
+          annotationCardHidden: false,
+        })
+        return true
+      }
+
+      /** Shift+press on the transcript keeps extending the captured passage. */
+      function onExtendPointerDown(event) {
+        if (state.quick !== true || event?.shiftKey !== true) return
+        const draft = state.annotationDraft
+        if (draft === null || state.annotationEditingId !== null) return
+        const target = event.target
+        if (target && typeof target.closest === 'function') {
+          if (target.closest(EDITABLE_SELECTOR)) return
+          if (target.closest(MODAL_SELECTOR)) return
+          if (target.closest(SELF_SELECTOR)) return
+        }
+        let anchor = null
+        if (draft.anchorPoint && draft.anchorPoint.node) {
+          anchor = draft.anchorPoint
+        } else {
+          // Drafts captured before this build carry only the range.
+          try {
+            const range = draft.range && typeof draft.range.cloneRange === 'function' ? draft.range.cloneRange() : null
+            if (range !== null) {
+              range.collapse(true)
+              anchor = { node: range.startContainer, offset: range.startOffset }
+            }
+          } catch {
+            anchor = null
+          }
+        }
+        if (anchor === null) return
+        extendAnchor = anchor
+        extending = true
+        // Keep the caret in the card and stop the browser from starting a fresh
+        // selection at the press point.
+        event.preventDefault?.()
+        extendTo(event.clientX, event.clientY)
+      }
+
+      function onExtendPointerMove(event) {
+        if (!extending) return
+        if (typeof event?.buttons === 'number' && (event.buttons & 1) === 0) {
+          extending = false
+          extendAnchor = null
+          return
+        }
+        extendTo(event.clientX, event.clientY)
+      }
+
+      function onExtendPointerUp() {
+        extending = false
+        extendAnchor = null
+      }
+
+      /**
+       * True when the focused node is one of our own text fields and it holds a
+       * real (non-empty) text selection: there the browser's own copy wins.
+       */
+      function fieldHasSelection() {
+        try {
+          const active = document.activeElement
+          if (!active || typeof active.selectionStart !== 'number') return false
+          if (typeof active.closest !== 'function' || active.closest(SELF_SELECTOR) === null) return false
+          return active.selectionStart !== active.selectionEnd
+        } catch {
+          return false
+        }
+      }
+
+      /** Ctrl/Cmd+C while a card is open, with no selection inside our fields. */
+      function copyShortcutActive(event) {
+        if (state.annotationDraft === null) return false
+        if (event.ctrlKey !== true && event.metaKey !== true) return false
+        if (event.altKey === true || event.shiftKey === true) return false
+        return typeof event.key === 'string' && event.key.toLowerCase() === 'c'
+      }
+
+      function onPopupKeydown(event) {
+        if (event?.key === 'Escape' && state.settingsOpen) {
+          event.preventDefault()
+          closeSettings()
+          return
+        }
+        if (event?.key === 'Escape' && state.annotationDraft !== null) {
+          event.preventDefault()
+          closePopup()
+          return
+        }
+        if (event?.key === 'Escape' && state.annotationEditingId !== null) {
+          event.preventDefault()
+          cancelAnnotationEdit()
+          return
+        }
+        if (!copyShortcutActive(event)) return
+        if (fieldHasSelection()) return
+        // Focusing the note field drops the editor's native selection, so the
+        // browser has nothing left to copy. The card owns the passage: copy it
+        // ourselves and keep Ctrl+C working, which is the point of the card.
+        event.preventDefault()
+        copyDraftQuote().then((ok) => notify(ok ? text('copiedShort') : text('copyFailedShort')))
+      }
+
+      /** Put one text block in at the caret; false when the shell refused it. */
+      function spliceAtCaret(handle, value) {
+        if (value === '') return true
+        if (typeof handle.insertText !== 'function' || typeof handle.captureInsertion !== 'function') return false
+        try {
+          const span = handle.captureInsertion()
+          if (!span || typeof span.start !== 'number' || typeof span.end !== 'number') return false
+          return handle.insertText(value, span) === true
+        } catch {
+          return false
+        }
+      }
+
+      /**
+       * Write the pending annotations as the shell's own quote previews: one
+       * quote node per passage, the answer as plain text on the line below it.
+       * This is the node DSH inserts for a quoted selection, so the draft shows
+       * the quote mark instead of a run of `>` lines — and the node serializes
+       * back to the very Markdown a sent message carries.
+       *
+       * Reports how far it got and the blank-line break it already placed, so
+       * a shell that stops taking quotes mid-batch can finish the rest as text
+       * without doubling the gap. `attempted: false` means the shell has no
+       * quote face (or is not idle): the caller keeps its text path.
+       */
+      function writeQuotedBatch(handle, pending, draft) {
+        const skipped = { attempted: false, written: 0, lead: '', gap: false }
+        if (typeof handle.insertQuote !== 'function') return skipped
+        if (typeof handle.insertText !== 'function' || typeof handle.captureInsertion !== 'function') return skipped
+        // The shell only takes a quote into a plain composer; a sending or
+        // decided composer is the text path's business.
+        let phase = ''
+        try {
+          phase = handle.readPhase?.() ?? ''
+        } catch {
+          phase = ''
+        }
+        if (phase !== '' && phase !== 'plain') return skipped
+        const result = { attempted: true, written: 0, lead: '', gap: false }
+        const caret = () => {
+          try {
+            const span = handle.captureInsertion()
+            return span && typeof span.start === 'number' ? span : undefined
+          } catch {
+            return undefined
+          }
+        }
+        try {
+          const first = caret()
+          if (first === undefined) {
+            result.attempted = false
+            return result
+          }
+          const lead = blockBreak(draft.slice(0, first.start))
+          if (lead !== '' && handle.insertText(lead, first) !== true) {
+            result.attempted = false
+            return result
+          }
+          result.lead = lead
+          for (let index = 0; index < pending.length; index += 1) {
+            const item = pending[index]
+            const quote = tidyQuote(item.quote)
+            if (quote.trim() === '') break
+            // A refused quote leaves the last written note where it is; the
+            // separator for this slot is what `gap` reports.
+            if (handle.insertQuote(quote) !== true) {
+              result.gap = index > 0
+              break
+            }
+            result.written += 1
+            const note = annotationNoteLine(item)
+            if (note !== '') {
+              const span = caret()
+              if (span === undefined || handle.insertText(`\n${note}`, span) !== true) break
+            }
+            if (index === pending.length - 1) break
+            const span = caret()
+            if (span === undefined || handle.insertText('\n\n\n', span) !== true) break
+            result.gap = true
+          }
+        } catch {
+          return result
+        }
+        return result
+      }
+
+      /** Append every pending annotation to the composer draft. */
+      function writeAnnotations() {
+        const pending = pendingAnnotations()
+        if (pending.length === 0) return false
+        const handle = composer
+        if (handle === undefined || typeof handle.setDraft !== 'function') {
+          setState({ note: text('insertUnavailable'), error: '' })
+          return false
+        }
+        const body = annotationsText(pending)
+        if (body === '') return false
+        let draft = ''
+        try {
+          draft = handle.readDraft?.() ?? ''
+        } catch {
+          draft = ''
+        }
+        if (typeof draft !== 'string') draft = ''
+        // Preferred: the shell's quote preview per passage. Whatever it could
+        // not take stays pending; the rest of the batch is written as text.
+        const quoted = writeQuotedBatch(handle, pending, draft)
+        let writtenCount = quoted.written
+        if (writtenCount < pending.length && writtenCount > 0) {
+          const rest = annotationsText(pending.slice(writtenCount))
+          if (spliceAtCaret(handle, (quoted.gap ? '' : '\n\n\n') + rest)) writtenCount = pending.length
+        }
+        if (writtenCount < pending.length && writtenCount === 0) {
+          // The text path: splice at the caret first, then rebuild. `setDraft`
+          // rebuilds every paragraph and drops the caret at the end, which is
+          // exactly what a write in the middle of typing must not do; the
+          // rebuild stays as the fallback for a shell without the insertion
+          // face, or for a draft that moved. A leading break the quote path
+          // already placed is not put in twice.
+          let written = false
+          if (typeof handle.insertText === 'function' && typeof handle.captureInsertion === 'function') {
+            try {
+              const span = handle.captureInsertion()
+              if (span && typeof span.start === 'number' && typeof span.end === 'number') {
+                const lead = quoted.lead !== '' ? '' : blockBreak(draft.slice(0, span.start))
+                written = handle.insertText(lead + body, span) === true
+              }
+            } catch {
+              written = false
+            }
+          }
+          if (written) {
+            writtenCount = pending.length
+          } else {
+            const next = draft.trim() === '' ? body : `${draft}${blockBreak(draft)}${body}`
+            try {
+              handle.setDraft(next)
+            } catch (error) {
+              console.warn('[dsh-nudge] annotation write failed', error)
+              setState({ note: text('insertUnavailable'), error: '' })
+              return false
+            }
+            writtenCount = pending.length
+          }
+        }
+        if (writtenCount === 0) {
+          setState({ note: text('insertUnavailable'), error: '' })
+          return false
+        }
+        // The note leaves the pending set but stays in the tray and keeps its
+        // passage painted: a mark belongs to the conversation, not to the
+        // draft. Clearing the input box no longer takes it away — only
+        // deleting the note does.
+        const ids = new Set(pending.slice(0, writtenCount).map((item) => item.id))
+        const marked = state.annotations.map((item) =>
+          ids.has(item.id) ? { ...item, written: true } : item,
+        )
+        commitAnnotations(marked, { note: '', error: '' })
+        return true
+      }
+
+      /** Send the pending annotations as one user message. */
+      function sendAnnotations() {
+        if (state.phase === 'waiting') return false
+        const pending = pendingAnnotations()
+        if (pending.length === 0) return false
+        const body = annotationsText(pending)
+        if (body === '') return false
+        if (!deliver(body)) return false
+        // What was just sent lives in the conversation now; the notes already
+        // written into the draft keep their marks.
+        const ids = new Set(pending.map((item) => item.id))
+        const next = state.annotations.filter((item) => !ids.has(item.id))
+        commitAnnotations(next)
+        return true
+      }
+
+      /** Deliver one message into the on-screen session. */
+      function deliver(message) {
+        if (typeof message !== 'string' || message.trim() === '') return false
+        const target = resolveTarget(ctx) ?? state.target
+        if (!target) {
+          setState({ phase: 'error', error: text('noSession'), note: '' })
+          return false
+        }
+        // 6.3: the agent's ball is in the user's court; a second request would
+        // only stack two pending inputs, so refuse with the reason.
+        if (statusOf(ctx, target.sessionId)?.pendingInteraction) {
+          setState({ phase: 'error', error: text('waitingQuestion'), note: '' })
+          return false
+        }
+        const remote = sessionRemoteOf(ctx)
+        if (!remote) {
+          setState({ phase: 'error', error: text('transportMissing'), note: '' })
+          return false
+        }
+        const delivery = isDelivery(state.deliveryOverride)
+          ? state.deliveryOverride
+          : DEFAULT_DELIVERY
+        const mode = delivery === 'steer' ? 'steer' : 'queue'
+        const requestId = mintRequestId()
+        const controller = new AbortController()
+        const entry = {
+          sessionId: target.sessionId,
+          requestId,
+          probeText: message,
+          sawRunning: statusOf(ctx, target.sessionId)?.running === true,
+          settleTimer: undefined,
+          idleTimer: undefined,
+          receiptTimer: undefined,
+          timeoutTimer: undefined,
+          eventSource: undefined,
+          unsubscribeEvents: undefined,
+          sinceSeq: 0,
+          probeSeq: undefined,
+          stepSeq: undefined,
+        }
+        waiting = entry
+        setState({ phase: 'waiting', note: '', error: '', target })
+        const eventRoute = beginEventWatch(entry)
+
+        entry.timeoutTimer = setTimeout(function onTimeout() {
+          if (!waiting || waiting !== entry) return
+          // A long turn is the normal case for a follow-up nudge: keep waiting
+          // while the agent is still running instead of declaring it late.
+          if (statusOf(ctx, entry.sessionId)?.running === true) {
+            setState({ note: text('stillRunningNote') })
+            entry.timeoutTimer = setTimeout(onTimeout, WAIT_TIMEOUT_MS)
+            return
+          }
+          if (eventRoute) finishError(text('timeoutNote'))
+          else finishDone(text('timeoutNote'))
+        }, WAIT_TIMEOUT_MS)
+        if (eventRoute) {
+          entry.receiptTimer = setTimeout(function onReceipt() {
+            if (!waiting || waiting !== entry) return
+            if (entry.probeSeq !== undefined) return
+            if (statusOf(ctx, entry.sessionId)?.running === true) {
+              entry.receiptTimer = setTimeout(onReceipt, EVENT_RECEIPT_MS)
+              return
+            }
+            finishError(text('noReceiptNote'))
+          }, EVENT_RECEIPT_MS)
+        } else {
+          // No durable window to watch: fall back to the running-state heuristic.
+          entry.idleTimer = setTimeout(() => {
+            if (!waiting || waiting !== entry) return
+            if (entry.sawRunning) return
+            // The unified status may still report the turn: trust it over the timer.
+            if (statusOf(ctx, entry.sessionId)?.running === true) {
+              entry.sawRunning = true
+              return
+            }
+            finishDone(text('unconfirmedNote'))
+          }, IDLE_CONFIRM_MS)
+        }
+
+        let request
+        try {
+          request = remote.prompt(
+            {
+              requestId,
+              sessionId: target.sessionId,
+              mode,
+              content: [{ type: 'text', text: message }],
+              clientTimeZone: timeZoneOf(),
+            },
+            controller.signal,
+          )
+        } catch (error) {
+          finishError(describeFailure(error))
+          return false
+        }
+        Promise.resolve(request).then(
+          (result) => {
+            if (!waiting || waiting !== entry) return
+            const outcome = unwrapResult(result)
+            if (!outcome.ok) finishError(describeFailure(outcome.error))
+          },
+          (error) => {
+            if (!waiting || waiting !== entry) return
+            finishError(describeFailure(error))
+          },
+        )
+        return true
+      }
+
+      /** The preset a send/write uses: the chosen one when it is enabled. */
+      function activePreset() {
+        const chosen = presetOf(state.presets, state.presetId)
+        if (chosen !== undefined && chosen.enabled !== false) return chosen
+        return state.presets.find((preset) => preset.enabled !== false)
+      }
+
+      /** The primary button: write into the composer, or send the chosen preset. */
+      function ask() {
+        if (state.phase === 'waiting' && !canInsert()) return false
+        // With the caret in the composer the same button writes the chosen
+        // prompt into the draft instead of starting a turn.
+        if (canInsert()) return insertPreset()
+        const preset = activePreset()
+        if (!preset) return false
+        const delivered = deliver(preset.text)
+        if (delivered) countStat('send', preset.id)
+        return delivered
+      }
+
+      /** Whether the mounted composer already holds text. */
+      function composerHasText() {
+        if (composer === undefined) return false
+        try {
+          const draft = composer.readDraft?.()
+          return typeof draft === 'string' && draft.trim() !== ''
+        } catch {
+          return false
+        }
+      }
+
+      /**
+       * Turbo double-click on a preset: switch to it and use it. A composer
+       * that already holds text wins over sending — the prompt is appended,
+       * even when the caret is elsewhere, so a half-written message is never
+       * dropped just because the double-click did not land in the field.
+       */
+      function runPreset(id) {
+        if (setPreset(id) !== true) return false
+        if (composerHasText()) return insertPreset()
+        return ask()
+      }
+
+      /** Switch the delivery mode for this browser and remember it. */
+      function setDelivery(value) {
+        if (!isDelivery(value)) return false
+        persistSetting('delivery', value)
+        setState({ deliveryOverride: value })
+        notify(`${text('mode')}：${value === 'steer' ? text('steer') : text('queue')}`)
+        return true
+      }
+
+      /** The delivery actually used: browser override, else the single default. */
+      function effectiveDelivery() {
+        if (isDelivery(state.deliveryOverride)) return state.deliveryOverride
+        return DEFAULT_DELIVERY
+      }
+
+      /** Turbo mode: hide the primary button and run a prompt on double-click. */
+      function setTurbo(value) {
+        const next = value === true
+        persistSetting('turbo', next)
+        setState({ turbo: next })
+        notify(`${text('turboTitle')}：${next ? text('switchOn') : text('switchOff')}`)
+        return true
+      }
+
+      /** Switch the probe preset for this browser and remember it. */
+      function setPreset(value) {
+        if (presetOf(state.presets, value) === undefined) return false
+        persistSetting('preset', value)
+        setState({ presetId: value })
+        return true
+      }
+
+      /** Store one preset list, keeping the selection on an enabled preset. */
+      function commitPresets(next, preferredId) {
+        const list = normalizePresetList(next, state.lang)
+        persistSetting('presets', list)
+        let presetId = preferredId ?? state.presetId
+        const chosen = presetOf(list, presetId)
+        if (chosen === undefined || chosen.enabled === false) {
+          presetId = list.find((preset) => preset.enabled !== false)?.id ?? list[0]?.id ?? DEFAULT_PRESET
+        }
+        persistSetting('preset', presetId)
+        setState({ presets: list, presetId })
+      }
+
+      /** Add one user preset; returns the new id, or an error text. */
+      function addPreset(label, body) {
+        const value = typeof body === 'string' ? body.trim() : ''
+        if (value.length === 0) return { ok: false, error: text('presetTextRequired') }
+        const preset = {
+          id: mintPresetId(),
+          label: typeof label === 'string' && label.trim().length > 0 ? label.trim() : value.slice(0, 8),
+          text: value,
+          enabled: true,
+        }
+        commitPresets([...state.presets, preset], preset.id)
+        return { ok: true, id: preset.id }
+      }
+
+      /** Update one preset's label/text; empty text is refused. */
+      function updatePreset(id, patch) {
+        const current = presetOf(state.presets, id)
+        if (current === undefined) return { ok: false, error: text('presetTextRequired') }
+        const value = patch && typeof patch.text === 'string' ? patch.text.trim() : current.text
+        if (value.length === 0) return { ok: false, error: text('presetTextRequired') }
+        const label =
+          patch && typeof patch.label === 'string'
+            ? patch.label.trim().length > 0
+              ? patch.label.trim()
+              : value.slice(0, 8)
+            : current.label
+        commitPresets(
+          state.presets.map((preset) =>
+            preset.id === id ? { id, label, text: value, enabled: preset.enabled !== false } : preset,
+          ),
+          state.presetId,
+        )
+        if (state.presetEditingId === id) setState({ presetEditingId: null })
+        return { ok: true }
+      }
+
+      /** Remove one preset; the list may legitimately become empty. */
+      function removePreset(id) {
+        const next = state.presets.filter((preset) => preset.id !== id)
+        if (next.length === state.presets.length) return false
+        commitPresets(next, state.presetId === id ? next[0]?.id : state.presetId)
+        setState({
+          presetEditingId: state.presetEditingId === id ? null : state.presetEditingId,
+          presetOpen: state.presetOpen.filter((open) => open !== id),
+        })
+        return true
+      }
+
+      /**
+       * Enable or disable one preset. Disabled presets stay in settings but
+       * leave the window's prompt row, so the row only carries live prompts.
+       */
+      function setPresetEnabled(id, value) {
+        const current = presetOf(state.presets, id)
+        if (current === undefined) return false
+        const enabled = value === true
+        if ((current.enabled !== false) === enabled) return false
+        commitPresets(
+          state.presets.map((preset) => (preset.id === id ? { ...preset, enabled } : preset)),
+          state.presetId,
+        )
+        return true
+      }
+
+      /** Flip one preset between enabled and disabled. */
+      function togglePresetEnabled(id) {
+        const current = presetOf(state.presets, id)
+        if (current === undefined) return false
+        return setPresetEnabled(id, current.enabled === false)
+      }
+
+      /** Move one preset one slot up (`delta` -1) or down (+1); order persists. */
+      function movePreset(id, delta) {
+        const from = state.presets.findIndex((preset) => preset.id === id)
+        if (from < 0) return false
+        const step = delta < 0 ? -1 : 1
+        const to = from + step
+        if (to < 0 || to >= state.presets.length) return false
+        const next = [...state.presets]
+        const [moved] = next.splice(from, 1)
+        next.splice(to, 0, moved)
+        commitPresets(next, state.presetId)
+        return true
+      }
+
+      /** Move one preset to an absolute slot (drag and drop); order persists. */
+      function movePresetTo(id, index) {
+        const from = state.presets.findIndex((preset) => preset.id === id)
+        if (from < 0) return false
+        const target = Math.round(Number(index))
+        if (!Number.isFinite(target)) return false
+        const to = Math.max(0, Math.min(state.presets.length - 1, target))
+        if (to === from) return false
+        const next = [...state.presets]
+        const [moved] = next.splice(from, 1)
+        next.splice(to, 0, moved)
+        commitPresets(next, state.presetId)
+        return true
+      }
+
+      /**
+       * Move one preset next to another (window drag): before it, or after it.
+       * Anchoring on the neighbour rather than on an index keeps the disabled
+       * entries — which never appear in the window — in their own slots.
+       */
+      function movePresetBeside(id, anchorId, after) {
+        if (id === anchorId) return false
+        const list = state.presets
+        const from = list.findIndex((preset) => preset.id === id)
+        if (from < 0) return false
+        const next = list.filter((preset) => preset.id !== id)
+        const anchor = next.findIndex((preset) => preset.id === anchorId)
+        if (anchor < 0) return false
+        next.splice(anchor + (after === true ? 1 : 0), 0, list[from])
+        if (next.every((preset, index) => preset.id === list[index].id)) return false
+        commitPresets(next, state.presetId)
+        return true
+      }
+
+      /** Open or close one preset body in the settings list. */
+      function togglePresetOpen(id) {
+        if (presetOf(state.presets, id) === undefined) return false
+        const open = state.presetOpen.includes(id)
+          ? state.presetOpen.filter((item) => item !== id)
+          : [...state.presetOpen, id]
+        setState({ presetOpen: open })
+        return true
+      }
+
+      /** Open every preset body, or close them all. */
+      function setPresetsOpen(open) {
+        setState({ presetOpen: open ? state.presets.map((preset) => preset.id) : [] })
+        return true
+      }
+
+      /** Switch one preset into the editor (only one editor is open at a time). */
+      function startPresetEdit(id) {
+        if (presetOf(state.presets, id) === undefined) return false
+        setState({ presetEditingId: id })
+        return true
+      }
+
+      /** Leave the editor without saving. */
+      function cancelPresetEdit() {
+        if (state.presetEditingId === null) return false
+        setState({ presetEditingId: null })
+        return true
+      }
+
+      /** Open the in-window "new prompt" form (title + body). */
+      function startNudgeDraft() {
+        setState({
+          nudgeExpanded: true,
+          nudgeDraftOpen: true,
+          nudgeDraftLabel: '',
+          nudgeDraftText: '',
+          nudgeDraftError: '',
+          ...IDLE_NUDGE_EDIT,
+        })
+        return true
+      }
+
+      /** Close the in-window form without saving. */
+      function cancelNudgeDraft() {
+        if (state.nudgeDraftOpen !== true) return false
+        setState({ nudgeDraftOpen: false, nudgeDraftLabel: '', nudgeDraftText: '', nudgeDraftError: '' })
+        return true
+      }
+
+      /** Write the draft title without saving it. */
+      function setNudgeDraftLabel(value) {
+        setState({ nudgeDraftLabel: typeof value === 'string' ? value : '' })
+      }
+
+      /** Write the draft body without saving it. */
+      function setNudgeDraftText(value) {
+        setState({ nudgeDraftText: typeof value === 'string' ? value : '' })
+      }
+
+      /** Save the in-window form through the same preset store the settings use. */
+      function saveNudgeDraft() {
+        const result = addPreset(state.nudgeDraftLabel, state.nudgeDraftText)
+        if (result.ok !== true) {
+          setState({ nudgeDraftError: result.error })
+          return result
+        }
+        setState({ nudgeDraftOpen: false, nudgeDraftLabel: '', nudgeDraftText: '', nudgeDraftError: '' })
+        return result
+      }
+
+      /**
+       * Arm or leave the window's direct-edit mode. The same row that adds a
+       * quick input then lets each one be dragged and edited in place, so fixing
+       * an entry no longer means walking into the settings page.
+       */
+      function setNudgeEditing(value) {
+        const next = value === true
+        if (next === (state.nudgeEditing === true)) return false
+        setState({
+          ...IDLE_NUDGE_EDIT,
+          nudgeEditing: next,
+          nudgeExpanded: next ? true : state.nudgeExpanded,
+          nudgeDraftOpen: false,
+          nudgeDraftLabel: '',
+          nudgeDraftText: '',
+          nudgeDraftError: '',
+        })
+        return true
+      }
+
+      /** Open one quick input in the window's own editor, pre-filled. */
+      function startNudgeEdit(id) {
+        const preset = presetOf(state.presets, id)
+        if (preset === undefined || preset.enabled === false) return false
+        setState({
+          ...IDLE_NUDGE_EDIT,
+          nudgeExpanded: true,
+          nudgeEditing: true,
+          nudgeDraftOpen: false,
+          nudgeDraftLabel: '',
+          nudgeDraftText: '',
+          nudgeDraftError: '',
+          nudgeEditId: preset.id,
+          nudgeEditLabel: preset.label,
+          nudgeEditText: preset.text,
+        })
+        return true
+      }
+
+      /** Close the window's editor without saving. */
+      function cancelNudgeEdit() {
+        if (state.nudgeEditId === null) return false
+        setState({ nudgeEditId: null, nudgeEditLabel: '', nudgeEditText: '', nudgeEditError: '' })
+        return true
+      }
+
+      /** Write the editor's title without saving it. */
+      function setNudgeEditLabel(value) {
+        setState({ nudgeEditLabel: typeof value === 'string' ? value : '' })
+      }
+
+      /** Write the editor's body without saving it. */
+      function setNudgeEditText(value) {
+        setState({ nudgeEditText: typeof value === 'string' ? value : '' })
+      }
+
+      /** Save the window's editor through the same preset store the settings use. */
+      function saveNudgeEdit() {
+        if (state.nudgeEditId === null) return { ok: false, error: text('presetTextRequired') }
+        const result = updatePreset(state.nudgeEditId, {
+          label: state.nudgeEditLabel,
+          text: state.nudgeEditText,
+        })
+        if (result.ok !== true) {
+          setState({ nudgeEditError: result.error })
+          return result
+        }
+        setState({ nudgeEditId: null, nudgeEditLabel: '', nudgeEditText: '', nudgeEditError: '' })
+        return result
+      }
+
+      /** One pasted block: the first line is the label, the rest is the body. */
+      function presetFromBlock(block) {
+        const lines = block.split('\n')
+        const label = lines[0].trim()
+        const text = lines.slice(1).join('\n').trim()
+        return { label, text: text.length > 0 ? text : label }
+      }
+
+      /**
+       * Bulk-add pasted presets: blocks are separated by three or more blank
+       * lines. Mirrors `addTips` — dedupe by body and report what was skipped.
+       */
+      function importPresets(raw) {
+        const blocks = String(raw ?? '')
+          .replace(/\r\n/g, '\n')
+          .split(/\n(?:[ \t]*\n){3,}/)
+          .map((block) => block.trim())
+          .filter((block) => block.length > 0)
+        if (blocks.length === 0) return { ok: false, added: 0, skipped: 0, error: text('importEmpty') }
+        const seen = new Set(state.presets.map((preset) => preset.text))
+        const next = [...state.presets]
+        let added = 0
+        let skipped = 0
+        for (const block of blocks) {
+          const preset = presetFromBlock(block)
+          if (preset.text.length === 0 || seen.has(preset.text)) {
+            skipped += 1
+            continue
+          }
+          seen.add(preset.text)
+          next.push({ id: mintPresetId(), label: preset.label, text: preset.text, enabled: true })
+          added += 1
+        }
+        if (added === 0) {
+          return { ok: false, added, skipped, error: text('importEmpty') }
+        }
+        commitPresets(next, state.presetId)
+        return { ok: true, added, skipped }
+      }
+
+      /**
+       * Copy every configured preset to the clipboard in the same block format
+       * `importPresets` reads, so an export can be pasted back. Disabled
+       * presets are included: they are configured, just not shown in the
+       * window. The clipboard is async, so the outcome resolves.
+       */
+      function exportPresets() {
+        const count = state.presets.length
+        if (count === 0) return Promise.resolve({ ok: false, count, error: text('exportEmpty') })
+        const value = state.presets
+          .map((preset) =>
+            preset.label === preset.text ? preset.label : `${preset.label}\n${preset.text}`,
+          )
+          .join('\n\n\n\n')
+        try {
+          const clipboard = navigator.clipboard
+          if (typeof clipboard?.writeText !== 'function') {
+            return Promise.resolve({ ok: false, count, error: text('exportFailed') })
+          }
+          return Promise.resolve(clipboard.writeText(value)).then(
+            () => ({ ok: true, count }),
+            () => ({ ok: false, count, error: text('exportFailed') }),
+          )
+        } catch {
+          return Promise.resolve({ ok: false, count, error: text('exportFailed') })
+        }
+      }
+
+      /** Restore the built-in presets (and forget the settings storage). */
+      function resetPresets() {
+        clearSetting('presets')
+        commitPresets(builtinPresets(state.lang), DEFAULT_PRESET)
+        setState({ presetOpen: [], presetEditingId: null })
+      }
+
+      // --- idle lines ------------------------------------------------------
+
+      /** Commit one idle-line list: storage, state, back to the first line. */
+      function commitTips(list) {
+        const next = normalizeTipList(list, state.lang)
+        persistSetting('tips', next)
+        setState({ tips: next, tipIndex: 0 })
+        return next
+      }
+
+      /** Replace the line at `index`; a blank line is refused. */
+      function updateTip(index, value) {
+        if (index < 0 || index >= state.tips.length) return false
+        const line = tidyTip(value)
+        if (line === '') return false
+        const next = [...state.tips]
+        next[index] = line
+        commitTips(next)
+        if (state.tipEditingIndex === index) setState({ tipEditingIndex: null })
+        return true
+      }
+
+      /** Switch one idle line into its editor. */
+      function startTipEdit(index) {
+        if (index < 0 || index >= state.tips.length) return false
+        setState({ tipEditingIndex: index })
+        return true
+      }
+
+      /** Leave the idle-line editor without saving. */
+      function cancelTipEdit() {
+        if (state.tipEditingIndex === null) return false
+        setState({ tipEditingIndex: null })
+        return true
+      }
+
+      /** Append one idle line; the list is capped. */
+      function addTip(value) {
+        const line = tidyTip(value)
+        if (line === '') return { ok: false, error: text('tipTextRequired') }
+        if (state.tips.length >= MAX_TIPS) return { ok: false, error: text('tipLimit') }
+        const next = commitTips([...state.tips, line])
+        return { ok: true, index: Math.max(0, next.indexOf(line)) }
+      }
+
+      /**
+       * Append pasted text as separate lines: every line break starts a new
+       * idle line, so a whole list can be pasted at once. Blank lines,
+       * duplicates and overflow past MAX_TIPS are dropped.
+       */
+      function addTips(raw) {
+        if (typeof raw !== 'string') return { ok: false, added: 0, skipped: 0, error: text('tipTextRequired') }
+        const lines = []
+        for (const part of raw.split(/\r\n|\r|\n/)) {
+          const line = tidyTip(part)
+          if (line !== '') lines.push(line)
+        }
+        const incoming = []
+        for (const line of lines) {
+          if (state.tips.includes(line) || incoming.includes(line)) continue
+          incoming.push(line)
+        }
+        if (incoming.length === 0) {
+          return { ok: false, added: 0, skipped: lines.length, error: text('tipTextRequired') }
+        }
+        const room = MAX_TIPS - state.tips.length
+        if (room <= 0) return { ok: false, added: 0, skipped: lines.length, error: text('tipLimit') }
+        const added = incoming.slice(0, room)
+        commitTips([...state.tips, ...added])
+        return {
+          ok: true,
+          added: added.length,
+          skipped: lines.length - added.length,
+          truncated: added.length < incoming.length,
+          error: '',
+        }
+      }
+
+      /** Remove one idle line; the last remaining line cannot be removed. */
+      function removeTip(index) {
+        if (state.tips.length <= 1) return false
+        if (index < 0 || index >= state.tips.length) return false
+        const next = [...state.tips]
+        next.splice(index, 1)
+        commitTips(next)
+        const editing = state.tipEditingIndex
+        if (editing === index) setState({ tipEditingIndex: null })
+        else if (editing !== null && editing > index) setState({ tipEditingIndex: editing - 1 })
+        return true
+      }
+
+      /** Move one idle line up (`delta` -1) or down (+1); order is persisted. */
+      function moveTip(index, delta) {
+        const count = state.tips.length
+        const to = index + (delta < 0 ? -1 : 1)
+        if (index < 0 || index >= count || to < 0 || to >= count) return false
+        return moveTipTo(index, to)
+      }
+
+      /** Move one idle line to an absolute slot (drag and drop). */
+      function moveTipTo(from, index) {
+        const count = state.tips.length
+        const target = Math.round(Number(index))
+        if (!Number.isFinite(target) || from < 0 || from >= count) return false
+        const to = Math.max(0, Math.min(count - 1, target))
+        if (to === from) return false
+        const next = [...state.tips]
+        const [line] = next.splice(from, 1)
+        next.splice(to, 0, line)
+        // The editor is keyed by position, so it has to move with its line:
+        // the moved line lands on `to`, and every line between the two slots
+        // shifts one step toward `from`. Missing the middle case leaves the
+        // editor on a neighbour, and a save would overwrite that neighbour.
+        const editing = state.tipEditingIndex
+        let editingNext = editing
+        if (editing === from) editingNext = to
+        else if (editing !== null && from < to && editing > from && editing <= to) editingNext = editing - 1
+        else if (editing !== null && from > to && editing >= to && editing < from) editingNext = editing + 1
+        commitTips(next)
+        if (editingNext !== editing) setState({ tipEditingIndex: editingNext })
+        return true
+      }
+
+      /** Restore the built-in idle lines. */
+      function resetTips() {
+        clearSetting('tips')
+        setState({ tips: builtinTips(state.lang), tipIndex: 0 })
+      }
+
+      /** Show the next idle line; the status row calls this on a timer. */
+      function advanceTip() {
+        const count = state.tips.length
+        if (count < 2) return
+        // A confirmation line owns the row for its full hold, then the
+        // rotation picks up again with the next line.
+        if (state.flash.length > 0) return
+        setState({ tipIndex: (state.tipIndex + 1) % count })
+      }
+
+      // --- window state ---------------------------------------------------
+
+      /**
+       * The card's own spot while the pill carries the window, or null.
+       *
+       * A fold that came from the pointer parks the pill under that pointer, so
+       * the shared anchor no longer describes the card; this keeps the card's
+       * spot for the unfold. Not persisted: after a reload the pill's spot is
+       * the anchor, exactly as it is after a pill drag.
+       */
+      let cardAnchor = null
+
+      /**
+       * Collapse or expand the window.
+       *
+       * A fold that came from a pointer puts the pill where that pointer is —
+       * centred on it and clamped into the viewport — so the button lands under
+       * the hand that folded the window instead of jumping to the card's corner.
+       * The card keeps its own spot, so the unfold returns it where it was. A
+       * fold with no pointer (the keyboard) keeps the shared anchor as before.
+       */
+      function setCollapsed(value, point) {
+        if (state.collapsed === value) return
+        let pos = clampPoint(state.pos, value)
+        if (value === true && isPoint(point)) {
+          cardAnchor = state.pos
+          pos = clampPoint({ x: point.x - PILL_SIZE / 2, y: point.y - PILL_SIZE / 2 }, true)
+        }
+        if (value === false) {
+          if (cardAnchor !== null) pos = clampPoint(cardAnchor, false)
+          cardAnchor = null
+        }
+        setState({
+          collapsed: value,
+          settingsOpen: value ? false : state.settingsOpen,
+          unread: value ? state.unread : false,
+          pos,
+        })
+        saveUi()
+      }
+
+      /** Move the window while dragging (not persisted until drop). */
+      function moveTo(x, y) {
+        // A pill dragged elsewhere is the anchor the next unfold starts from:
+        // the spot the card was folded at no longer applies.
+        if (state.collapsed) cardAnchor = null
+        setState({ pos: clampPoint({ x, y }, state.collapsed) })
+      }
+
+      /** Persist the current window state. */
+      function saveUi() {
+        // Keep keys this build does not own (an older record may carry more).
+        writeJson(UI_KEY, { ...(readJson(UI_KEY) ?? {}), collapsed: state.collapsed, pos: state.pos })
+      }
+
+      // --- durable settings (Host half) -----------------------------------
+
+      /**
+       * Read the Host half's durable record once per launch — and only then let
+       * the mirror write. The two are ordered here and nowhere else: a POST
+       * replaces the whole file, so writing before the read would erase the
+       * very settings a restart is supposed to come back from.
+       * @returns true when a restored record changed the state.
+       */
+      function hydrateFromHost() {
+        return loadStoreFromHost()
+          .then((remote) => {
+            const adopted = adoptRemoteRecord(remote)
+            markSettingsRead()
+            return adopted
+          })
+          .catch(() => {
+            // No Host half (preview page, plain harness): the page is the copy.
+            markSettingsRead()
+            return false
+          })
+      }
+
+      /**
+       * Adopt the fields of a record the page does not hold — per field, so a
+       * page that already wrote its own geometry still gets the presets, and a
+       * page that holds everything keeps its own copy (the user just changed
+       * it) while the mirror refreshes the record from it.
+       */
+      function adoptRemoteRecord(remote) {
+        if (remote === null || remote === undefined || typeof remote !== 'object') return false
+        const pageHeldSomething = hasStoredSettings(settingsSnapshot())
+        const adopted = adoptFromHost(() => applySettingsStore(remote, { merge: true }))
+        if (!adopted) return false
+        reloadFromStorage()
+        // A page that held nothing is now exactly the record. A page that held
+        // some fields holds the union, so the record is brought up to date.
+        if (pageHeldSomething) markSettingsDirty()
+        else markSettingsSynced()
+        return true
+      }
+
+      /** Re-derive every persisted preference from the page storage. */
+      function reloadFromStorage() {
+        const saved = readJson(UI_KEY) ?? {}
+        // The tray comes back from storage; the marks a write left behind in a
+        // draft do not, because the draft they pointed at may be gone too.
+        resetAnchorRecovery()
+        // A reloaded window starts folded from its stored spot: no card anchor
+        // outlives the page it was folded on.
+        cardAnchor = null
+        setState({
+          ...readSettings({ lang: state.lang, sessionId: state.target?.sessionId }),
+          tipIndex: 0,
+          // The restore follows the same launch rule as the first paint.
+          collapsed: true,
+          pos: isPoint(saved.pos) ? snapToEdge(saved.pos, true) : dockPosition(true),
+        })
+      }
+
+      /**
+       * Bump one of today's counters. The local calendar day is the bucket:
+       * a click after midnight starts a fresh row, and the store keeps the
+       * newest `STATS_DAYS` rows only. A preset send/write also bumps that
+       * preset's own count so the settings board can rank the top prompts.
+       */
+      function countStat(field, presetId) {
+        if (!STAT_FIELDS.includes(field)) return false
+        const key = dayKey()
+        const days = { ...state.stats.days }
+        const today = { ...(days[key] ?? {}) }
+        today[field] = (today[field] ?? 0) + 1
+        if (
+          typeof presetId === 'string' &&
+          presetId.length > 0 &&
+          presetId.length <= MAX_STAT_PRESET_ID &&
+          presetId !== '__proto__' &&
+          presetId !== 'constructor' &&
+          presetId !== 'prototype'
+        ) {
+          const presets = { ...(today.presets ?? {}) }
+          presets[presetId] = (presets[presetId] ?? 0) + 1
+          today.presets = presets
+        }
+        days[key] = today
+        const next = normalizeStats({ days })
+        persistSetting('stats', next)
+        setState({ stats: next })
+        return true
+      }
+
+      // --- settings navigation --------------------------------------------
+
+      /**
+       * Append one sample to a diagnostic list in the persisted UI record.
+       *
+       * The shell's open seams report nothing when they fail — `invoke` returns
+       * void, a blocked command returns silently, a click on the wrong button is
+       * accepted — so the only place a failure can be observed is the running
+       * page. The samples land in `nudge-store.json`, next to the other settings.
+       */
+      function recordUiDiag(name, entry) {
+        const ui = readJson(UI_KEY) ?? {}
+        const list = Array.isArray(ui[name]) ? ui[name].slice(-DIAG_SAMPLES) : []
+        list.push({ at: Date.now(), ...entry })
+        ui[name] = list
+        storage()?.setItem(UI_KEY, JSON.stringify(ui))
+      }
+
+      /** One settings-navigation sample. */
+      function recordSettingsDiag(entry) {
+        try {
+          recordUiDiag('settingsDiag', entry)
+        } catch {
+          /* diagnostics are best-effort and never block the gear */
+        }
+      }
+
+
+      /**
+       * Why a passage could not be anchored, as one sample.
+       *
+       * `flows` counts the anchor elements on the page, `hits` how many of them
+       * carry the passage, and `inBody` whether the text is on the page at all:
+       * together they separate "the transcript re-rendered" from "the passage
+       * lives outside every flow item" without a debugger on the running app.
+       */
+      function recordAnchorMiss(quote) {
+        try {
+          const packed = packedText(quote)
+          const flows = document.querySelectorAll?.(ANCHOR_SELECTOR) ?? []
+          let hits = 0
+          for (const element of flows) {
+            if (packedMapOf(element).packed.indexOf(packed) !== -1) hits += 1
+          }
+          const body = packedText(document.body?.textContent ?? '')
+          recordUiDiag('anchorDiag', {
+            event: 'no-anchor',
+            length: packed.length,
+            flows: flows.length,
+            hits,
+            inBody: packed !== '' && body.indexOf(packed) !== -1,
+          })
+        } catch {
+          /* diagnostics are best-effort and never block the note */
+        }
+      }
+
+      /**
+       * The Settings jump driver lives in a package-local chunk
+       * (`client.settings-jump.js`), fetched on the first press of the gear.
+       *
+       * The chunk is the reusable unit: it knows the shell's seams and nothing
+       * about this plugin, so a second jump target is a second instance with a
+       * different `sectionTitle` (and its own `onDiag` / `onFallback`) — the
+       * routing, the receipts and the escalation order come for free.
+       */
+      let settingsJump
+      let settingsJumpLoad
+
+      /** Fetch (once) and wire the driver; a failed fetch is retried by the next press. */
+      function loadSettingsJump() {
+        if (settingsJump !== undefined) return Promise.resolve(settingsJump)
+        if (settingsJumpLoad !== undefined) return settingsJumpLoad
+        const fail = (error) => {
+          settingsJumpLoad = undefined
+          console.warn('[dsh-nudge] settings jump chunk unavailable', error)
+          return undefined
+        }
+        try {
+          if (typeof require?.async !== 'function') throw new Error('this shell has no chunk loader')
+          settingsJumpLoad = require
+            .async('./client.settings-jump.js')
+            .then((chunk) => {
+              settingsJump = chunk.createSettingsJump({
+                getShortcuts: () => ctx.get?.('shortcuts'),
+                getSlots: () => ctx.slots,
+                sectionTitle: () => text('settingsTitle'),
+                onDiag: (entry) => recordSettingsDiag(entry),
+                onFallback: () => setState({ settingsOpen: true }),
+              })
+              return settingsJump
+            })
+            .catch(fail)
+        } catch (error) {
+          return Promise.resolve(fail(error))
+        }
+        return settingsJumpLoad
+      }
+
+      /**
+       * Open Settings on this plugin's section.
+       *
+       * Resolves whether one of the shell's routes acted. When the chunk itself
+       * cannot load — an install copy shipped without the file, or a shell whose
+       * loader has no chunk support — the in-window form opens instead, so the
+       * gear is never dead.
+       */
+      async function openSettings() {
+        const jump = await loadSettingsJump()
+        if (jump === undefined) {
+          recordSettingsDiag({ event: 'chunk', error: 'unavailable' })
+          setState({ settingsOpen: true })
+          return false
+        }
+        return jump.open()
+      }
+
+      /** Drop a pending verification (dispose, or a second press of the gear). */
+      function stopSettingsWait() {
+        if (settingsJump !== undefined) settingsJump.cancel()
+      }
+
+      /** What the running page says about the shell's settings seams (diagnostics). */
+      function probeSettings() {
+        return settingsJump === undefined ? { pending: true } : settingsJump.probe()
+      }
+
+      /** Record the seam sample once the chunk has arrived (mount-time probe). */
+      function probeSettingsSeams() {
+        loadSettingsJump().then((jump) => {
+          recordSettingsDiag(
+            jump === undefined
+              ? { event: 'mount', error: 'chunk-unavailable' }
+              : { event: 'mount', ...jump.probe() },
+          )
+        })
+      }
+
+      /** Leave the in-window settings form and return to the normal body. */
+      function closeSettings() {
+        if (state.settingsOpen) setState({ settingsOpen: false })
+      }
+
+      /** Keep the window inside the viewport after a resize; the card closes. */
+      function onResize() {
+        setState({ pos: clampPoint(state.pos, state.collapsed) })
+        onPopupDismiss()
+      }
+
+      /**
+       * Leaving the page writes the pending settings now. The mirror waits
+       * `STORE_SYNC_MS` for a burst of edits to settle, and a window closed in
+       * that gap would otherwise drop the last change — on the very restart the
+       * Host record exists for. It is best effort: a page torn down at once may
+       * still cut the request short.
+       */
+      function onPageHide() {
+        flushSettingsMirror()
+      }
+
+      /** A page that goes to the background may never come back: write now. */
+      function onVisibilityChange() {
+        if (typeof document !== 'undefined' && document.visibilityState === 'hidden') flushSettingsMirror()
+      }
+
+      // --- world subscriptions -------------------------------------------
+
+      /** Refresh target/pending facts from the Client stores. */
+      let lastTargetId
+      function refreshWorld() {
+        const target = resolveTarget(ctx)
+        const pendingQuestion = target
+          ? Boolean(statusOf(ctx, target.sessionId)?.pendingInteraction)
+          : false
+        const targetId = target?.sessionId
+        if (targetId !== lastTargetId) {
+          lastTargetId = targetId
+          // The marks belong to the conversation that quoted them.
+          resetAnchorRecovery()
+          // The ask is bound to the conversation it was clicked in (1.2); a
+          // different conversation must not inherit its status or its wait.
+          if (waiting !== null) endWaiting()
+          // The tray belongs to the conversation it quotes: load that Session's
+          // saved notes and drop any half-written one.
+          settleAnnotation({
+            target,
+            pendingQuestion,
+            note: '',
+            error: '',
+            phase: 'idle',
+            annotations: notesOfSession(targetId),
+            ...IDLE_ANNOTATION,
+            annotationExpanded: false,
+            nudgeExpanded: true,
+            attentionAt: 0,
+          })
+          return
+        }
+        setState({ target, pendingQuestion })
+      }
+
+      const offs = []
+      const sessions = ctx.get?.('sessions')
+      if (typeof sessions?.list?.subscribe === 'function') {
+        offs.push(sessions.list.subscribe(refreshWorld))
+      }
+      const statusSource = ctx.get?.('uiSession')?.sessionStatus
+      if (typeof statusSource?.subscribe === 'function') {
+        offs.push(statusSource.subscribe(onStatusChange))
+      }
+      try {
+        const locale = ctx.get?.('locale')
+        if (typeof locale?.subscribe === 'function') {
+          offs.push(locale.subscribe(() => setState({ lang: readLang(ctx) })))
+        }
+      } catch {
+        /* locale absent */
+      }
+      window.addEventListener('resize', onResize)
+      window.addEventListener('pagehide', onPageHide)
+      // The primary button follows the caret: entering or leaving the composer
+      // flips the write mode without polling.
+      try {
+        if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+          document.addEventListener('visibilitychange', onVisibilityChange)
+          document.addEventListener('focusin', syncComposerFocus, true)
+          document.addEventListener('focusout', syncComposerFocus, true)
+          // Selection capture and painted-passage clicks.
+          document.addEventListener('pointerdown', onPointerGestureDown, true)
+          document.addEventListener('pointerup', onPointerGestureUp, true)
+          document.addEventListener('pointercancel', onPointerGestureUp, true)
+          window.addEventListener('blur', onPointerGestureUp)
+          document.addEventListener('mouseup', captureSelectionLater, true)
+          document.addEventListener('keyup', onSelectionKeyup, true)
+          document.addEventListener('selectionchange', onSelectionChange, true)
+          document.addEventListener('click', onTranscriptClick, true)
+          // Shift+press extends the captured passage without the native anchor.
+          document.addEventListener('mousedown', onExtendPointerDown, true)
+          document.addEventListener('mousemove', onExtendPointerMove, true)
+          document.addEventListener('mouseup', onExtendPointerUp, true)
+          // A press outside the window or card dismisses it.
+          document.addEventListener('pointerdown', onOuterPointerDown, true)
+          document.addEventListener('keydown', onPopupKeydown, true)
+          window.addEventListener('scroll', scheduleRepaint, true)
+          // Scrolling or resizing closes the selection card, like the old popup.
+          window.addEventListener('scroll', onPopupDismiss, true)
+        }
+      } catch {
+        /* no document (checks drive the runtime directly) */
+      }
+      /**
+       * Whether one mutation batch touched a flow item: added one, removed one
+       * or re-keyed it. Only those can bring back a passage whose row is gone,
+       * so only they raise the generation the recovery search waits for.
+       */
+      function flowAnchorsChanged(records) {
+        for (const record of records) {
+          if (record?.type === 'attributes') return true
+          for (const list of [record?.addedNodes, record?.removedNodes]) {
+            if (!list) continue
+            for (const node of list) {
+              if (node?.nodeType !== 1) continue
+              if (node.matches?.(ANCHOR_SELECTOR) === true) return true
+              if (typeof node.querySelector === 'function' && node.querySelector(ANCHOR_SELECTOR) !== null) {
+                return true
+              }
+            }
+          }
+        }
+        return false
+      }
+
+      try {
+        if (typeof MutationObserver === 'function' && typeof document !== 'undefined') {
+          highlightObserver = new MutationObserver(onTranscriptMutation)
+          highlightObserver.observe(document.documentElement ?? document.body, {
+            childList: true,
+            subtree: true,
+            // A streamed answer edits text in place: that changes a row's text too.
+            characterData: true,
+            // Rows are re-keyed in place when a turn stops streaming.
+            attributes: true,
+            attributeFilter: ['data-chat-anchor-key'],
+          })
+        }
+      } catch {
+        /* no observer */
+      }
+      refreshWorld()
+      // The Host half holds the durable copy of every preference; adopting it
+      // is what makes the settings survive an app restart (the GUI's loopback
+      // port changes, so `localStorage` is a different origin after a restart).
+      try {
+        Promise.resolve(hydrateFromHost()).catch(() => {})
+      } catch {
+        /* no Host half (preview page, check harness) */
+      }
+
+      /** Release every subscription and in-flight request. */
+      function dispose() {
+        flushSettingsMirror()
+        cancelPendingCapture()
+        pointerHeld = false
+        endWaiting()
+        for (const off of offs) {
+          try {
+            off?.()
+          } catch {
+            /* already disposed */
+          }
+        }
+        offs.length = 0
+        stopSettingsWait()
+        window.removeEventListener('resize', onResize)
+        window.removeEventListener('pagehide', onPageHide)
+        try {
+          if (typeof document !== 'undefined' && typeof document.removeEventListener === 'function') {
+            document.removeEventListener('visibilitychange', onVisibilityChange)
+            document.removeEventListener('focusin', syncComposerFocus, true)
+            document.removeEventListener('focusout', syncComposerFocus, true)
+            document.removeEventListener('pointerdown', onPointerGestureDown, true)
+            document.removeEventListener('pointerup', onPointerGestureUp, true)
+            document.removeEventListener('pointercancel', onPointerGestureUp, true)
+            window.removeEventListener('blur', onPointerGestureUp)
+            document.removeEventListener('mouseup', captureSelectionLater, true)
+            document.removeEventListener('keyup', onSelectionKeyup, true)
+            document.removeEventListener('selectionchange', onSelectionChange, true)
+            document.removeEventListener('click', onTranscriptClick, true)
+            document.removeEventListener('mousedown', onExtendPointerDown, true)
+            document.removeEventListener('mousemove', onExtendPointerMove, true)
+            document.removeEventListener('mouseup', onExtendPointerUp, true)
+            document.removeEventListener('pointerdown', onOuterPointerDown, true)
+            document.removeEventListener('keydown', onPopupKeydown, true)
+            window.removeEventListener('scroll', scheduleRepaint, true)
+            window.removeEventListener('scroll', onPopupDismiss, true)
+          }
+        } catch {
+          /* no document */
+        }
+        if (selectionTimer !== undefined) clearTimeout(selectionTimer)
+        if (attentionTimer !== undefined) clearTimeout(attentionTimer)
+        if (repaintTimer !== undefined) clearTimeout(repaintTimer)
+        try {
+          highlightObserver?.disconnect()
+        } catch {
+          /* already gone */
+        }
+        try {
+          window.CSS?.highlights?.delete(HIGHLIGHT_NAME)
+          window.CSS?.highlights?.delete(CAPTURE_HIGHLIGHT)
+        } catch {
+          /* no highlight registry */
+        }
+        highlighted = []
+        resetAnchorRecovery()
+        listeners.clear()
+      }
+
+      return {
+        subscribe,
+        getSnapshot,
+        text,
+        ask,
+        /** Turbo double-click: append when a draft exists, else send. */
+        runPreset,
+        setDelivery,
+        effectiveDelivery,
+        setTurbo,
+        setPreset,
+        addPreset,
+        updatePreset,
+        removePreset,
+        movePreset,
+        movePresetTo,
+        /** Window drag: drop one prompt before or after another. */
+        movePresetBeside,
+        resetPresets,
+        togglePresetOpen,
+        setPresetsOpen,
+        startPresetEdit,
+        cancelPresetEdit,
+        /** Enable / disable one prompt without deleting it. */
+        setPresetEnabled,
+        togglePresetEnabled,
+        /** In-window "new prompt" form (title + body). */
+        startNudgeDraft,
+        cancelNudgeDraft,
+        setNudgeDraftLabel,
+        setNudgeDraftText,
+        saveNudgeDraft,
+        /** In-window 编辑 mode: reorder by drag, change one prompt in place. */
+        setNudgeEditing,
+        startNudgeEdit,
+        cancelNudgeEdit,
+        setNudgeEditLabel,
+        setNudgeEditText,
+        saveNudgeEdit,
+        importPresets,
+        exportPresets,
+        setCollapsed,
+        moveTo,
+        saveUi,
+        openSettings,
+        closeSettings,
+        /** One sample of the shell's settings seams, kept in the durable record. */
+        probeSettingsSeams,
+        /** Note that the gear itself was reached, before any shell seam runs. */
+        noteSettingsPress: () => recordSettingsDiag({ event: 'gear', ...probeSettings() }),
+        /** Composer bridge hooks (session input overlay). */
+        attachComposer,
+        detachComposer,
+        /** Annotation tray. */
+        captureSelection,
+        /** The notes still waiting to be written into a message. */
+        pendingAnnotations,
+        popupPosition,
+        editPopupPosition,
+        setQuick,
+        setAutoPaste,
+        setFrame,
+        addTip,
+        addTips,
+        updateTip,
+        removeTip,
+        moveTip,
+        moveTipTo,
+        startTipEdit,
+        cancelTipEdit,
+        resetTips,
+        advanceTip,
+        setAnnotationExpanded,
+        setNudgeExpanded,
+        setAnnotationNote,
+        /** Whether one DOM node belongs to this window's own chrome. */
+        isSelfNode,
+        showTip,
+        hideTip,
+        addAnnotation,
+        quickReply,
+        copyDraftQuote,
+        startEditAnnotation,
+        saveEditedAnnotation,
+        cancelAnnotationEdit,
+        dismissAnnotationDraft,
+        removeAnnotation,
+        writeAnnotations,
+        sendAnnotations,
+        dispose,
+        /** @internal exposed for scripts/check-client.mjs */
+        _debug: {
+          state: () => state,
+          chipSlotAt,
+          syncComposerFocus,
+          settingsSnapshot,
+          applySettingsStore,
+          commitSettingsToHost,
+          hydrateFromHost,
+          /** Every setting row's name: the fields the Host record must keep. */
+          settingsNames: () => SETTINGS.map((row) => row.name),
+          /** The two shipped dictionaries, for the key-set invariants. */
+          locales: () => ({ zh: ZH, en: EN }),
+        },
+      }
+    }
+
+    // ---------------------------------------------------------------------
+    // view
+    // ---------------------------------------------------------------------
+
+export { createRuntime }
