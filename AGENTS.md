@@ -10,12 +10,18 @@ src/client/index.js             浏览器半部入口：扩展点清单、apply�
 src/client/runtime.js           窗口状态机：投递、等待、批注、设置、统计
 src/client/view.js              悬浮窗渲染树；settings-view.js 是设置页渲染树
 src/client/composer.js          输入区桥；其余模块按职责拆分（设置、存储、词表、几何、CSS…）
+src/client/delivery.js          投递与等待：probe 进对话、事件窗口关联、超时与回执
+src/client/view-parts.js        视图叶子组件：批注卡片、就地编辑、批注栏、快捷输入表单
+src/client/stats-board.js       设置页看板：今日拆分、15 天趋势、快捷输入 Top 3
+src/types/client.d.ts           ctx / 服务 / 运行时状态的形状（全局声明，JSDoc 引用）
+src/types/react.d.ts            本插件用到的 React 面：createElement 与六个 hook
 src/client.settings-jump.js     按需加载 chunk 的源码：设置跳转
 client.js                       产物：浏览器半部 bundle（由 npm run build 生成，提交）
 client.settings-jump.js         产物：按需加载的 chunk（同上）
 cordis.patch.yml                bundle patch：一行插件注册，零配置
 locale/{en,zh}.json             插件元数据文案
 scripts/build.mjs               src/ → 两个产物（rollup）；--verify 比对已提交的产物
+scripts/check-units.mjs         模块级校验：直接 import 纯函数模块，不启动 VM
 scripts/check-client.mjs        浏览器半部校验（VM + stub React；含与宿主半部的桥接检查）
 scripts/check-host.mjs          宿主半部校验（临时 profile 目录）
 scripts/check-graph.mjs         代码图校验：project root 必须解析成仓库根
@@ -38,9 +44,11 @@ Web GUI 每次启动换一个 loopback 端口，浏览器视角就是**新的 or
 ## 命令
 
 ```sh
-npm install              # 首次克隆后：唯一的构建依赖 rollup
+npm install              # 首次克隆后：两个 devDependency（rollup、typescript）
 npm run build            # src/ → client.js + client.settings-jump.js（产物要提交）
-npm run check            # 日常验证入口：先核对产物与 src 一致，再跑 client + host + graph
+npm run check            # 日常验证入口：产物核对 → tsc → 模块级 → client + host + graph
+npm run check:types      # 只跑 tsc --checkJs（src/ 全量）
+npm run check:units      # 只跑模块级校验（纯函数，直接 import 源码）
 npm run check:client     # 只跑浏览器半部
 npm run check:host       # 只跑宿主半部
 npm run check:graph      # 只校验代码图的 project root（无图时跳过）
@@ -58,7 +66,7 @@ npm run hooks:install    # 启用 .githooks/pre-commit
 uv run --with "graphifyy[mcp]==0.9.57" graphify update "$PWD"
 ```
 
-`check` 先跑 `node scripts/build.mjs --verify`：`src/` 改了却没重新构建，这一步直接失败；之后才是 client、host、graph 校验。`test` 脚本不存在，也不要新增。
+`check` 的顺序是有意的：先 `build --verify`（`src/` 改了却没重新构建，这一步直接失败），再 `tsc --checkJs`（形状不对），再 `check-units`（纯逻辑），最后才是 client、host、graph 的行为校验。`test` 脚本不存在，也不要新增。
 
 ## graphify
 
@@ -71,7 +79,7 @@ uv run --with "graphifyy[mcp]==0.9.57" graphify update "$PWD"
 
 ## 查代码：grep 定位符号，graphify 看结构
 
-浏览器半部按职责拆在 `src/client/` 下，但 `runtime.js`、`view.js`、`settings-view.js` 仍是三个两三千行的大文件。grep 能定位符号，答不出"这块功能散在哪、改这里会波及谁"；这类问题用图（`graphify_*`），逐符号定位用 grep。
+浏览器半部按职责拆在 `src/client/` 下，但 `runtime.js`（约 2.9k 行）与 `view.js`、`settings-view.js`（各一千多行）仍是最大的三个文件。grep 能定位符号，答不出"这块功能散在哪、改这里会波及谁"；这类问题用图（`graphify_*`），逐符号定位用 grep。
 
 - **什么时候上图。** "某功能散在哪些函数/模块""谁调用 X、X 又调了谁""改这里波及谁""两条链路怎么串起来"→ 先读 `GRAPH_REPORT.md`（见上），要精确边和行号再 `query_graph`（BFS 铺面、DFS 追线）、`god_nodes`、`get_neighbors`、`shortest_path`。只找定义、精确字符串、改文案、单点符号 → `grep`/读源码，一次就中，别绕路。**别用仓库级宽 grep 开场**（`"批注|annotation"` 一把梭）；查询词用代码里的词，不是界面的中文词。
 - **调用一律带 `project_path`**（仓库根绝对路径）。不传时用的是 MCP 启动时缓存的 project root；`npm run check:graph` 守的就是这个不变量。
@@ -83,6 +91,7 @@ uv run --with "graphifyy[mcp]==0.9.57" graphify update "$PWD"
 
 ## 约定
 
+- **边界有名字，内部靠推断**：`src/types/client.d.ts` 用全局 interface 命名 `ctx`、各服务和运行时状态；模块在入口处用 JSDoc 标注参数与返回，内部不再重复。`tsc --checkJs`（`strict: false`）会核对属性名、参数个数和可空性，但不会要求全量注解。DSH 发布与安装版本匹配的 client 类型时，替换这个文件即可，调用点已经带好了注解。新增 `ctx.get('...')` 之前先在 `DshContextServices` 里登记形状。
 - **`src/` 是源码，`client.js` / `client.settings-jump.js` 是提交的产物**：`npm run build` 用 rollup 把 `src/client/` 打成一个 CommonJS 包，再由 `scripts/build.mjs` 套上 `window.__ModuleLoader__.load({ id, factory(require) })`；源码里 `import 'react'`，产物里是 loader 的 `require('react')`。产物必须和源码一起提交，改了 src 不构建 `check` 会红。选 rollup 而不是 esbuild，是因为它只改 import/export，模板字符串里的 `\n`、注释和排版都原样保留——产物仍可逐行对照源码（见脚本头注释）。chunk 契约不变：与 `client.js` 同目录、名字匹配 `client.<name>.js`、注册为 `<owner id>/client.<name>.js`、导出纯函数（无 React、无插件状态），源码在 `src/client.settings-jump.js`。
 - **设置有两份**：`localStorage` 的 `dsh-nudge:*` 是同步缓存；`index.js` 落在 profile 目录的 `nudge-store.json` 是跨重启、跨端口的真副本（`DSH_HOME` 可覆盖）。client 侧每个设置项都在 `src/client/settings.js` 的 `SETTINGS` 表里登记（存储键 / 解码 / 编码 / 线上名 / 回灌），启动态、回灌和镜像负载都从这张表派生，所以新增一项 = 表里加一行 + 界面 + Host 白名单（`STORE_KEYS` 与 `pickStore`）。`scripts/check-client.mjs` 会核对这两张表，漏写 host 侧会红。镜像有两步不可省：只在读到记录之后才写（`mirrorReady`），刚回灌的记录不回写。
 - **host 安全不变量不可放宽**：只答 loopback；只保留 `STORE_KEYS` 内的键并校验结构（`pickStore`）；body ≤ 256KB；临时文件 + `rename` 原子写。
@@ -91,13 +100,14 @@ uv run --with "graphifyy[mcp]==0.9.57" graphify update "$PWD"
 - **CHANGELOG.md 是生成物**：要改措辞就写 `scripts/release-notes/<tag>.md`，再 `npm run changelog:write`。
 - **提交是 Conventional Commits**：`feat(client): ...`、`fix: ...` 等，否则整条落进日志的「其他」分类。一条提交一件事，拆分依据是用户能感知的变化，不是文件。
 - **文案**：用户可见文案是中文，术语跟界面一致（悬浮窗、批注、快捷输入），不自创新词；`locale/en.json` 与 `locale/zh.json` 键集保持同步。
-- **运行时零依赖，构建只有一个 devDependency**：`package.json` 没有 dependencies，只有锁死的 `rollup`；脚本保持 node 原生。确需再加依赖时先说明为什么现有的不够。
+- **运行时零依赖，工具链只有两个 devDependency**：`package.json` 没有 dependencies，只有锁死版本的 `rollup`（构建）与 `typescript`（`--checkJs`）；脚本保持 node 原生。确需再加依赖时先说明为什么现有的不够。
 
 ## 反模式
 
 | 反模式 | 正确做法 |
 | --- | --- |
-| 想装 jest / vitest 补测试 | 在 `scripts/check-*.mjs` 加 `check(...)` |
+| 想装 jest / vitest 补测试 | 行为用 `scripts/check-client.mjs` 的 `check(...)`；纯函数用 `scripts/check-units.mjs` |
+| 遇到类型错误就加 `@ts-ignore` | 先在 `src/types/client.d.ts` 里把形状写对，边界处才允许收窄 |
 | 手改 `client.js` 或 `client.settings-jump.js` | 改 `src/client/`，再 `npm run build` |
 | 提交了 src 却没提交重建的产物 | 跑 `npm run check`（先 verify 再校验） |
 | 加设置项只改界面 | 先在 `src/client/settings.js` 的 `SETTINGS` 表加一行；Host 侧出现新形状再补 `pickStore`（`check-host` 核对 `STORE_KEYS`） |

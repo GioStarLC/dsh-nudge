@@ -87,14 +87,14 @@ dsh plugin --profile web     add github:GioStarLC/dsh-nudge   # dsh web
 浏览器半部的源码在 `src/client/`，`client.js` 与 `client.settings-jump.js` 是它构建出来的产物。产物要随源码一起提交：安装方拿到的是仓库里的文件，不会在安装时构建。
 
 ```sh
-npm install             # 唯一的构建依赖：rollup（版本锁在 lockfile）
+npm install             # 构建与类型检查的依赖：rollup + typescript（版本锁在 lockfile）
 npm run build           # src/ → 两个产物；改过 src 就要跑
 npm run hooks:install   # 首次克隆后执行，启用 .githooks/pre-commit
-npm run check
+npm run check           # 产物核对 → tsc → 模块级 → client/host/graph
 npm run preview:all
 ```
 
-`check` 先跑 `build --verify`：源码改了却没有重建产物，第一步就会失败；随后才跑 client、host、graph 三组检查，提交钩子也会调用。`preview:all` 把界面场景渲染到 `preview-out/`。推送或 PR 时 GitHub Actions 会再跑一遍 `check`；打 `v*` 标签时额外核对 tag、`package.json` 与 `CHANGELOG.md` 同名（`npm run check:release`）。
+`check` 按层来：先 `build --verify`，源码改了却没有重建产物第一步就会失败；再 `tsc --checkJs` 检查 `ctx`、设置与运行时状态的形状；然后 `check-units` 直接 import 纯函数模块跑边界用例；最后才是启动 bundle 的 client、host、graph 检查。提交钩子跑同一套。`preview:all` 把界面场景渲染到 `preview-out/`。推送或 PR 时 GitHub Actions 会再跑一遍 `check`；打 `v*` 标签时额外核对 tag、`package.json` 与 `CHANGELOG.md` 同名（`npm run check:release`）。
 
 构建用 rollup 而不是 esbuild：rollup 只重写 import/export，模板字符串里的 `\n`、注释和排版原样留在产物里，产物可以逐行对照源码读。构建脚本在 `scripts/build.mjs`，负责给产物套上 DSH 加载器要求的 `__ModuleLoader__.load` 外壳。
 
