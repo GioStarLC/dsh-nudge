@@ -57,7 +57,7 @@
 
 每次启动都以圆形按钮的形态出现，按钮里就是标题栏那个图标，并贴着最近的那一侧，只记住竖直位置；点按钮展开成卡片，展开后可以拖着走，下一次启动仍回到那一侧。外框粗细可在设置页的「外观」里选无、细、标准（默认）或粗，按钮同一条边。标题栏、批注栏和快捷输入栏都不再有下拉箭头：点各自的标题文字就能折叠或展开对应的内容；标题栏整条都可以点，但栏内的小按钮（设置齿轮）仍只做自己的事。
 
-设置齿轮会按“注册的命令 → 侧栏触发器 → 合成快捷键”的顺序依次尝试打开 DSH 的设置面板，每试一条都等面板真的出现（最多 0.6 秒）才继续，成功后再点到本插件这一节。命令被拒绝时不留副作用，所以排在最前；只有按下这一点仍未打开时才会去点侧栏触发器，而且只点能自证身份的按钮（标签写着设置，或挂着设置快捷键），绝不盲点侧栏里其它弹窗按钮——那样会先闪一个无关的弹层。如果当前壳层没有任何可达的入口（侧边栏入口被账户菜单占用、快捷键服务不可用、命令被模态框挡住），它就直接在悬浮窗里把同一份设置表单渲染出来，齿轮不再点了没反应。再点一次齿轮、点面板右上角的 × 或按 Esc 都能退回原窗口。
+设置齿轮会按“注册的命令 → 侧栏触发器 → 合成快捷键”的顺序依次尝试打开 DSH 的设置面板，每试一条都等面板真的出现（最多 0.6 秒）才继续，成功后再点到本插件这一节。命令被拒绝时不留副作用，所以排在最前；只有按下这一点仍未打开时才会去点侧栏触发器，而且只点能自证身份的按钮（标签写着设置，或挂着设置快捷键），绝不盲点侧栏里其它弹窗按钮——那样会先闪一个无关的弹层。如果当前壳层没有任何可达的入口（侧边栏入口被账户菜单占用、快捷键服务不可用、命令被模态框挡住），它就直接在悬浮窗里把同一份设置表单渲染出来，齿轮不再点了没反应。窗内表单再点一次齿轮即可退回；已经打开的 DSH 设置面板用右上角的 × 或 Esc 关闭。
 
 ### 设置跳转层（`client.settings-jump.js`）
 
@@ -85,26 +85,25 @@ dsh plugin --profile web     add github:GioStarLC/dsh-nudge   # dsh web
 ## 开发
 
 ```sh
-npm install
 npm run hooks:install   # 首次克隆后执行，启用 .githooks/pre-commit
 npm run check
 npm run preview:all
 ```
 
-`check` 跑 client 和 host 检查，提交钩子也会调用；`preview:all` 把界面场景渲染到 `preview-out/`。
+`check` 跑 client、host、graph 三组检查（零依赖，不需要 `npm install`），提交钩子也会调用；`preview:all` 把界面场景渲染到 `preview-out/`。
 
 仓库不含任何安装期钩子（没有 `prepare`、`postinstall`），所以以 git 方式安装的消费方不会触发 pnpm 的构建脚本审批。
 
 ## 更新日志与发布
 
-`CHANGELOG.md` 由 `scripts/changelog.mjs` 从 git 历史生成，是"标签 + 提交"的纯函数：同一段历史跑两次得到同样的字节，因此不需要手工维护，也不会与提交记录脱节。
+`CHANGELOG.md` 由 `scripts/changelog.mjs` 从 git 历史生成，是"标签 + 提交"的纯函数：同一段历史跑两次得到同样的字节，因此不需要手工维护，也不会与提交记录脱节。打标签之前用 `--version vX.Y.Z` 给待发布块命名，打标签之后不带参数重新生成，两次写出的字节相同——所以标签里的 `CHANGELOG.md` 就是这一版最终的样子。
 
 ```sh
 npm run changelog              # 预览"最近标签..HEAD"这一段，也就是下一个版本会写进去的内容
 npm run changelog:all          # 预览整份文件
 npm run changelog:write        # 重新生成 CHANGELOG.md
 node scripts/changelog.mjs --since-push          # 已提交但还没推送的改动
-node scripts/changelog.mjs --write --version v0.2.0  # 发版前给下一段贴版本号
+node scripts/changelog.mjs --write --version vX.Y.Z  # 打标签前给待发布块贴版本号
 node scripts/changelog.mjs --range HEAD~3..HEAD  # 任意区间
 ```
 
@@ -130,17 +129,21 @@ node scripts/changelog.mjs --range HEAD~3..HEAD  # 任意区间
 git add client.js && git commit -m "feat(client): 批注气泡支持拖动"
 git add index.js  && git commit -m "fix(host): 状态行在重连后丢失"
 
-# 2. 升版本号（修复升 patch，新功能升 minor，破坏性改动升 major）
-#    然后让"未发布"这一段直接以版本号命名
-npm run changelog:write -- --version v0.2.0
+# 2. 升 package.json 版本号（修复升 patch，新功能升 minor，破坏性改动升 major），
+#    写 scripts/release-notes/vX.Y.Z.md，再让"未发布"这一段以版本号命名
+npm run changelog:write -- --version vX.Y.Z
+git status --short CHANGELOG.md        # 打标签前：应无 diff
 
-# 3. 提交、打标签、推送
-git add -A && git commit -m "chore(release): v0.2.0"
-git tag -a v0.2.0 -m "v0.2.0"
-git push --follow-tags
+# 3. 提交发布准备，然后在同一个提交上打标签
+git add package.json CHANGELOG.md scripts/release-notes
+git commit -m "chore(release): vX.Y.Z"
+git tag -a vX.Y.Z -m "vX.Y.Z"
 
-# 4. 校验：此后重新生成应无 diff
+# 4. 打标签后不带参数重新生成，仍应无 diff
 npm run changelog:write && git status --short CHANGELOG.md
+
+# 5. 推送（推送前标签可以删掉重打）
+git push --follow-tags
 ```
 
 两个不变量让第 4 步成立：发布块按**最新一条真实提交的日期**命名，而不是标签创建时间；`chore(release):`、`changelog(release):` 这类提交被跳过。所以打标签前后生成的是同一份字节，标签里提交的 `CHANGELOG.md` 就是这个版本最终的样子。

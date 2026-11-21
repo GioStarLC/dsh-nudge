@@ -59,22 +59,35 @@ test: / docs: / build: / chore:
 
 ## 4. 生成、发版、打 tag
 
+先改 `package.json` 的版本号（这是唯一的版本源），写好 `scripts/release-notes/vX.Y.Z.md`，再生成待发布块并确认它和提交内容一致：
+
 ```sh
 node scripts/changelog.mjs --write --version vX.Y.Z
-git add -A && git commit -m "chore(release): vX.Y.Z"
+git status --short CHANGELOG.md          # 应当无输出
+```
+
+然后提交发布准备，在同一个提交上打 tag：
+
+```sh
+git add package.json CHANGELOG.md scripts/release-notes
+git commit -m "chore(release): vX.Y.Z"
 git tag -a vX.Y.Z -m "vX.Y.Z — 一句话概括"
 ```
 
 版本号：修 bug 升 patch，新功能升 minor，破坏性改动升 major。
 
+标签只有推送之后才对别人生效：在 `git push` 之前，删掉重打（`git tag -d`）没有代价。所以“不轻易打标签”应该理解为不轻易推标签，而不是不打。
+
 ## 5. 校验：生成必须幂等
+
+打 tag **之后**再不带参数生成一次：
 
 ```sh
 node scripts/changelog.mjs --write && git status --short CHANGELOG.md   # 应当无输出
 npm run check
 ```
 
-第一条无输出，说明标签里的 CHANGELOG 就是这个版本最终的样子。做不到幂等，通常是因为有人直接改了 `CHANGELOG.md`，把内容挪回 `release-notes/` 即可。
+第一条无输出，说明标签里的 CHANGELOG 就是这个版本最终的样子。幂等只在“发布提交就是 HEAD”时成立：发布之后每多一条提交，生成都会多出一段“未发布”，这是正常的，不要为了消掉 diff 去改 CHANGELOG 或重打标签。
 
 ## 6. 推送
 

@@ -44,7 +44,7 @@ npm run hooks:install    # 启用 .githooks/pre-commit
 # 务必传绝对仓库根——传 `.` 会把 graphify-out/.graphify_root 写成 `.`，
 # 插件把相对值拼到 graphify-out/ 上，所有 graphify_* 查询就找不到 graph.json 了。
 # 已经写坏了就删掉该标记文件，规范布局（dirname(graphify-out)）即可恢复。
-uv run --with "graphifyy[mcp]==0.9.57" graphify update "$(cygpath -w "$PWD")"
+uv run --with "graphifyy[mcp]==0.9.57" graphify update "$PWD"
 ```
 
 `check` 是本项目的"单测"，不是构建：不编译、不下载、不装 `node_modules`。可以直接跑，不受全局「构建约束」限制。`test` 脚本不存在，也不要新增。
@@ -60,7 +60,7 @@ uv run --with "graphifyy[mcp]==0.9.57" graphify update "$(cygpath -w "$PWD")"
 
 ## 查代码：grep 定位符号，graphify 看结构
 
-`client.js` 是一个七千多行的单文件，grep 能定位符号，但答不出"这块功能散在哪、改这里会波及谁"。这类问题用图（`graphify_*`），逐符号定位用 grep。
+`client.js` 是一个八千多行的单文件，grep 能定位符号，但答不出"这块功能散在哪、改这里会波及谁"。这类问题用图（`graphify_*`），逐符号定位用 grep。
 
 - **什么时候上图。** "某功能散在哪些函数/模块""谁调用 X、X 又调了谁""改这里波及谁""两条链路怎么串起来"→ 先读 `GRAPH_REPORT.md`（见上），要精确边和行号再 `query_graph`（BFS 铺面、DFS 追线）、`god_nodes`、`get_neighbors`、`shortest_path`。只找定义、精确字符串、改文案、单点符号 → `grep`/读源码，一次就中，别绕路。**别用仓库级宽 grep 开场**（`"批注|annotation"` 一把梭）；查询词用代码里的词，不是界面的中文词。
 - **调用一律带 `project_path`**（仓库根绝对路径）。不传时用的是 MCP 启动时缓存的 project root；`npm run check:graph` 守的就是这个不变量。
