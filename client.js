@@ -5716,6 +5716,124 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
         )
       }
 
+      /**
+       * The quick-input row: one chip per enabled entry, plus the add and edit
+       * chips. In edit mode a chip is a drag handle: a press starts a drag, a
+       * release without movement opens that entry, and Enter/left/right do the
+       * same from the keyboard. The row itself never reorders mid-drag; the drop
+       * commits once.
+       */
+      function ChipRow(props) {
+        const { t } = props
+        return h(
+          'div',
+          {
+            ref: props.rowRef,
+              className: `dsh-nudge-presets${props.editing ? ' editing' : ''}`,
+              role: 'group',
+              'aria-label': t('preset'),
+            },
+            ...props.presets.map((preset) =>
+              h(
+                'button',
+                {
+                  key: preset.id,
+                  type: 'button',
+                  'data-preset-id': preset.id,
+                  className: `dsh-nudge-chip${props.activeId === preset.id ? ' active' : ''}${
+                    props.editing ? ' dsh-nudge-chip-drag' : ''
+                  }${props.editingId === preset.id ? ' editing' : ''}`,
+                  title: props.editing ? t('editChipHint') : preset.text,
+                  'aria-label': props.editing ? `${t('editPreset')}：${preset.label}` : undefined,
+                  onMouseDown: keepFocus,
+                  onPointerDown: props.editing ? (event) => props.onBeginDrag(event, preset) : keepFocus,
+                  onPointerMove: props.editing ? props.onMoveDrag : undefined,
+                  onPointerUp: props.editing ? (event) => props.onEndDrag(event, true) : undefined,
+                  onPointerCancel: props.editing ? (event) => props.onEndDrag(event, false) : undefined,
+                  onClick: props.editing ? undefined : () => props.onSelect(preset.id),
+                  // Keys do what the pointer does: Enter opens the entry, the
+                  // arrows hand it to its neighbour. A drag release also fires
+                  // a click, so the pointer path stays off `onClick` on purpose.
+                  onKeyDown: props.editing
+                    ? (event) => {
+                        if (event.key === 'Enter' || event.key === ' ') {
+                          event.preventDefault()
+                          props.onEdit(preset.id)
+                          return
+                        }
+                        if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
+                        event.preventDefault()
+                        const live = props.presets.map((item) => item.id)
+                        const from = live.indexOf(preset.id)
+                        const to = from + (event.key === 'ArrowRight' ? 1 : -1)
+                        if (from < 0 || to < 0 || to >= live.length) return
+                        props.onMoveBeside(preset.id, live[to], event.key === 'ArrowRight')
+                      }
+                    : undefined,
+                  onDoubleClick: props.editing
+                    ? undefined
+                    : props.onRun
+                      ? () => props.onRun(preset.id)
+                      : undefined,
+                },
+                props.editing
+                  ? [
+                      h('span', { key: 'grip', className: 'dsh-nudge-chip-grip', 'aria-hidden': 'true' }, '⠿'),
+                      preset.label,
+                    ]
+                  : preset.label,
+              ),
+            ),
+            props.caretStyle === null
+              ? null
+              : h('span', {
+                  key: 'drop-caret',
+                  className: 'dsh-nudge-chip-caret',
+                  style: props.caretStyle,
+                  'aria-hidden': 'true',
+                }),
+            props.presets.length === 0
+              ? h(
+                  'span',
+                  { key: 'no-presets', className: 'dsh-nudge-presets-empty' },
+                  t(props.allCount === 0 ? 'presetsEmpty' : 'presetsAllDisabled'),
+                )
+              : null,
+            h(
+              'button',
+              {
+                key: 'add-preset',
+                type: 'button',
+                className: 'dsh-nudge-chip dsh-nudge-chip-add',
+                title: t('addPreset'),
+                'aria-label': t('addPreset'),
+                'aria-expanded': props.draftOpen,
+                onMouseDown: keepFocus,
+                onPointerDown: keepFocus,
+                onClick: props.onAdd,
+              },
+              `＋ ${t('quickAdd')}`,
+            ),
+            props.presets.length > 0
+              ? h(
+                  'button',
+                  {
+                    key: 'edit-presets',
+                    type: 'button',
+                    className: `dsh-nudge-chip dsh-nudge-chip-edit${props.editing ? ' active' : ''}`,
+                    title: t('quickEditHint'),
+                    'aria-label': t('quickEditHint'),
+                    'aria-pressed': props.editing ? 'true' : 'false',
+                    onMouseDown: keepFocus,
+                    onPointerDown: keepFocus,
+                    onClick: props.onToggleEdit,
+                  },
+                  `✎ ${t('quickEdit')}`,
+                )
+              : null,
+        )
+      }
+
       return function NudgeWindow() {
         const state = useSyncExternalStore(runtime.subscribe, runtime.getSnapshot, runtime.getSnapshot)
         const drag = React.useRef(null)
@@ -6843,117 +6961,29 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
                 ? h(
                     'div',
                     { className: 'dsh-nudge-module-body' },
-            h(
-              'div',
-              { key: 'presets', className: 'dsh-nudge-field' },
-              h(
-                'div',
-                {
-                  ref: chipRowRef,
-                  className: `dsh-nudge-presets${editing ? ' editing' : ''}`,
-                  role: 'group',
-                  'aria-label': t('preset'),
-                },
-                ...livePresets.map((preset) =>
-                  h(
-                    'button',
-                    {
-                      key: preset.id,
-                      type: 'button',
-                      'data-preset-id': preset.id,
-                      className: `dsh-nudge-chip${state.presetId === preset.id ? ' active' : ''}${
-                        editing ? ' dsh-nudge-chip-drag' : ''
-                      }${state.nudgeEditId === preset.id ? ' editing' : ''}`,
-                      title: editing ? t('editChipHint') : preset.text,
-                      'aria-label': editing ? `${t('editPreset')}：${preset.label}` : undefined,
-                      onMouseDown: keepFocus,
-                      onPointerDown: editing ? (event) => beginChipDrag(event, preset) : keepFocus,
-                      onPointerMove: editing ? moveChipDrag : undefined,
-                      onPointerUp: editing ? (event) => endChipDrag(event, true) : undefined,
-                      onPointerCancel: editing ? (event) => endChipDrag(event, false) : undefined,
-                      onClick: editing ? undefined : () => runtime.setPreset(preset.id),
-                      // Keys do what the pointer does: Enter opens the entry, the
-                      // arrows hand it to its neighbour. A drag release also fires
-                      // a click, so the pointer path stays off `onClick` on purpose.
-                      onKeyDown: editing
-                        ? (event) => {
-                            if (event.key === 'Enter' || event.key === ' ') {
-                              event.preventDefault()
-                              runtime.startNudgeEdit(preset.id)
-                              return
-                            }
-                            if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
-                            event.preventDefault()
-                            const live = state.presets
-                              .filter((item) => item.enabled !== false)
-                              .map((item) => item.id)
-                            const from = live.indexOf(preset.id)
-                            const to = from + (event.key === 'ArrowRight' ? 1 : -1)
-                            if (from < 0 || to < 0 || to >= live.length) return
-                            runtime.movePresetBeside(preset.id, live[to], event.key === 'ArrowRight')
-                          }
-                        : undefined,
-                      onDoubleClick: editing
-                        ? undefined
-                        : turbo
-                          ? () => {
-                              runtime.runPreset(preset.id)
-                            }
-                          : undefined,
-                    },
-                    editing
-                      ? [h('span', { key: 'grip', className: 'dsh-nudge-chip-grip', 'aria-hidden': 'true' }, '⠿'), preset.label]
-                      : preset.label,
-                  ),
-                ),
-                chipCaretStyle === null
-                  ? null
-                  : h('span', {
-                      key: 'drop-caret',
-                      className: 'dsh-nudge-chip-caret',
-                      style: chipCaretStyle,
-                      'aria-hidden': 'true',
-                    }),
-                livePresets.length === 0
-                  ? h(
-                      'span',
-                      { key: 'no-presets', className: 'dsh-nudge-presets-empty' },
-                      t(state.presets.length === 0 ? 'presetsEmpty' : 'presetsAllDisabled'),
-                    )
-                  : null,
-                h(
-                  'button',
-                  {
-                    key: 'add-preset',
-                    type: 'button',
-                    className: 'dsh-nudge-chip dsh-nudge-chip-add',
-                    title: t('addPreset'),
-                    'aria-label': t('addPreset'),
-                    'aria-expanded': state.nudgeDraftOpen === true,
-                    onMouseDown: keepFocus,
-                    onPointerDown: keepFocus,
-                    onClick: () => runtime.startNudgeDraft(),
-                  },
-                  `＋ ${t('quickAdd')}`,
-                ),
-                livePresets.length > 0
-                  ? h(
-                      'button',
-                      {
-                        key: 'edit-presets',
-                        type: 'button',
-                        className: `dsh-nudge-chip dsh-nudge-chip-edit${editing ? ' active' : ''}`,
-                        title: t('quickEditHint'),
-                        'aria-label': t('quickEditHint'),
-                        'aria-pressed': editing ? 'true' : 'false',
-                        onMouseDown: keepFocus,
-                        onPointerDown: keepFocus,
-                        onClick: () => runtime.setNudgeEditing(!editing),
-                      },
-                      `✎ ${t('quickEdit')}`,
-                    )
-                  : null,
-              ),
+                    h(
+                      'div',
+                      { key: 'presets', className: 'dsh-nudge-field' },
+              ChipRow({
+                t,
+                presets: livePresets,
+                activeId: state.presetId,
+                editing,
+                editingId: state.nudgeEditId,
+                caretStyle: chipCaretStyle,
+                draftOpen: state.nudgeDraftOpen === true,
+                allCount: state.presets.length,
+                rowRef: chipRowRef,
+                onSelect: (id) => runtime.setPreset(id),
+                onRun: turbo ? (id) => runtime.runPreset(id) : undefined,
+                onEdit: (id) => runtime.startNudgeEdit(id),
+                onMoveBeside: (id, anchorId, after) => runtime.movePresetBeside(id, anchorId, after),
+                onBeginDrag: (event, preset) => beginChipDrag(event, preset),
+                onMoveDrag: moveChipDrag,
+                onEndDrag: (event, openEditor) => endChipDrag(event, openEditor),
+                onAdd: () => runtime.startNudgeDraft(),
+                onToggleEdit: () => runtime.setNudgeEditing(!editing),
+              }),
               state.nudgeEditId !== null && editingPreset !== null
                 ? quickInputForm({
                     key: 'quick-edit',
@@ -7496,6 +7526,11 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
         )
       }
 
+      /** Fill `{n}` in a message template. */
+      function fill(template, count) {
+        return template.replace('{n}', String(count))
+      }
+
       return function NudgeSettings() {
         const state = useSyncExternalStore(runtime.subscribe, runtime.getSnapshot, runtime.getSnapshot)
         const [error, setError] = React.useState('')
@@ -7510,8 +7545,14 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
         const [copyNote, setCopyNote] = React.useState('')
         const t = runtime.text
         const delivery = runtime.effectiveDelivery()
+      /**
+       * The settings dashboard: today's split, a 15-day trend and the prompts
+       * used in the same window. Pure over the counters, so it reads on its own.
+       */
+      function StatsBoard(props) {
+        const { t } = props
         const today = dayKey()
-        const statsDays = state.stats?.days ?? {}
+        const statsDays = props.stats?.days ?? {}
         /** The trend window, oldest first; the chart and Top 3 share it. */
         const windowKeys = recentDayKeys(15)
         const windowTotals = { send: 0, insert: 0, annotation: 0 }
@@ -7544,7 +7585,7 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
           }
         }
         const topPresets = [...presetTotals.entries()]
-          .map(([id, total]) => ({ preset: state.presets.find((item) => item.id === id), total }))
+          .map(([id, total]) => ({ preset: props.presets.find((item) => item.id === id), total }))
           .filter((item) => item.preset !== undefined)
           .sort((a, b) => b.total - a.total || String(a.preset.id).localeCompare(String(b.preset.id)))
           .slice(0, 3)
@@ -7605,121 +7646,10 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
         const noteArea = areaPath(noteSeries)
         const todayIndex = windowKeys.length - 1
 
-        /** Fill `{n}` in a message template. */
-        function fill(template, count) {
-          return template.replace('{n}', String(count))
-        }
-
-        function add() {
-          const result = runtime.addPreset(draftLabel, draftText)
-          if (!result.ok) {
-            setError(result.error)
-            return
-          }
-          setDraftLabel('')
-          setDraftText('')
-          setError('')
-        }
-
-        /** Take one paste (or one typed block) and report what landed. */
-        function addTipLines(raw) {
-          const result = runtime.addTips(raw)
-          if (!result.ok) {
-            setError(result.error)
-            setTipNote('')
-            return false
-          }
-          const parts = [fill(t('tipsAdded'), result.added)]
-          if (result.skipped > 0) parts.push(fill(t('tipsSkipped'), result.skipped))
-          setError('')
-          setTipNote(parts.join('，'))
-          setDraftTip('')
-          return true
-        }
-
-        function addTipLine() {
-          addTipLines(draftTip)
-        }
-
-        /** Take one pasted block list and report what landed. */
-        function importLines(raw) {
-          const result = runtime.importPresets(raw)
-          if (!result.ok) {
-            setError(result.error)
-            setPresetNote('')
-            return false
-          }
-          const parts = [fill(t('importAdded'), result.added)]
-          if (result.skipped > 0) parts.push(fill(t('importSkipped'), result.skipped))
-          setError('')
-          setPresetNote(parts.join('，'))
-          setDraftImport('')
-          return true
-        }
-
-        /** Copy every configured prompt and report the outcome in place. */
-        function exportLines() {
-          Promise.resolve(runtime.exportPresets()).then((result) => {
-            if (result?.ok !== true) {
-              setError(result?.error ?? t('exportFailed'))
-              setCopyNote('')
-              return
-            }
-            setError('')
-            setCopyNote(fill(t('exportDone'), result.count))
-          })
-        }
-
-        /** A pasted list is split right away: no extra click needed. */
-        function onTipPaste(event) {
-          const text = event?.clipboardData?.getData?.('text')
-          if (typeof text !== 'string' || text.trim() === '') return
-          event.preventDefault?.()
-          addTipLines(text)
-        }
-
-        /**
-         * One settings block with the same heading rhythm as a floating-window
-         * module: accent bar, title, optional one-line description.
-         */
-        function settingsSection(key, title, desc, children, options) {
-          const collapsible = options?.collapsible === true
-          const head = h(
-            collapsible ? 'summary' : 'div',
-            { className: 'dsh-nudge-settings-section-head' },
-            h('span', { className: 'dsh-nudge-settings-section-title' }, title),
-            options?.meta ? h('span', { className: 'dsh-nudge-settings-section-meta' }, options.meta) : null,
-          )
-          return h(
-            collapsible ? 'details' : 'section',
-            { key, className: `dsh-nudge-settings-section${collapsible ? ' collapsible' : ''}` },
-            head,
-            desc ? h('div', { className: 'dsh-nudge-settings-section-desc' }, desc) : null,
-            ...children,
-          )
-        }
-
-        /** A nested, closed-by-default editor (the long prompt list). */
-        function foldGroup(key, title, meta, children, hint) {
-          return h(
-            'details',
-            { key, className: 'dsh-nudge-settings-fold' },
-            h(
-              'summary',
-              {
-                className: 'dsh-nudge-settings-fold-head',
-                ...(typeof hint === 'string' && hint !== '' ? { title: hint } : null),
-              },
-              h('span', null, title),
-              meta ? h('span', { className: 'dsh-nudge-settings-fold-meta' }, meta) : null,
-            ),
-            ...children,
-          )
-        }
-
         // The dashboard leads the settings page: it answers "am I using this?"
         // before the switches that change how it behaves.
-        const statsSection = h(
+        // before the switches that change how it behaves.
+        return h(
           'div',
           { key: 'stats', className: 'dsh-nudge-stats-group' },
           h(
@@ -7933,6 +7863,117 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
             ),
           ),
         )
+      }
+
+
+        function add() {
+          const result = runtime.addPreset(draftLabel, draftText)
+          if (!result.ok) {
+            setError(result.error)
+            return
+          }
+          setDraftLabel('')
+          setDraftText('')
+          setError('')
+        }
+
+        /** Take one paste (or one typed block) and report what landed. */
+        function addTipLines(raw) {
+          const result = runtime.addTips(raw)
+          if (!result.ok) {
+            setError(result.error)
+            setTipNote('')
+            return false
+          }
+          const parts = [fill(t('tipsAdded'), result.added)]
+          if (result.skipped > 0) parts.push(fill(t('tipsSkipped'), result.skipped))
+          setError('')
+          setTipNote(parts.join('，'))
+          setDraftTip('')
+          return true
+        }
+
+        function addTipLine() {
+          addTipLines(draftTip)
+        }
+
+        /** Take one pasted block list and report what landed. */
+        function importLines(raw) {
+          const result = runtime.importPresets(raw)
+          if (!result.ok) {
+            setError(result.error)
+            setPresetNote('')
+            return false
+          }
+          const parts = [fill(t('importAdded'), result.added)]
+          if (result.skipped > 0) parts.push(fill(t('importSkipped'), result.skipped))
+          setError('')
+          setPresetNote(parts.join('，'))
+          setDraftImport('')
+          return true
+        }
+
+        /** Copy every configured prompt and report the outcome in place. */
+        function exportLines() {
+          Promise.resolve(runtime.exportPresets()).then((result) => {
+            if (result?.ok !== true) {
+              setError(result?.error ?? t('exportFailed'))
+              setCopyNote('')
+              return
+            }
+            setError('')
+            setCopyNote(fill(t('exportDone'), result.count))
+          })
+        }
+
+        /** A pasted list is split right away: no extra click needed. */
+        function onTipPaste(event) {
+          const text = event?.clipboardData?.getData?.('text')
+          if (typeof text !== 'string' || text.trim() === '') return
+          event.preventDefault?.()
+          addTipLines(text)
+        }
+
+        /**
+         * One settings block with the same heading rhythm as a floating-window
+         * module: accent bar, title, optional one-line description.
+         */
+        function settingsSection(key, title, desc, children, options) {
+          const collapsible = options?.collapsible === true
+          const head = h(
+            collapsible ? 'summary' : 'div',
+            { className: 'dsh-nudge-settings-section-head' },
+            h('span', { className: 'dsh-nudge-settings-section-title' }, title),
+            options?.meta ? h('span', { className: 'dsh-nudge-settings-section-meta' }, options.meta) : null,
+          )
+          return h(
+            collapsible ? 'details' : 'section',
+            { key, className: `dsh-nudge-settings-section${collapsible ? ' collapsible' : ''}` },
+            head,
+            desc ? h('div', { className: 'dsh-nudge-settings-section-desc' }, desc) : null,
+            ...children,
+          )
+        }
+
+        /** A nested, closed-by-default editor (the long prompt list). */
+        function foldGroup(key, title, meta, children, hint) {
+          return h(
+            'details',
+            { key, className: 'dsh-nudge-settings-fold' },
+            h(
+              'summary',
+              {
+                className: 'dsh-nudge-settings-fold-head',
+                ...(typeof hint === 'string' && hint !== '' ? { title: hint } : null),
+              },
+              h('span', null, title),
+              meta ? h('span', { className: 'dsh-nudge-settings-fold-meta' }, meta) : null,
+            ),
+            ...children,
+          )
+        }
+
+        const statsSection = StatsBoard({ stats: state.stats, presets: state.presets, t })
 
         return h(
           'div',
