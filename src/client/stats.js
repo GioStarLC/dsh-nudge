@@ -32,7 +32,9 @@ import { readJson } from './storage.js'
      * annotation } } }`. Unknown fields, malformed rows and days outside the
      * local-date shape are dropped, and only the newest days are kept.
      */
+    /** @returns {NudgeStats} */
     function normalizeStats(value) {
+      /** @type {Record<string, NudgeStatsDay>} */
       const days = {}
       const source = value !== null && typeof value === 'object' ? value.days : undefined
       if (source === null || typeof source !== 'object' || Array.isArray(source)) return { days }
@@ -41,6 +43,7 @@ import { readJson } from './storage.js'
       for (const key of keys) {
         const raw = source[key]
         if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) continue
+        /** @type {NudgeStatsDay} */
         const entry = {}
         for (const field of STAT_FIELDS) {
           const count = raw[field]
@@ -50,6 +53,7 @@ import { readJson } from './storage.js'
         // follows the same window and ages out with it.
         const rawPresets = raw.presets
         if (rawPresets !== null && typeof rawPresets === 'object' && !Array.isArray(rawPresets)) {
+          /** @type {Record<string, number>} */
           const presets = {}
           let kept = 0
           for (const id of Object.keys(rawPresets)) {

@@ -5,9 +5,10 @@
  *
  * Built into `client.js` by `scripts/build.mjs`; edit this file, not the bundle.
  */
-import { ANCHOR_SELECTOR, CAPTURE_HIGHLIGHT, CONTEXT_CHARS, DEFAULT_DELIVERY, DEFAULT_PRESET, DIAG_SAMPLES, EVENT_RECEIPT_MS, FLASH_HOLD_MS, HIGHLIGHT_NAME, IDLE_CONFIRM_MS, MAX_STAT_PRESET_ID, MAX_TIPS, MISS_RESCAN_MS, PILL_SIZE, SELF_SELECTOR, SETTLE_MS, UI_KEY, WAIT_TIMEOUT_MS } from './constants.js'
-import { assistantMessageText, eventSourceOf, lastDurableSeq, mintRequestId, readLang, resolveTarget, sessionRemoteOf, statusOf, timeZoneOf, userMessageText } from './context.js'
+import { ANCHOR_SELECTOR, CAPTURE_HIGHLIGHT, CONTEXT_CHARS, DEFAULT_DELIVERY, DEFAULT_PRESET, DIAG_SAMPLES, FLASH_HOLD_MS, HIGHLIGHT_NAME, MAX_STAT_PRESET_ID, MAX_TIPS, MISS_RESCAN_MS, PILL_SIZE, SELF_SELECTOR, UI_KEY } from './constants.js'
+import { readLang, resolveTarget, statusOf } from './context.js'
 import { CSS } from './css.js'
+import { createDelivery } from './delivery.js'
 import { anchorFromQuote, anchorFromRange, locateAnchor, packedMapOf, packedText, rangeFromPacked, sameRanges } from './dom.js'
 import { chipSlotAt, clampPoint, dockPosition, isPoint, rectValue, snapToEdge, viewport } from './geometry.js'
 import { EN, ZH } from './locale.js'
@@ -32,7 +33,10 @@ import { builtinTips, normalizeTipList, tidyTip } from './tips.js'
       const initialTarget = resolveTarget(ctx)
       // Every persisted preference comes from the settings table, so the launch
       // state and a later restore cannot drift apart.
-      const savedSettings = readSettings({ lang: language, sessionId: initialTarget?.sessionId })
+      // The settings table owns which fields exist; the reader fills every row.
+      const savedSettings = /** @type {NudgeSettingsState} */ (
+        readSettings({ lang: language, sessionId: initialTarget?.sessionId })
+      )
 
       /**
        * The annotation surface at rest: no draft, nothing stowed, no editor, no
@@ -60,6 +64,7 @@ import { builtinTips, normalizeTipList, tidyTip } from './tips.js'
         nudgeEditError: '',
       }
 
+      /** @type {NudgeRuntimeState} */
       let state = {
         phase: 'idle',
         note: '',
@@ -125,7 +130,10 @@ import { builtinTips, normalizeTipList, tidyTip } from './tips.js'
         return state
       }
 
-      /** Replace state and notify every renderer. */
+      /**
+       * Replace state and notify every renderer.
+       * @param {Partial<NudgeRuntimeState>} patch
+       */
       function setState(patch) {
         let changed = false
         for (const key of Object.keys(patch)) {
@@ -159,216 +167,21 @@ import { builtinTips, normalizeTipList, tidyTip } from './tips.js'
 
       // --- delivery -------------------------------------------------------
 
-      let waiting = null
+      const delivery = createDelivery({
+        ctx,
+        getState: () => state,
+        setState,
+        text,
+      })
 
-      function clearWaitTimers(entry) {
-        if (!entry) return
-        if (entry.settleTimer !== undefined) clearTimeout(entry.settleTimer)
-        if (entry.idleTimer !== undefined) clearTimeout(entry.idleTimer)
-        if (entry.receiptTimer !== undefined) clearTimeout(entry.receiptTimer)
-        if (entry.timeoutTimer !== undefined) clearTimeout(entry.timeoutTimer)
-        entry.settleTimer = undefined
-        entry.idleTimer = undefined
-        entry.receiptTimer = undefined
-        entry.timeoutTimer = undefined
+      /** Deliver one message into the on-screen session. */
+      function deliver(message) {
+        return delivery.deliver(message)
       }
 
+      /** End the in-flight wait; the delivery module owns its timers and watch. */
       function endWaiting() {
-        if (waiting) {
-          clearWaitTimers(waiting)
-          if (typeof waiting.unsubscribeEvents === 'function') {
-            try {
-              waiting.unsubscribeEvents()
-            } catch {
-              /* already released */
-            }
-          }
-          waiting.unsubscribeEvents = undefined
-          waiting = null
-        }
-      }
-
-      function finishDone(note) {
-        if (!waiting) return
-        const sessionId = waiting.sessionId
-        endWaiting()
-        setState({
-          phase: 'done',
-          note: note ?? '',
-          error: '',
-          lastAt: Date.now(),
-          lastSessionId: sessionId,
-          unread: state.collapsed ? true : state.unread,
-        })
-      }
-
-      function finishError(message) {
-        endWaiting()
-        setState({ phase: 'error', error: message, note: '' })
-      }
-
-      /** Map one Host/transport failure to the visible reason (6.1 / 6.2). */
-      function describeFailure(failure) {
-        const code = failure && typeof failure.code === 'string' ? failure.code : ''
-        const message = failure && typeof failure.message === 'string' ? failure.message : ''
-        if (code === 'session/not-found') return text('sessionClosed')
-        if (code === 'gateway/bad-request') return text('badRequest')
-        return message.length > 0 ? `${text('deliveryFailed')}：${message}` : text('deliveryFailed')
-      }
-
-      /** Unwrap the generated RemoteResult wrapper (bare payloads pass through). */
-      function unwrapResult(result) {
-        if (result !== null && typeof result === 'object' && typeof result.ok === 'boolean') {
-          return result.ok ? { ok: true, value: result.value } : { ok: false, error: result.error }
-        }
-        if (result !== null && typeof result === 'object' && result.accepted === true) {
-          return { ok: true, value: result }
-        }
-        return { ok: false, error: { message: 'unexpected prompt result' } }
-      }
-
-      /**
-       * Classify a durable turn boundary that closed after the probe.
-       * @param kind - `turn/end` reason kind.
-       * @returns true when the wait was settled by the boundary.
-       */
-      function settleByTurnEnd(kind) {
-        if (kind === 'blocked') {
-          finishError(text('turnBlockedNote'))
-          return true
-        }
-        if (kind === 'failed') {
-          finishError(text('turnFailedNote'))
-          return true
-        }
-        if (kind === 'aborted') {
-          finishError(text('turnAbortedNote'))
-          return true
-        }
-        if (kind === 'completed') {
-          finishError(text('noAnswerNote'))
-          return true
-        }
-        return false
-      }
-
-      /**
-       * Read the durable window and settle the wait on the probe's own turn.
-       *
-       * Correlation is exact: the probe carries a client-minted `requestId`, the
-       * Host persists it as the user message's `source.rpcId`, and the answer is
-       * the first text-bearing assistant message of the step that consumes it.
-       * The plugin only looks at event types and seq — never at the reply text.
-       */
-      function onSessionEvents(entry) {
-        if (waiting !== entry) return
-        const snapshot = entry.eventSource?.getSnapshot?.()
-        const entries = snapshot?.entries
-        if (!Array.isArray(entries)) return
-        if (entry.probeSeq === undefined) {
-          for (const item of entries) {
-            if (item?.type !== 'event') continue
-            const event = item.event
-            if (!event || event.seq <= entry.sinceSeq) continue
-            if (event.type !== 'user/message') continue
-            const source = event.data?.source
-            if (source && source.rpcId === entry.requestId) {
-              entry.probeSeq = event.seq
-              break
-            }
-            if (entry.probeText.length > 0 && userMessageText(event) === entry.probeText) {
-              entry.probeSeq = event.seq
-              break
-            }
-          }
-        }
-        if (entry.probeSeq === undefined) return
-        // The step that consumes a steering message starts at the next boundary;
-        // for a queued turn it is the turn's first step. A message produced by
-        // the step already in flight is not the answer, so the reply is the
-        // first text-bearing assistant message after that step opens.
-        if (entry.stepSeq === undefined) {
-          for (const item of entries) {
-            if (item?.type !== 'event') continue
-            const event = item.event
-            if (!event || event.seq <= entry.probeSeq) continue
-            if (event.type === 'step/start') {
-              entry.stepSeq = event.seq
-              break
-            }
-          }
-        }
-        for (const item of entries) {
-          if (item?.type !== 'event') continue
-          const event = item.event
-          if (!event || event.seq <= entry.probeSeq) continue
-          if (event.type === 'assistant/message') {
-            if (entry.stepSeq === undefined || event.seq <= entry.stepSeq) continue
-            if (assistantMessageText(event).trim().length > 0) {
-              finishDone('')
-              return
-            }
-            continue
-          }
-          if (event.type === 'turn/end') {
-            const kind = event.data?.reason?.kind
-            // A blocked end names the archived gate itself, so it needs no step
-            // to prove the boundary belongs to this probe. Every other outcome
-            // only explains the step that consumed the probe.
-            if (kind === 'blocked') {
-              if (settleByTurnEnd(kind)) return
-              continue
-            }
-            if (entry.stepSeq === undefined || event.seq <= entry.stepSeq) continue
-            if (settleByTurnEnd(kind)) return
-          }
-        }
-      }
-
-      /**
-       * Watch one session's durable window for this probe's turn.
-       * @returns whether the event route is available (otherwise the running
-       *   state heuristic remains the fallback).
-       */
-      function beginEventWatch(entry) {
-        const source = eventSourceOf(ctx, entry.sessionId)
-        if (!source || typeof source.subscribe !== 'function' || typeof source.getSnapshot !== 'function') {
-          return false
-        }
-        entry.eventSource = source
-        entry.sinceSeq = lastDurableSeq(source.getSnapshot())
-        entry.unsubscribeEvents = source.subscribe(() => onSessionEvents(entry))
-        onSessionEvents(entry)
-        return true
-      }
-
-      /** True when the session's last turn closed while a wait was in flight. */
-      function onStatusChange() {
-        refreshWorld()
-        const entry = waiting
-        if (!entry) return
-        // The event route knows exactly when the probe's turn opens and closes;
-        // running-state transitions would settle it too early or too late.
-        if (entry.eventSource !== undefined) return
-        const running = statusOf(ctx, entry.sessionId)?.running === true
-        if (running) {
-          entry.sawRunning = true
-          if (entry.settleTimer !== undefined) {
-            clearTimeout(entry.settleTimer)
-            entry.settleTimer = undefined
-          }
-          return
-        }
-        // An idle session may answer before ever publishing `running`; the
-        // idle timer settles that case. A turn observed running must close
-        // once and stay closed: the queue mode may close and reopen a turn.
-        if (!entry.sawRunning || entry.settleTimer !== undefined) return
-        entry.settleTimer = setTimeout(() => {
-          entry.settleTimer = undefined
-          if (!waiting || waiting !== entry) return
-          if (statusOf(ctx, entry.sessionId)?.running === true) return
-          finishDone('')
-        }, SETTLE_MS)
+        delivery.endWaiting()
       }
 
       // --- composer insertion ---------------------------------------------
@@ -383,7 +196,7 @@ import { builtinTips, normalizeTipList, tidyTip } from './tips.js'
       /** The focused composer editor element, when the caret is inside it. */
       function composerNode() {
         try {
-          const active = document.activeElement
+          const active = /** @type {HTMLElement | null} */ (document.activeElement)
           if (!active) return undefined
           const editable =
             active.isContentEditable === true ||
@@ -593,7 +406,9 @@ import { builtinTips, normalizeTipList, tidyTip } from './tips.js'
           if (quote.trim() === '') return null
           const range = selection.getRangeAt(0)
           const node = range.commonAncestorContainer
-          const element = node && node.nodeType === 1 ? node : node?.parentElement
+          const element = /** @type {Element | null} */ (
+            node && node.nodeType === 1 ? node : node?.parentElement
+          )
           if (!element || typeof element.closest !== 'function') return null
           if (element.closest(EDITABLE_SELECTOR)) return null
           if (element.closest(MODAL_SELECTOR)) return null
@@ -1522,7 +1337,7 @@ import { builtinTips, normalizeTipList, tidyTip } from './tips.js'
         if (draft === null && state.annotationEditingId === null) return false
         if (typeof document !== 'undefined' && document.activeElement?.closest?.(SELF_SELECTOR)) {
           try {
-            document.activeElement.blur()
+            /** @type {HTMLElement} */ (document.activeElement).blur()
           } catch {
             /* nothing focused */
           }
@@ -1718,7 +1533,7 @@ import { builtinTips, normalizeTipList, tidyTip } from './tips.js'
        */
       function fieldHasSelection() {
         try {
-          const active = document.activeElement
+          const active = /** @type {HTMLInputElement | HTMLTextAreaElement | null} */ (document.activeElement)
           if (!active || typeof active.selectionStart !== 'number') return false
           if (typeof active.closest !== 'function' || active.closest(SELF_SELECTOR) === null) return false
           return active.selectionStart !== active.selectionEnd
@@ -1934,116 +1749,6 @@ import { builtinTips, normalizeTipList, tidyTip } from './tips.js'
         const ids = new Set(pending.map((item) => item.id))
         const next = state.annotations.filter((item) => !ids.has(item.id))
         commitAnnotations(next)
-        return true
-      }
-
-      /** Deliver one message into the on-screen session. */
-      function deliver(message) {
-        if (typeof message !== 'string' || message.trim() === '') return false
-        const target = resolveTarget(ctx) ?? state.target
-        if (!target) {
-          setState({ phase: 'error', error: text('noSession'), note: '' })
-          return false
-        }
-        // 6.3: the agent's ball is in the user's court; a second request would
-        // only stack two pending inputs, so refuse with the reason.
-        if (statusOf(ctx, target.sessionId)?.pendingInteraction) {
-          setState({ phase: 'error', error: text('waitingQuestion'), note: '' })
-          return false
-        }
-        const remote = sessionRemoteOf(ctx)
-        if (!remote) {
-          setState({ phase: 'error', error: text('transportMissing'), note: '' })
-          return false
-        }
-        const delivery = isDelivery(state.deliveryOverride)
-          ? state.deliveryOverride
-          : DEFAULT_DELIVERY
-        const mode = delivery === 'steer' ? 'steer' : 'queue'
-        const requestId = mintRequestId()
-        const controller = new AbortController()
-        const entry = {
-          sessionId: target.sessionId,
-          requestId,
-          probeText: message,
-          sawRunning: statusOf(ctx, target.sessionId)?.running === true,
-          settleTimer: undefined,
-          idleTimer: undefined,
-          receiptTimer: undefined,
-          timeoutTimer: undefined,
-          eventSource: undefined,
-          unsubscribeEvents: undefined,
-          sinceSeq: 0,
-          probeSeq: undefined,
-          stepSeq: undefined,
-        }
-        waiting = entry
-        setState({ phase: 'waiting', note: '', error: '', target })
-        const eventRoute = beginEventWatch(entry)
-
-        entry.timeoutTimer = setTimeout(function onTimeout() {
-          if (!waiting || waiting !== entry) return
-          // A long turn is the normal case for a follow-up nudge: keep waiting
-          // while the agent is still running instead of declaring it late.
-          if (statusOf(ctx, entry.sessionId)?.running === true) {
-            setState({ note: text('stillRunningNote') })
-            entry.timeoutTimer = setTimeout(onTimeout, WAIT_TIMEOUT_MS)
-            return
-          }
-          if (eventRoute) finishError(text('timeoutNote'))
-          else finishDone(text('timeoutNote'))
-        }, WAIT_TIMEOUT_MS)
-        if (eventRoute) {
-          entry.receiptTimer = setTimeout(function onReceipt() {
-            if (!waiting || waiting !== entry) return
-            if (entry.probeSeq !== undefined) return
-            if (statusOf(ctx, entry.sessionId)?.running === true) {
-              entry.receiptTimer = setTimeout(onReceipt, EVENT_RECEIPT_MS)
-              return
-            }
-            finishError(text('noReceiptNote'))
-          }, EVENT_RECEIPT_MS)
-        } else {
-          // No durable window to watch: fall back to the running-state heuristic.
-          entry.idleTimer = setTimeout(() => {
-            if (!waiting || waiting !== entry) return
-            if (entry.sawRunning) return
-            // The unified status may still report the turn: trust it over the timer.
-            if (statusOf(ctx, entry.sessionId)?.running === true) {
-              entry.sawRunning = true
-              return
-            }
-            finishDone(text('unconfirmedNote'))
-          }, IDLE_CONFIRM_MS)
-        }
-
-        let request
-        try {
-          request = remote.prompt(
-            {
-              requestId,
-              sessionId: target.sessionId,
-              mode,
-              content: [{ type: 'text', text: message }],
-              clientTimeZone: timeZoneOf(),
-            },
-            controller.signal,
-          )
-        } catch (error) {
-          finishError(describeFailure(error))
-          return false
-        }
-        Promise.resolve(request).then(
-          (result) => {
-            if (!waiting || waiting !== entry) return
-            const outcome = unwrapResult(result)
-            if (!outcome.ok) finishError(describeFailure(outcome.error))
-          },
-          (error) => {
-            if (!waiting || waiting !== entry) return
-            finishError(describeFailure(error))
-          },
-        )
         return true
       }
 
@@ -2937,7 +2642,7 @@ import { builtinTips, normalizeTipList, tidyTip } from './tips.js'
           resetAnchorRecovery()
           // The ask is bound to the conversation it was clicked in (1.2); a
           // different conversation must not inherit its status or its wait.
-          if (waiting !== null) endWaiting()
+          if (delivery.isWaiting()) endWaiting()
           // The tray belongs to the conversation it quotes: load that Session's
           // saved notes and drop any half-written one.
           settleAnnotation({
@@ -2964,7 +2669,12 @@ import { builtinTips, normalizeTipList, tidyTip } from './tips.js'
       }
       const statusSource = ctx.get?.('uiSession')?.sessionStatus
       if (typeof statusSource?.subscribe === 'function') {
-        offs.push(statusSource.subscribe(onStatusChange))
+        offs.push(
+          statusSource.subscribe(() => {
+            refreshWorld()
+            delivery.onStatusChange()
+          }),
+        )
       }
       try {
         const locale = ctx.get?.('locale')

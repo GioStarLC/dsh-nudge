@@ -48,6 +48,7 @@ import { readTips } from './tips.js'
      *   annotation tray is stored per Session, so its state value is one
      *   Session's list while its storage value is the whole store
      */
+    /** @type {NudgeSettingRow[]} */
     const SETTINGS = [
       switchSetting('turbo', TURBO_KEY, readTurbo),
       switchSetting('quick', QUICK_KEY, readQuick),
@@ -57,18 +58,18 @@ import { readTips } from './tips.js'
         field: 'deliveryOverride',
         key: DELIVERY_KEY,
         decode: () => readDeliveryOverride(),
-        encode: (mode) => (isDelivery(mode) ? mode : undefined),
+        encode: (mode) => deliveryModeOf(mode),
         // The record says "queue" — how that mode reads in the settings page —
         // while the state machine calls the same mode `followup`. The two halves
         // disagreeing here is what used to drop this setting on every restart,
         // so the translation lives in this one pair of functions.
         toWire: () => {
-          const mode = readRaw(DELIVERY_KEY)
-          if (!isDelivery(mode)) return undefined
+          const mode = deliveryModeOf(readRaw(DELIVERY_KEY))
+          if (mode === undefined) return undefined
           return mode === 'followup' ? 'queue' : mode
         },
         fromWire: (value) => {
-          const mode = value === 'queue' ? 'followup' : isDelivery(value) ? value : undefined
+          const mode = value === 'queue' ? 'followup' : deliveryModeOf(value)
           return mode !== undefined && writeRaw(DELIVERY_KEY, mode)
         },
       },
@@ -374,9 +375,18 @@ import { readTips } from './tips.js'
       }
     }
 
+    /**
+     * The delivery mode a stored or supplied value names, or undefined.
+     * @param {unknown} value
+     * @returns {'followup' | 'steer' | undefined}
+     */
+    function deliveryModeOf(value) {
+      return value === 'followup' || value === 'steer' ? value : undefined
+    }
+
     /** Whether a value is one of the two accepted delivery modes. */
     function isDelivery(value) {
-      return value === 'followup' || value === 'steer'
+      return deliveryModeOf(value) !== undefined
     }
 
     /**
@@ -458,4 +468,4 @@ import { readTips } from './tips.js'
       return width === 3 ? 'frameThick' : 'frameNormal'
     }
 
-export { switchSetting, SETTINGS, settingRow, readSettings, persistSetting, clearSetting, settingsSnapshot, hasStoredSettings, applySettingsStore, mirrorReady, mirrorDirty, mirrorAdopting, mirrorTimer, noteSettingsWrite, armSettingsMirror, markSettingsRead, adoptFromHost, markSettingsDirty, markSettingsSynced, cancelSettingsMirror, commitSettingsToHost, flushSettingsMirror, loadStoreFromHost, isDelivery, readDeliveryOverride, readTurbo, readQuick, readAutoPaste, isFrameWidth, readFrame, frameLabelKey, readPresets }
+export { deliveryModeOf, switchSetting, SETTINGS, settingRow, readSettings, persistSetting, clearSetting, settingsSnapshot, hasStoredSettings, applySettingsStore, mirrorReady, mirrorDirty, mirrorAdopting, mirrorTimer, noteSettingsWrite, armSettingsMirror, markSettingsRead, adoptFromHost, markSettingsDirty, markSettingsSynced, cancelSettingsMirror, commitSettingsToHost, flushSettingsMirror, loadStoreFromHost, isDelivery, readDeliveryOverride, readTurbo, readQuick, readAutoPaste, isFrameWidth, readFrame, frameLabelKey, readPresets }

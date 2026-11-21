@@ -1230,231 +1230,6 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
 `.trim();
 
 /**
- * Reading the transcript: packed text and quote anchors.
- *
- * Selection anchors survive a repaint because they are found again by text, not by node.
- *
- * Built into `client.js` by `scripts/build.mjs`; edit this file, not the bundle.
- */
-
-    /** The element a DOM node belongs to, or null. */
-    function elementOfNode(node) {
-      if (!node) return null
-      return node.nodeType === 1 ? node : (node.parentElement ?? null)
-    }
-
-    /** Tags whose text must not be projected. */
-    const NON_TEXT_TAGS = { SCRIPT: true, STYLE: true, NOSCRIPT: true, TEMPLATE: true };
-
-    /** Whether an element's subtree is invisible and must not be walked. */
-    function isHiddenElement(element) {
-      if (NON_TEXT_TAGS[element.tagName] === true) return true
-      if (element.hidden === true) return true
-      try {
-        const style = window.getComputedStyle?.(element);
-        return style ? style.display === 'none' || style.visibility === 'hidden' : false
-      } catch {
-        return false
-      }
-    }
-
-    /** Whitespace-free projection both sides of an anchor are compared on. */
-    function packedText(value) {
-      // The per-character `trim()` test this replaces kept exactly the
-      // non-whitespace code units; one regular expression is much cheaper on
-      // the long quotes and long rows this runs over.
-      return (typeof value === 'string' ? value : '').replace(/\s+/g, '')
-    }
-
-    /** Every visible kept character under a root, with its (node, offset) pair. */
-    function packedMapOf(root) {
-      let packed = '';
-      const map = [];
-      const walk = (node) => {
-        const children = node.childNodes;
-        for (let index = 0; index < children.length; index += 1) {
-          const child = children[index];
-          if (child.nodeType === 3) {
-            const data = child.data;
-            for (let offset = 0; offset < data.length; offset += 1) {
-              const ch = data.charAt(offset);
-              if (ch.trim() === '') continue
-              packed += ch;
-              map.push(child, offset);
-            }
-          } else if (child.nodeType === 1) {
-            if (isHiddenElement(child)) continue
-            walk(child);
-          }
-        }
-      };
-      walk(root);
-      return { packed, map }
-    }
-
-    /** A DOM Range covering [start, end) of a packed map, or null. */
-    function rangeFromPacked(full, start, end) {
-      if (start < 0 || end <= start) return null
-      const last = end - 1;
-      if (last * 2 + 1 >= full.map.length) return null
-      try {
-        const range = document.createRange();
-        range.setStart(full.map[start * 2], full.map[start * 2 + 1]);
-        range.setEnd(full.map[last * 2], full.map[last * 2 + 1] + 1);
-        return range
-      } catch {
-        return null
-      }
-    }
-
-    /** Every start index of `needle` inside `haystack`, capped. */
-    function occurrencesOf(haystack, needle, limit) {
-      const out = [];
-      if (needle === '') return out
-      let at = haystack.indexOf(needle);
-      while (at !== -1 && out.length < limit) {
-        out.push(at);
-        at = haystack.indexOf(needle, at + 1);
-      }
-      return out
-    }
-
-    /** Centre-to-centre distance between two rects. */
-    function rectDistance(left, right) {
-      const dx = (left.left + left.right) / 2 - (right.left + right.right) / 2;
-      const dy = (left.top + left.bottom) / 2 - (right.top + right.bottom) / 2;
-      return Math.sqrt(dx * dx + dy * dy)
-    }
-
-    /** The anchor a live selection hangs on, or null outside a flow item. */
-    function anchorFromRange(range, quote) {
-      const element = elementOfNode(range.commonAncestorContainer);
-      if (element === null || typeof element.closest !== 'function') return null
-      const anchorElement = element.closest(ANCHOR_SELECTOR);
-      if (anchorElement === null) return null
-      const packed = packedText(quote);
-      if (packed === '') return null
-      const full = packedMapOf(anchorElement);
-      const candidates = occurrencesOf(full.packed, packed, MAX_OCCURRENCES);
-      if (candidates.length === 0) return null
-      let target = null;
-      try {
-        target = range.getBoundingClientRect();
-      } catch {
-        target = null;
-      }
-      let best = null;
-      for (const index of candidates) {
-        const candidateRange = rangeFromPacked(full, index, index + packed.length);
-        if (candidateRange === null) continue
-        let distance = 0;
-        if (target !== null) {
-          try {
-            distance = rectDistance(candidateRange.getBoundingClientRect(), target);
-          } catch {
-            distance = 0;
-          }
-        }
-        if (best === null || distance < best.distance) best = { index, distance };
-      }
-      if (best === null) return null
-      return {
-        key: anchorElement.getAttribute('data-chat-anchor-key'),
-        quote: packed,
-        prefix: full.packed.slice(Math.max(0, best.index - CONTEXT_CHARS), best.index),
-        suffix: full.packed.slice(
-          best.index + packed.length,
-          best.index + packed.length + CONTEXT_CHARS,
-        ),
-        index: best.index,
-      }
-    }
-
-    /**
-     * The anchor a quote hangs on when no live selection is left: the innermost
-     * flow item whose projection carries the passage.
-     *
-     * This is the recovery path, not the primary one — the anchor of a fresh
-     * selection comes from the range. A passage carried by two unrelated flow
-     * items stays unanchored, because painting the wrong one is worse than
-     * painting none.
-     */
-    function anchorFromQuote(quote) {
-      const packed = packedText(quote);
-      if (packed === '') return null
-      const elements = document.querySelectorAll?.(ANCHOR_SELECTOR) ?? [];
-      const matches = [];
-      for (const element of elements) {
-        const key = element.getAttribute?.('data-chat-anchor-key');
-        if (typeof key !== 'string' || key === '') continue
-        const full = packedMapOf(element);
-        const index = full.packed.indexOf(packed);
-        if (index === -1) continue
-        matches.push({ element, key, full, index });
-      }
-      // A turn-process row wraps its member rows, so the deepest match is the
-      // one the passage really belongs to.
-      const deepest = matches.filter(
-        (match) =>
-          !matches.some(
-            (other) => other !== match && match.element.contains?.(other.element) === true,
-          ),
-      );
-      if (deepest.length !== 1) return null
-      const { key, full, index } = deepest[0];
-      return {
-        key,
-        quote: packed,
-        prefix: full.packed.slice(Math.max(0, index - CONTEXT_CHARS), index),
-        suffix: full.packed.slice(index + packed.length, index + packed.length + CONTEXT_CHARS),
-        index,
-      }
-    }
-
-    /** Whether a painted highlight already covers exactly these ranges, in order. */
-    function sameRanges(highlight, ranges) {
-      if (!highlight || typeof highlight[Symbol.iterator] !== 'function') return false
-      const current = [...highlight];
-      if (current.length !== ranges.length) return false
-      return current.every((range, index) => {
-        const next = ranges[index];
-        return (
-          range.collapsed !== true &&
-          range.startContainer === next.startContainer &&
-          range.startOffset === next.startOffset &&
-          range.endContainer === next.endContainer &&
-          range.endOffset === next.endOffset
-        )
-      })
-    }
-
-    /** Where one stored anchor sits in an anchor element's current projection. */
-    function locateAnchor(full, anchor) {
-      if (anchor === null || typeof anchor !== 'object') return null
-      if (typeof anchor.quote !== 'string' || anchor.quote === '') return null
-      const prefix = typeof anchor.prefix === 'string' ? anchor.prefix : '';
-      const suffix = typeof anchor.suffix === 'string' ? anchor.suffix : '';
-      const candidates = occurrencesOf(full.packed, anchor.quote, MAX_OCCURRENCES);
-      if (candidates.length === 0) return null
-      let best = null;
-      for (const index of candidates) {
-        let score = 0;
-        if (prefix !== '' && full.packed.slice(Math.max(0, index - prefix.length), index) === prefix) score += 4;
-        if (
-          suffix !== '' &&
-          full.packed.slice(index + anchor.quote.length, index + anchor.quote.length + suffix.length) === suffix
-        ) {
-          score += 4;
-        }
-        if (typeof anchor.index === 'number') score += Math.max(0, 2 - Math.abs(index - anchor.index) / 200);
-        if (best === null || score > best.score) best = { index, score };
-      }
-      if (best === null) return null
-      if (best.score < 4 && candidates.length > 1) return null
-      return { start: best.index, end: best.index + anchor.quote.length }
-    }
-
-/**
  * The page storage facade.
  *
  * One guarded accessor pair for localStorage; writes tell the durable mirror there is news.
@@ -1737,7 +1512,9 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
      * annotation } } }`. Unknown fields, malformed rows and days outside the
      * local-date shape are dropped, and only the newest days are kept.
      */
+    /** @returns {NudgeStats} */
     function normalizeStats(value) {
+      /** @type {Record<string, NudgeStatsDay>} */
       const days = {};
       const source = value !== null && typeof value === 'object' ? value.days : undefined;
       if (source === null || typeof source !== 'object' || Array.isArray(source)) return { days }
@@ -1746,6 +1523,7 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
       for (const key of keys) {
         const raw = source[key];
         if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) continue
+        /** @type {NudgeStatsDay} */
         const entry = {};
         for (const field of STAT_FIELDS) {
           const count = raw[field];
@@ -1755,6 +1533,7 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
         // follows the same window and ages out with it.
         const rawPresets = raw.presets;
         if (rawPresets !== null && typeof rawPresets === 'object' && !Array.isArray(rawPresets)) {
+          /** @type {Record<string, number>} */
           const presets = {};
           let kept = 0;
           for (const id of Object.keys(rawPresets)) {
@@ -1856,6 +1635,7 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
      *   annotation tray is stored per Session, so its state value is one
      *   Session's list while its storage value is the whole store
      */
+    /** @type {NudgeSettingRow[]} */
     const SETTINGS = [
       switchSetting('turbo', TURBO_KEY, readTurbo),
       switchSetting('quick', QUICK_KEY, readQuick),
@@ -1865,18 +1645,18 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
         field: 'deliveryOverride',
         key: DELIVERY_KEY,
         decode: () => readDeliveryOverride(),
-        encode: (mode) => (isDelivery(mode) ? mode : undefined),
+        encode: (mode) => deliveryModeOf(mode),
         // The record says "queue" — how that mode reads in the settings page —
         // while the state machine calls the same mode `followup`. The two halves
         // disagreeing here is what used to drop this setting on every restart,
         // so the translation lives in this one pair of functions.
         toWire: () => {
-          const mode = readRaw(DELIVERY_KEY);
-          if (!isDelivery(mode)) return undefined
+          const mode = deliveryModeOf(readRaw(DELIVERY_KEY));
+          if (mode === undefined) return undefined
           return mode === 'followup' ? 'queue' : mode
         },
         fromWire: (value) => {
-          const mode = value === 'queue' ? 'followup' : isDelivery(value) ? value : undefined;
+          const mode = value === 'queue' ? 'followup' : deliveryModeOf(value);
           return mode !== undefined && writeRaw(DELIVERY_KEY, mode)
         },
       },
@@ -2182,9 +1962,18 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
       }
     }
 
+    /**
+     * The delivery mode a stored or supplied value names, or undefined.
+     * @param {unknown} value
+     * @returns {'followup' | 'steer' | undefined}
+     */
+    function deliveryModeOf(value) {
+      return value === 'followup' || value === 'steer' ? value : undefined
+    }
+
     /** Whether a value is one of the two accepted delivery modes. */
     function isDelivery(value) {
-      return value === 'followup' || value === 'steer'
+      return deliveryModeOf(value) !== undefined
     }
 
     /**
@@ -2267,154 +2056,31 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
     }
 
 /**
- * The window state machine.
+ * Delivery: putting one probe into the conversation, and settling the wait.
  *
- * Delivery, the wait for an answer, annotations, settings, counters and the debug surface.
+ * The wait is correlated exactly: the probe carries a client-minted requestId,
+ * the Host persists it on the user message, and the answer is the first
+ * text-bearing assistant message of the step that consumes the probe. The
+ * running-state path is only the fallback for a composition without a durable
+ * event window.
  *
- * Built into `client.js` by `scripts/build.mjs`; edit this file, not the bundle.
+ * The factory receives the runtime's state accessors and its `text`; it never
+ * touches the view or the DOM. Built into `client.js` by `scripts/build.mjs`;
+ * edit this file, not the bundle.
  */
 
-    /**
-     * Build the window runtime.
-     *
-     * The view is a thin renderer over this object; the checks drive the same
-     * object without a browser renderer.
-     * @param ctx - plugin context.
-     * @returns the runtime handle.
-     */
-    function createRuntime(ctx) {
-      const saved = readJson(UI_KEY) ?? {};
-      const language = readLang(ctx);
-      const initialTarget = resolveTarget(ctx);
-      // Every persisted preference comes from the settings table, so the launch
-      // state and a later restore cannot drift apart.
-      const savedSettings = readSettings({ lang: language, sessionId: initialTarget?.sessionId });
-
-      /**
-       * The annotation surface at rest: no draft, nothing stowed, no editor, no
-       * half-typed note. The launch state and every closing transition spread
-       * this instead of listing the fields again, so a field added to the
-       * surface is reset in one place.
-       */
-      const IDLE_ANNOTATION = {
-        annotationDraft: null,
-        annotationCardHidden: false,
-        annotationNote: '',
-        annotationEditingId: null,
-        annotationEditRect: null,
-      };
-      /**
-       * The window's direct-edit surface for the quick inputs: whether the 编辑
-       * chip is armed, which entry's form is open, and the form's fields. One
-       * object so leaving the mode clears every part of it at once.
-       */
-      const IDLE_NUDGE_EDIT = {
-        nudgeEditing: false,
-        nudgeEditId: null,
-        nudgeEditLabel: '',
-        nudgeEditText: '',
-        nudgeEditError: '',
-      };
-
-      let state = {
-        phase: 'idle',
-        note: '',
-        error: '',
-        /** Short-lived confirmation of a toggle, cleared on a timer. */
-        flash: '',
-        lastAt: undefined,
-        lastSessionId: undefined,
-        unread: false,
-        // Every launch starts as the pill: the window is a reminder to look at
-        // the conversation, not a panel to close first.
-        collapsed: true,
-        // One anchor for both shapes: collapsing keeps the window in place and
-        // expanding returns it to the same spot. The stored record only says
-        // how far down it sat and which side it was on.
-        pos: isPoint(saved.pos) ? snapToEdge(saved.pos, true) : dockPosition(true),
-        /**
-         * Every persisted preference — the three switches, the delivery mode,
-         * the border width, the prompts and the chosen one, the idle lines, the
-         * counters and the collected notes — arrives from the settings table by
-         * field name, so the launch state cannot miss a row.
-         */
-        ...savedSettings,
-        /** Ids whose body is expanded in the settings list. */
-        presetOpen: [],
-        /** The preset opened in the settings editor, or null. */
-        presetEditingId: null,
-        target: initialTarget,
-        pendingQuestion: false,
-        /** True while the conversation composer is mounted and holds the caret. */
-        composerFocused: false,
-        /** Which idle line is showing; not persisted, so the launch restarts at the first. */
-        tipIndex: 0,
-        /** The idle line opened in its editor, or null. */
-        tipEditingIndex: null,
-        /**
-         * The annotation surface: the selection being annotated, whether its
-         * card is stowed, the note being written, and the collected note opened
-         * in the editor. A card and an editor never coexist.
-         */
-        ...IDLE_ANNOTATION,
-        /** Whether the annotation module shows its body (row summary when false). */
-        annotationExpanded: false,
-        /** Whether the nudge module (prompts / mode / primary) shows its body. */
-        nudgeExpanded: true,
-        /** The in-window "new prompt" form (title + body). */
-        nudgeDraftOpen: false,
-        nudgeDraftLabel: '',
-        nudgeDraftText: '',
-        nudgeDraftError: '',
-        ...IDLE_NUDGE_EDIT,
-        /** Whether the window shows the settings form in place of its body. */
-        settingsOpen: false,
-        /** Timestamp of the last capture, used to restart the attention pulse. */
-        attentionAt: 0,
-        /** The window control whose explanation bubble is showing, or null. */
-        tip: null,
-        lang: language,
-      };
-      const listeners = new Set();
-      /** One immutable snapshot per change, as `useSyncExternalStore` requires. */
-      function getSnapshot() {
-        return state
-      }
-
-      /** Replace state and notify every renderer. */
-      function setState(patch) {
-        let changed = false;
-        for (const key of Object.keys(patch)) {
-          if (!Object.is(state[key], patch[key])) {
-            changed = true;
-            break
-          }
-        }
-        if (!changed) return
-        state = { ...state, ...patch };
-        for (const listener of [...listeners]) {
-          try {
-            listener();
-          } catch (error) {
-            console.warn('[dsh-nudge] listener failed', error);
-          }
-        }
-      }
-
-      /** Subscribe one renderer. */
-      function subscribe(listener) {
-        listeners.add(listener);
-        return () => listeners.delete(listener)
-      }
-
-      /** Visible text for the current locale. */
-      function text(key) {
-        const dict = state.lang === 'zh' ? ZH : EN;
-        return dict[key] ?? key
-      }
-
+/**
+ * One in-flight probe.
+ * @param {object} deps
+ * @param {DshClientContext} deps.ctx
+ * @param {() => NudgeRuntimeState} deps.getState
+ * @param {(patch: Partial<NudgeRuntimeState>) => void} deps.setState
+ * @param {(key: string) => string} deps.text
+ */
+function createDelivery({ ctx, getState, setState, text }) {
       // --- delivery -------------------------------------------------------
 
+      /** @type {NudgeWaitEntry | null} */
       let waiting = null;
 
       function clearWaitTimers(entry) {
@@ -2454,7 +2120,7 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
           error: '',
           lastAt: Date.now(),
           lastSessionId: sessionId,
-          unread: state.collapsed ? true : state.unread,
+          unread: getState().collapsed ? true : getState().unread,
         });
       }
 
@@ -2599,8 +2265,8 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
       }
 
       /** True when the session's last turn closed while a wait was in flight. */
+      /** Settle a wait the running-state heuristic closed, when no event window exists. */
       function onStatusChange() {
-        refreshWorld();
         const entry = waiting;
         if (!entry) return
         // The event route knows exactly when the probe's turn opens and closes;
@@ -2627,6 +2293,523 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
         }, SETTLE_MS);
       }
 
+      /** Deliver one message into the on-screen session. */
+      function deliver(message) {
+        if (typeof message !== 'string' || message.trim() === '') return false
+        const target = resolveTarget(ctx) ?? getState().target;
+        if (!target) {
+          setState({ phase: 'error', error: text('noSession'), note: '' });
+          return false
+        }
+        // 6.3: the agent's ball is in the user's court; a second request would
+        // only stack two pending inputs, so refuse with the reason.
+        if (statusOf(ctx, target.sessionId)?.pendingInteraction) {
+          setState({ phase: 'error', error: text('waitingQuestion'), note: '' });
+          return false
+        }
+        const remote = sessionRemoteOf(ctx);
+        if (!remote) {
+          setState({ phase: 'error', error: text('transportMissing'), note: '' });
+          return false
+        }
+        const chosenMode = isDelivery(getState().deliveryOverride)
+          ? getState().deliveryOverride
+          : DEFAULT_DELIVERY;
+        const mode = chosenMode === 'steer' ? 'steer' : 'queue';
+        const requestId = mintRequestId();
+        const controller = new AbortController();
+        const entry = {
+          sessionId: target.sessionId,
+          requestId,
+          probeText: message,
+          sawRunning: statusOf(ctx, target.sessionId)?.running === true,
+          settleTimer: undefined,
+          idleTimer: undefined,
+          receiptTimer: undefined,
+          timeoutTimer: undefined,
+          eventSource: undefined,
+          unsubscribeEvents: undefined,
+          sinceSeq: 0,
+          probeSeq: undefined,
+          stepSeq: undefined,
+        };
+        waiting = entry;
+        setState({ phase: 'waiting', note: '', error: '', target });
+        const eventRoute = beginEventWatch(entry);
+
+        entry.timeoutTimer = setTimeout(function onTimeout() {
+          if (!waiting || waiting !== entry) return
+          // A long turn is the normal case for a follow-up nudge: keep waiting
+          // while the agent is still running instead of declaring it late.
+          if (statusOf(ctx, entry.sessionId)?.running === true) {
+            setState({ note: text('stillRunningNote') });
+            entry.timeoutTimer = setTimeout(onTimeout, WAIT_TIMEOUT_MS);
+            return
+          }
+          if (eventRoute) finishError(text('timeoutNote'));
+          else finishDone(text('timeoutNote'));
+        }, WAIT_TIMEOUT_MS);
+        if (eventRoute) {
+          entry.receiptTimer = setTimeout(function onReceipt() {
+            if (!waiting || waiting !== entry) return
+            if (entry.probeSeq !== undefined) return
+            if (statusOf(ctx, entry.sessionId)?.running === true) {
+              entry.receiptTimer = setTimeout(onReceipt, EVENT_RECEIPT_MS);
+              return
+            }
+            finishError(text('noReceiptNote'));
+          }, EVENT_RECEIPT_MS);
+        } else {
+          // No durable window to watch: fall back to the running-state heuristic.
+          entry.idleTimer = setTimeout(() => {
+            if (!waiting || waiting !== entry) return
+            if (entry.sawRunning) return
+            // The unified status may still report the turn: trust it over the timer.
+            if (statusOf(ctx, entry.sessionId)?.running === true) {
+              entry.sawRunning = true;
+              return
+            }
+            finishDone(text('unconfirmedNote'));
+          }, IDLE_CONFIRM_MS);
+        }
+
+        let request;
+        try {
+          request = remote.prompt(
+            {
+              requestId,
+              sessionId: target.sessionId,
+              mode,
+              content: [{ type: 'text', text: message }],
+              clientTimeZone: timeZoneOf(),
+            },
+            controller.signal,
+          );
+        } catch (error) {
+          finishError(describeFailure(error));
+          return false
+        }
+        Promise.resolve(request).then(
+          (result) => {
+            if (!waiting || waiting !== entry) return
+            const outcome = unwrapResult(result);
+            if (!outcome.ok) finishError(describeFailure(outcome.error));
+          },
+          (error) => {
+            if (!waiting || waiting !== entry) return
+            finishError(describeFailure(error));
+          },
+        );
+        return true
+      }
+
+  return {
+    deliver,
+    endWaiting,
+    onStatusChange,
+    /** Whether a probe is waiting for its answer. */
+    isWaiting: () => waiting !== null,
+  }
+}
+
+/**
+ * Reading the transcript: packed text and quote anchors.
+ *
+ * Selection anchors survive a repaint because they are found again by text, not by node.
+ *
+ * Built into `client.js` by `scripts/build.mjs`; edit this file, not the bundle.
+ */
+
+    /** The element a DOM node belongs to, or null. */
+    function elementOfNode(node) {
+      if (!node) return null
+      return node.nodeType === 1 ? node : (node.parentElement ?? null)
+    }
+
+    /** Tags whose text must not be projected. */
+    const NON_TEXT_TAGS = { SCRIPT: true, STYLE: true, NOSCRIPT: true, TEMPLATE: true };
+
+    /** Whether an element's subtree is invisible and must not be walked. */
+    function isHiddenElement(element) {
+      if (NON_TEXT_TAGS[element.tagName] === true) return true
+      if (element.hidden === true) return true
+      try {
+        const style = window.getComputedStyle?.(element);
+        return style ? style.display === 'none' || style.visibility === 'hidden' : false
+      } catch {
+        return false
+      }
+    }
+
+    /** Whitespace-free projection both sides of an anchor are compared on. */
+    function packedText(value) {
+      // The per-character `trim()` test this replaces kept exactly the
+      // non-whitespace code units; one regular expression is much cheaper on
+      // the long quotes and long rows this runs over.
+      return (typeof value === 'string' ? value : '').replace(/\s+/g, '')
+    }
+
+    /** Every visible kept character under a root, with its (node, offset) pair. */
+    function packedMapOf(root) {
+      let packed = '';
+      const map = [];
+      const walk = (node) => {
+        const children = node.childNodes;
+        for (let index = 0; index < children.length; index += 1) {
+          const child = children[index];
+          if (child.nodeType === 3) {
+            const data = child.data;
+            for (let offset = 0; offset < data.length; offset += 1) {
+              const ch = data.charAt(offset);
+              if (ch.trim() === '') continue
+              packed += ch;
+              map.push(child, offset);
+            }
+          } else if (child.nodeType === 1) {
+            if (isHiddenElement(child)) continue
+            walk(child);
+          }
+        }
+      };
+      walk(root);
+      return { packed, map }
+    }
+
+    /** A DOM Range covering [start, end) of a packed map, or null. */
+    function rangeFromPacked(full, start, end) {
+      if (start < 0 || end <= start) return null
+      const last = end - 1;
+      if (last * 2 + 1 >= full.map.length) return null
+      try {
+        const range = document.createRange();
+        range.setStart(full.map[start * 2], full.map[start * 2 + 1]);
+        range.setEnd(full.map[last * 2], full.map[last * 2 + 1] + 1);
+        return range
+      } catch {
+        return null
+      }
+    }
+
+    /** Every start index of `needle` inside `haystack`, capped. */
+    function occurrencesOf(haystack, needle, limit) {
+      const out = [];
+      if (needle === '') return out
+      let at = haystack.indexOf(needle);
+      while (at !== -1 && out.length < limit) {
+        out.push(at);
+        at = haystack.indexOf(needle, at + 1);
+      }
+      return out
+    }
+
+    /** Centre-to-centre distance between two rects. */
+    function rectDistance(left, right) {
+      const dx = (left.left + left.right) / 2 - (right.left + right.right) / 2;
+      const dy = (left.top + left.bottom) / 2 - (right.top + right.bottom) / 2;
+      return Math.sqrt(dx * dx + dy * dy)
+    }
+
+    /** The anchor a live selection hangs on, or null outside a flow item. */
+    function anchorFromRange(range, quote) {
+      const element = elementOfNode(range.commonAncestorContainer);
+      if (element === null || typeof element.closest !== 'function') return null
+      const anchorElement = element.closest(ANCHOR_SELECTOR);
+      if (anchorElement === null) return null
+      const packed = packedText(quote);
+      if (packed === '') return null
+      const full = packedMapOf(anchorElement);
+      const candidates = occurrencesOf(full.packed, packed, MAX_OCCURRENCES);
+      if (candidates.length === 0) return null
+      let target = null;
+      try {
+        target = range.getBoundingClientRect();
+      } catch {
+        target = null;
+      }
+      let best = null;
+      for (const index of candidates) {
+        const candidateRange = rangeFromPacked(full, index, index + packed.length);
+        if (candidateRange === null) continue
+        let distance = 0;
+        if (target !== null) {
+          try {
+            distance = rectDistance(candidateRange.getBoundingClientRect(), target);
+          } catch {
+            distance = 0;
+          }
+        }
+        if (best === null || distance < best.distance) best = { index, distance };
+      }
+      if (best === null) return null
+      return {
+        key: anchorElement.getAttribute('data-chat-anchor-key'),
+        quote: packed,
+        prefix: full.packed.slice(Math.max(0, best.index - CONTEXT_CHARS), best.index),
+        suffix: full.packed.slice(
+          best.index + packed.length,
+          best.index + packed.length + CONTEXT_CHARS,
+        ),
+        index: best.index,
+      }
+    }
+
+    /**
+     * The anchor a quote hangs on when no live selection is left: the innermost
+     * flow item whose projection carries the passage.
+     *
+     * This is the recovery path, not the primary one — the anchor of a fresh
+     * selection comes from the range. A passage carried by two unrelated flow
+     * items stays unanchored, because painting the wrong one is worse than
+     * painting none.
+     */
+    function anchorFromQuote(quote) {
+      const packed = packedText(quote);
+      if (packed === '') return null
+      const elements = document.querySelectorAll?.(ANCHOR_SELECTOR) ?? [];
+      const matches = [];
+      for (const element of elements) {
+        const key = element.getAttribute?.('data-chat-anchor-key');
+        if (typeof key !== 'string' || key === '') continue
+        const full = packedMapOf(element);
+        const index = full.packed.indexOf(packed);
+        if (index === -1) continue
+        matches.push({ element, key, full, index });
+      }
+      // A turn-process row wraps its member rows, so the deepest match is the
+      // one the passage really belongs to.
+      const deepest = matches.filter(
+        (match) =>
+          !matches.some(
+            (other) => other !== match && match.element.contains?.(other.element) === true,
+          ),
+      );
+      if (deepest.length !== 1) return null
+      const { key, full, index } = deepest[0];
+      return {
+        key,
+        quote: packed,
+        prefix: full.packed.slice(Math.max(0, index - CONTEXT_CHARS), index),
+        suffix: full.packed.slice(index + packed.length, index + packed.length + CONTEXT_CHARS),
+        index,
+      }
+    }
+
+    /** Whether a painted highlight already covers exactly these ranges, in order. */
+    function sameRanges(highlight, ranges) {
+      if (!highlight || typeof highlight[Symbol.iterator] !== 'function') return false
+      const current = [...highlight];
+      if (current.length !== ranges.length) return false
+      return current.every((range, index) => {
+        const next = ranges[index];
+        return (
+          range.collapsed !== true &&
+          range.startContainer === next.startContainer &&
+          range.startOffset === next.startOffset &&
+          range.endContainer === next.endContainer &&
+          range.endOffset === next.endOffset
+        )
+      })
+    }
+
+    /** Where one stored anchor sits in an anchor element's current projection. */
+    function locateAnchor(full, anchor) {
+      if (anchor === null || typeof anchor !== 'object') return null
+      if (typeof anchor.quote !== 'string' || anchor.quote === '') return null
+      const prefix = typeof anchor.prefix === 'string' ? anchor.prefix : '';
+      const suffix = typeof anchor.suffix === 'string' ? anchor.suffix : '';
+      const candidates = occurrencesOf(full.packed, anchor.quote, MAX_OCCURRENCES);
+      if (candidates.length === 0) return null
+      let best = null;
+      for (const index of candidates) {
+        let score = 0;
+        if (prefix !== '' && full.packed.slice(Math.max(0, index - prefix.length), index) === prefix) score += 4;
+        if (
+          suffix !== '' &&
+          full.packed.slice(index + anchor.quote.length, index + anchor.quote.length + suffix.length) === suffix
+        ) {
+          score += 4;
+        }
+        if (typeof anchor.index === 'number') score += Math.max(0, 2 - Math.abs(index - anchor.index) / 200);
+        if (best === null || score > best.score) best = { index, score };
+      }
+      if (best === null) return null
+      if (best.score < 4 && candidates.length > 1) return null
+      return { start: best.index, end: best.index + anchor.quote.length }
+    }
+
+/**
+ * The window state machine.
+ *
+ * Delivery, the wait for an answer, annotations, settings, counters and the debug surface.
+ *
+ * Built into `client.js` by `scripts/build.mjs`; edit this file, not the bundle.
+ */
+
+    /**
+     * Build the window runtime.
+     *
+     * The view is a thin renderer over this object; the checks drive the same
+     * object without a browser renderer.
+     * @param ctx - plugin context.
+     * @returns the runtime handle.
+     */
+    function createRuntime(ctx) {
+      const saved = readJson(UI_KEY) ?? {};
+      const language = readLang(ctx);
+      const initialTarget = resolveTarget(ctx);
+      // Every persisted preference comes from the settings table, so the launch
+      // state and a later restore cannot drift apart.
+      // The settings table owns which fields exist; the reader fills every row.
+      const savedSettings = /** @type {NudgeSettingsState} */ (
+        readSettings({ lang: language, sessionId: initialTarget?.sessionId })
+      );
+
+      /**
+       * The annotation surface at rest: no draft, nothing stowed, no editor, no
+       * half-typed note. The launch state and every closing transition spread
+       * this instead of listing the fields again, so a field added to the
+       * surface is reset in one place.
+       */
+      const IDLE_ANNOTATION = {
+        annotationDraft: null,
+        annotationCardHidden: false,
+        annotationNote: '',
+        annotationEditingId: null,
+        annotationEditRect: null,
+      };
+      /**
+       * The window's direct-edit surface for the quick inputs: whether the 编辑
+       * chip is armed, which entry's form is open, and the form's fields. One
+       * object so leaving the mode clears every part of it at once.
+       */
+      const IDLE_NUDGE_EDIT = {
+        nudgeEditing: false,
+        nudgeEditId: null,
+        nudgeEditLabel: '',
+        nudgeEditText: '',
+        nudgeEditError: '',
+      };
+
+      /** @type {NudgeRuntimeState} */
+      let state = {
+        phase: 'idle',
+        note: '',
+        error: '',
+        /** Short-lived confirmation of a toggle, cleared on a timer. */
+        flash: '',
+        lastAt: undefined,
+        lastSessionId: undefined,
+        unread: false,
+        // Every launch starts as the pill: the window is a reminder to look at
+        // the conversation, not a panel to close first.
+        collapsed: true,
+        // One anchor for both shapes: collapsing keeps the window in place and
+        // expanding returns it to the same spot. The stored record only says
+        // how far down it sat and which side it was on.
+        pos: isPoint(saved.pos) ? snapToEdge(saved.pos, true) : dockPosition(true),
+        /**
+         * Every persisted preference — the three switches, the delivery mode,
+         * the border width, the prompts and the chosen one, the idle lines, the
+         * counters and the collected notes — arrives from the settings table by
+         * field name, so the launch state cannot miss a row.
+         */
+        ...savedSettings,
+        /** Ids whose body is expanded in the settings list. */
+        presetOpen: [],
+        /** The preset opened in the settings editor, or null. */
+        presetEditingId: null,
+        target: initialTarget,
+        pendingQuestion: false,
+        /** True while the conversation composer is mounted and holds the caret. */
+        composerFocused: false,
+        /** Which idle line is showing; not persisted, so the launch restarts at the first. */
+        tipIndex: 0,
+        /** The idle line opened in its editor, or null. */
+        tipEditingIndex: null,
+        /**
+         * The annotation surface: the selection being annotated, whether its
+         * card is stowed, the note being written, and the collected note opened
+         * in the editor. A card and an editor never coexist.
+         */
+        ...IDLE_ANNOTATION,
+        /** Whether the annotation module shows its body (row summary when false). */
+        annotationExpanded: false,
+        /** Whether the nudge module (prompts / mode / primary) shows its body. */
+        nudgeExpanded: true,
+        /** The in-window "new prompt" form (title + body). */
+        nudgeDraftOpen: false,
+        nudgeDraftLabel: '',
+        nudgeDraftText: '',
+        nudgeDraftError: '',
+        ...IDLE_NUDGE_EDIT,
+        /** Whether the window shows the settings form in place of its body. */
+        settingsOpen: false,
+        /** Timestamp of the last capture, used to restart the attention pulse. */
+        attentionAt: 0,
+        /** The window control whose explanation bubble is showing, or null. */
+        tip: null,
+        lang: language,
+      };
+      const listeners = new Set();
+      /** One immutable snapshot per change, as `useSyncExternalStore` requires. */
+      function getSnapshot() {
+        return state
+      }
+
+      /**
+       * Replace state and notify every renderer.
+       * @param {Partial<NudgeRuntimeState>} patch
+       */
+      function setState(patch) {
+        let changed = false;
+        for (const key of Object.keys(patch)) {
+          if (!Object.is(state[key], patch[key])) {
+            changed = true;
+            break
+          }
+        }
+        if (!changed) return
+        state = { ...state, ...patch };
+        for (const listener of [...listeners]) {
+          try {
+            listener();
+          } catch (error) {
+            console.warn('[dsh-nudge] listener failed', error);
+          }
+        }
+      }
+
+      /** Subscribe one renderer. */
+      function subscribe(listener) {
+        listeners.add(listener);
+        return () => listeners.delete(listener)
+      }
+
+      /** Visible text for the current locale. */
+      function text(key) {
+        const dict = state.lang === 'zh' ? ZH : EN;
+        return dict[key] ?? key
+      }
+
+      // --- delivery -------------------------------------------------------
+
+      const delivery = createDelivery({
+        ctx,
+        getState: () => state,
+        setState,
+        text,
+      });
+
+      /** Deliver one message into the on-screen session. */
+      function deliver(message) {
+        return delivery.deliver(message)
+      }
+
+      /** End the in-flight wait; the delivery module owns its timers and watch. */
+      function endWaiting() {
+        delivery.endWaiting();
+      }
+
       // --- composer insertion ---------------------------------------------
 
       /**
@@ -2639,7 +2822,7 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
       /** The focused composer editor element, when the caret is inside it. */
       function composerNode() {
         try {
-          const active = document.activeElement;
+          const active = /** @type {HTMLElement | null} */ (document.activeElement);
           if (!active) return undefined
           const editable =
             active.isContentEditable === true ||
@@ -2849,7 +3032,9 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
           if (quote.trim() === '') return null
           const range = selection.getRangeAt(0);
           const node = range.commonAncestorContainer;
-          const element = node && node.nodeType === 1 ? node : node?.parentElement;
+          const element = /** @type {Element | null} */ (
+            node && node.nodeType === 1 ? node : node?.parentElement
+          );
           if (!element || typeof element.closest !== 'function') return null
           if (element.closest(EDITABLE_SELECTOR)) return null
           if (element.closest(MODAL_SELECTOR)) return null
@@ -3778,7 +3963,7 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
         if (draft === null && state.annotationEditingId === null) return false
         if (typeof document !== 'undefined' && document.activeElement?.closest?.(SELF_SELECTOR)) {
           try {
-            document.activeElement.blur();
+            /** @type {HTMLElement} */ (document.activeElement).blur();
           } catch {
             /* nothing focused */
           }
@@ -3974,7 +4159,7 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
        */
       function fieldHasSelection() {
         try {
-          const active = document.activeElement;
+          const active = /** @type {HTMLInputElement | HTMLTextAreaElement | null} */ (document.activeElement);
           if (!active || typeof active.selectionStart !== 'number') return false
           if (typeof active.closest !== 'function' || active.closest(SELF_SELECTOR) === null) return false
           return active.selectionStart !== active.selectionEnd
@@ -4190,116 +4375,6 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
         const ids = new Set(pending.map((item) => item.id));
         const next = state.annotations.filter((item) => !ids.has(item.id));
         commitAnnotations(next);
-        return true
-      }
-
-      /** Deliver one message into the on-screen session. */
-      function deliver(message) {
-        if (typeof message !== 'string' || message.trim() === '') return false
-        const target = resolveTarget(ctx) ?? state.target;
-        if (!target) {
-          setState({ phase: 'error', error: text('noSession'), note: '' });
-          return false
-        }
-        // 6.3: the agent's ball is in the user's court; a second request would
-        // only stack two pending inputs, so refuse with the reason.
-        if (statusOf(ctx, target.sessionId)?.pendingInteraction) {
-          setState({ phase: 'error', error: text('waitingQuestion'), note: '' });
-          return false
-        }
-        const remote = sessionRemoteOf(ctx);
-        if (!remote) {
-          setState({ phase: 'error', error: text('transportMissing'), note: '' });
-          return false
-        }
-        const delivery = isDelivery(state.deliveryOverride)
-          ? state.deliveryOverride
-          : DEFAULT_DELIVERY;
-        const mode = delivery === 'steer' ? 'steer' : 'queue';
-        const requestId = mintRequestId();
-        const controller = new AbortController();
-        const entry = {
-          sessionId: target.sessionId,
-          requestId,
-          probeText: message,
-          sawRunning: statusOf(ctx, target.sessionId)?.running === true,
-          settleTimer: undefined,
-          idleTimer: undefined,
-          receiptTimer: undefined,
-          timeoutTimer: undefined,
-          eventSource: undefined,
-          unsubscribeEvents: undefined,
-          sinceSeq: 0,
-          probeSeq: undefined,
-          stepSeq: undefined,
-        };
-        waiting = entry;
-        setState({ phase: 'waiting', note: '', error: '', target });
-        const eventRoute = beginEventWatch(entry);
-
-        entry.timeoutTimer = setTimeout(function onTimeout() {
-          if (!waiting || waiting !== entry) return
-          // A long turn is the normal case for a follow-up nudge: keep waiting
-          // while the agent is still running instead of declaring it late.
-          if (statusOf(ctx, entry.sessionId)?.running === true) {
-            setState({ note: text('stillRunningNote') });
-            entry.timeoutTimer = setTimeout(onTimeout, WAIT_TIMEOUT_MS);
-            return
-          }
-          if (eventRoute) finishError(text('timeoutNote'));
-          else finishDone(text('timeoutNote'));
-        }, WAIT_TIMEOUT_MS);
-        if (eventRoute) {
-          entry.receiptTimer = setTimeout(function onReceipt() {
-            if (!waiting || waiting !== entry) return
-            if (entry.probeSeq !== undefined) return
-            if (statusOf(ctx, entry.sessionId)?.running === true) {
-              entry.receiptTimer = setTimeout(onReceipt, EVENT_RECEIPT_MS);
-              return
-            }
-            finishError(text('noReceiptNote'));
-          }, EVENT_RECEIPT_MS);
-        } else {
-          // No durable window to watch: fall back to the running-state heuristic.
-          entry.idleTimer = setTimeout(() => {
-            if (!waiting || waiting !== entry) return
-            if (entry.sawRunning) return
-            // The unified status may still report the turn: trust it over the timer.
-            if (statusOf(ctx, entry.sessionId)?.running === true) {
-              entry.sawRunning = true;
-              return
-            }
-            finishDone(text('unconfirmedNote'));
-          }, IDLE_CONFIRM_MS);
-        }
-
-        let request;
-        try {
-          request = remote.prompt(
-            {
-              requestId,
-              sessionId: target.sessionId,
-              mode,
-              content: [{ type: 'text', text: message }],
-              clientTimeZone: timeZoneOf(),
-            },
-            controller.signal,
-          );
-        } catch (error) {
-          finishError(describeFailure(error));
-          return false
-        }
-        Promise.resolve(request).then(
-          (result) => {
-            if (!waiting || waiting !== entry) return
-            const outcome = unwrapResult(result);
-            if (!outcome.ok) finishError(describeFailure(outcome.error));
-          },
-          (error) => {
-            if (!waiting || waiting !== entry) return
-            finishError(describeFailure(error));
-          },
-        );
         return true
       }
 
@@ -5193,7 +5268,7 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
           resetAnchorRecovery();
           // The ask is bound to the conversation it was clicked in (1.2); a
           // different conversation must not inherit its status or its wait.
-          if (waiting !== null) endWaiting();
+          if (delivery.isWaiting()) endWaiting();
           // The tray belongs to the conversation it quotes: load that Session's
           // saved notes and drop any half-written one.
           settleAnnotation({
@@ -5220,7 +5295,12 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
       }
       const statusSource = ctx.get?.('uiSession')?.sessionStatus;
       if (typeof statusSource?.subscribe === 'function') {
-        offs.push(statusSource.subscribe(onStatusChange));
+        offs.push(
+          statusSource.subscribe(() => {
+            refreshWorld();
+            delivery.onStatusChange();
+          }),
+        );
       }
       try {
         const locale = ctx.get?.('locale');
@@ -5476,6 +5556,341 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
         },
       }
     }
+
+/**
+ * The settings dashboard: today's split, the trend and the prompt ranking.
+ *
+ * Pure over the counters it is handed: the chart, the Top 3 and the empty
+ * state are all derived from `stats` and `presets`, so it can be read (and
+ * changed) without knowing anything about the settings form around it.
+ *
+ * Built into `client.js` by `scripts/build.mjs`; edit this file, not the bundle.
+ */
+
+      /** Fill `{n}` in a message template. */
+      function fill(template, count) {
+        return template.replace('{n}', String(count))
+      }
+
+      /**
+       * The settings dashboard: today's split, a 15-day trend and the prompts
+       * used in the same window. Pure over the counters, so it reads on its own.
+       */
+      function StatsBoard(props) {
+        const { t } = props;
+        const today = dayKey();
+        const statsDays = props.stats?.days ?? {};
+        /** The trend window, oldest first; the chart and Top 3 share it. */
+        const windowKeys = recentDayKeys(15);
+        const windowTotals = { send: 0, insert: 0, annotation: 0 };
+        for (const key of windowKeys) {
+          for (const field of STAT_FIELDS) windowTotals[field] += statsDays[key]?.[field] ?? 0;
+        }
+        const windowTotal = STAT_FIELDS.reduce((sum, field) => sum + windowTotals[field], 0);
+        const windowInputs = windowTotals.send + windowTotals.insert;
+        // Two series: everything typed into or sent to the composer is one
+        // prompt use; notes stay separate because they answer a different
+        // question ("how much did I annotate?").
+        const inputSeries = windowKeys.map((key) => (statsDays[key]?.send ?? 0) + (statsDays[key]?.insert ?? 0));
+        const noteSeries = windowKeys.map((key) => statsDays[key]?.annotation ?? 0);
+        // Today splits the same two ways as the chart: a quick input counts
+        // once whether it was sent or written, and notes stay their own number.
+        const todayInputs = inputSeries[windowKeys.length - 1] ?? 0;
+        const todayNotes = noteSeries[windowKeys.length - 1] ?? 0;
+        const hasActivity = inputSeries.some((value) => value > 0) || noteSeries.some((value) => value > 0);
+        /** Tallest value in either series; both lines share one scale. */
+        const peak = Math.max(1, ...inputSeries, ...noteSeries);
+
+        // Rank the prompts used in this same window. Counts live beside the
+        // daily totals, so deleted prompts simply fall out of the list.
+        const presetTotals = new Map();
+        for (const key of windowKeys) {
+          const presets = statsDays[key]?.presets;
+          if (presets === null || typeof presets !== 'object') continue
+          for (const [id, count] of Object.entries(presets)) {
+            presetTotals.set(id, (presetTotals.get(id) ?? 0) + count);
+          }
+        }
+        const topPresets = [...presetTotals.entries()]
+          .map(([id, total]) => ({ preset: props.presets.find((item) => item.id === id), total }))
+          .filter((item) => item.preset !== undefined)
+          .sort((a, b) => b.total - a.total || String(a.preset.id).localeCompare(String(b.preset.id)))
+          .slice(0, 3);
+        const topTotal = topPresets.reduce((sum, item) => sum + item.total, 0);
+
+        // Hand-rolled SVG: the plugin ships no chart dependency. The days are
+        // discrete, so the line runs straight between them and every day that
+        // actually carries a count gets a marker: no invented smooth curve, and
+        // the reader can still see where the data really is.
+        const CHART_W = 320;
+        const CHART_H = 168;
+        const CHART_PAD_X = 6;
+        const CHART_PAD_TOP = 12;
+        const CHART_PAD_BOTTOM = 8;
+        const round = (value) => Math.round(value * 10) / 10;
+        const baseline = CHART_H - CHART_PAD_BOTTOM;
+        const plotHeight = CHART_H - CHART_PAD_TOP - CHART_PAD_BOTTOM;
+        /** The scale tops out at the busiest day; the top padding is the headroom. */
+        const scaleMax = Math.max(1, peak);
+        const xAt = (index) =>
+          windowKeys.length <= 1
+            ? CHART_PAD_X
+            : CHART_PAD_X + (index * (CHART_W - CHART_PAD_X * 2)) / (windowKeys.length - 1);
+        const yAt = (value) => baseline - (Math.max(0, value) / scaleMax) * plotHeight;
+        /** Straight segments between days: the value between two days is unknown. */
+        function linePath(series) {
+          return series
+            .map((value, index) => `${index === 0 ? 'M' : 'L'} ${round(xAt(index))} ${round(yAt(value))}`)
+            .join(' ')
+        }
+        /** The same line closed down to the baseline, for the soft fill. */
+        function areaPath(series) {
+          const first = round(xAt(0));
+          const last = round(xAt(series.length - 1));
+          return `${linePath(series)} L ${last} ${baseline} L ${first} ${baseline} Z`
+        }
+        /** One marker per day that really carries a count. */
+        function pointsOf(series, className) {
+          return series.flatMap((value, index) =>
+            value <= 0
+              ? []
+              : [
+                  h('circle', {
+                    key: `point-${className}-${index}`,
+                    className: `dsh-nudge-chart-point ${className}`,
+                    cx: round(xAt(index)),
+                    cy: round(yAt(value)),
+                    r: className === 'input' ? '2.9' : '2.5',
+                  }),
+                ],
+          )
+        }
+        /** Gridlines at half and full height, so the scale is readable. */
+        const gridValues = [1, 0.5];
+        const inputLine = linePath(inputSeries);
+        const noteLine = linePath(noteSeries);
+        const inputArea = areaPath(inputSeries);
+        const noteArea = areaPath(noteSeries);
+        const todayIndex = windowKeys.length - 1;
+
+        // The dashboard leads the settings page: it answers "am I using this?"
+        // before the switches that change how it behaves.
+        // before the switches that change how it behaves.
+        return h(
+          'div',
+          { key: 'stats', className: 'dsh-nudge-stats-group' },
+          h(
+            'div',
+            { className: 'dsh-nudge-stats-head' },
+            h('span', { className: 'dsh-nudge-toggle-title' }, t('statsTitle')),
+          ),
+          h('span', { className: 'dsh-nudge-toggle-desc' }, t('statsHint')),
+          h(
+            'div',
+            { className: 'dsh-nudge-stats-board' },
+            h(
+              'div',
+              { className: 'dsh-nudge-stats-chart-pane' },
+              h(
+                'div',
+                { className: 'dsh-nudge-stats-trend-head' },
+                h('span', { className: 'dsh-nudge-chart-peak' }, fill(t('statsPeak'), peak)),
+                h('span', { className: 'dsh-nudge-stats-total' }, fill(t('statsTimes'), windowTotal)),
+              ),
+              h(
+                'div',
+                { className: 'dsh-nudge-chart-wrap' },
+                h(
+                  'svg',
+                  {
+                    className: 'dsh-nudge-chart-svg',
+                    viewBox: `0 0 ${CHART_W} ${CHART_H}`,
+                    preserveAspectRatio: 'none',
+                    'aria-hidden': 'true',
+                  },
+                  h(
+                    'defs',
+                    null,
+                    h(
+                      'linearGradient',
+                      { id: 'dsh-nudge-fill-input', x1: '0', y1: '0', x2: '0', y2: '1' },
+                      h('stop', { offset: '0%', stopColor: 'var(--dsw-static-deepseek-450,#5686fe)', stopOpacity: '0.14' }),
+                      h('stop', { offset: '100%', stopColor: 'var(--dsw-static-deepseek-450,#5686fe)', stopOpacity: '0' }),
+                    ),
+                    h(
+                      'linearGradient',
+                      { id: 'dsh-nudge-fill-note', x1: '0', y1: '0', x2: '0', y2: '1' },
+                      h('stop', { offset: '0%', stopColor: 'var(--dn-note)', stopOpacity: '0.10' }),
+                      h('stop', { offset: '100%', stopColor: 'var(--dn-note)', stopOpacity: '0' }),
+                    ),
+                  ),
+                  ...gridValues.map((fraction) =>
+                    h('line', {
+                      key: `grid-${fraction}`,
+                      className: 'dsh-nudge-chart-grid',
+                      x1: '0',
+                      y1: round(baseline - fraction * plotHeight),
+                      x2: CHART_W,
+                      y2: round(baseline - fraction * plotHeight),
+                      vectorEffect: 'non-scaling-stroke',
+                    }),
+                  ),
+                  h('line', {
+                    className: 'dsh-nudge-chart-axis-line',
+                    x1: '0',
+                    y1: baseline,
+                    x2: CHART_W,
+                    y2: baseline,
+                    vectorEffect: 'non-scaling-stroke',
+                  }),
+                  hasActivity
+                    ? h('path', {
+                        className: 'dsh-nudge-chart-area note',
+                        d: noteArea,
+                        fill: 'url(#dsh-nudge-fill-note)',
+                      })
+                    : null,
+                  hasActivity
+                    ? h('path', {
+                        className: 'dsh-nudge-chart-area input',
+                        d: inputArea,
+                        fill: 'url(#dsh-nudge-fill-input)',
+                      })
+                    : null,
+                  hasActivity
+                    ? h('path', {
+                        className: 'dsh-nudge-chart-line note',
+                        d: noteLine,
+                        fill: 'none',
+                        stroke: 'var(--dn-note)',
+                        strokeWidth: '1.6',
+                        strokeLinejoin: 'round',
+                        strokeLinecap: 'round',
+                        vectorEffect: 'non-scaling-stroke',
+                      })
+                    : null,
+                  hasActivity
+                    ? h('path', {
+                        className: 'dsh-nudge-chart-line input',
+                        d: inputLine,
+                        fill: 'none',
+                        stroke: 'var(--dsw-static-deepseek-450,#5686fe)',
+                        strokeWidth: '1.8',
+                        strokeLinejoin: 'round',
+                        strokeLinecap: 'round',
+                        vectorEffect: 'non-scaling-stroke',
+                      })
+                    : null,
+                  ...(hasActivity ? pointsOf(noteSeries, 'note') : []),
+                  ...(hasActivity ? pointsOf(inputSeries, 'input') : []),
+                ),
+                hasActivity
+                  ? null
+                  : h('div', { className: 'dsh-nudge-chart-empty' }, t('statsEmpty')),
+                h(
+                  'div',
+                  { className: 'dsh-nudge-chart-hits' },
+                  ...windowKeys.map((key, index) =>
+                    h(
+                      'div',
+                      { key, className: 'dsh-nudge-chart-hit' },
+                      h(
+                        'span',
+                        { className: 'dsh-nudge-chart-tip' },
+                        h(
+                          'span',
+                          { className: 'dsh-nudge-chart-tip-date' },
+                          key === today ? t('statsToday') : key.slice(5),
+                        ),
+                        h(
+                          'span',
+                          { className: 'dsh-nudge-chart-tip-values' },
+                          `${t('statsLegendInput')} ${inputSeries[index]} · ${t('statsAnnotation')} ${noteSeries[index]}`,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+              h(
+                'div',
+                { className: 'dsh-nudge-stats-axis' },
+                h('span', null, windowKeys[0].slice(5)),
+                h('span', null, windowKeys[7].slice(5)),
+                h('span', null, t('statsToday')),
+              ),
+              h(
+                'div',
+                { className: 'dsh-nudge-chart-legend' },
+                h(
+                  'span',
+                  { className: 'dsh-nudge-chart-legend-item' },
+                  h('i', { className: 'dsh-nudge-chart-dot input' }),
+                  t('statsLegendInput'),
+                ),
+                h(
+                  'span',
+                  { className: 'dsh-nudge-chart-legend-item' },
+                  h('i', { className: 'dsh-nudge-chart-dot note' }),
+                  t('statsAnnotation'),
+                ),
+              ),
+            ),
+            h(
+              'div',
+              { className: 'dsh-nudge-stats-side' },
+              h(
+                'div',
+                { className: 'dsh-nudge-stats-today' },
+                h(
+                  'div',
+                  { className: 'dsh-nudge-stats-today-head' },
+                  h('span', { className: 'dsh-nudge-stats-today-label' }, t('statsToday')),
+                  h('span', { className: 'dsh-nudge-stats-today-date' }, today.slice(5)),
+                ),
+                h(
+                  'div',
+                  { className: 'dsh-nudge-stats' },
+                  ...[
+                    { key: 'input', value: todayInputs, label: t('statsLegendInput') },
+                    { key: 'note', value: todayNotes, label: t('statsAnnotation') },
+                  ].map((item) =>
+                    h(
+                      'div',
+                      { key: item.key, className: 'dsh-nudge-stat' },
+                      h('span', { className: 'dsh-nudge-stat-value' }, String(item.value)),
+                      h('span', { className: 'dsh-nudge-stat-label' }, item.label),
+                    ),
+                  ),
+                ),
+              ),
+              h('div', { className: 'dsh-nudge-stats-side-head' }, h('span', null, t('statsTopTitle'))),
+              topPresets.length === 0
+                ? h(
+                    'div',
+                    { className: 'dsh-nudge-stats-side-empty' },
+                    windowInputs > 0 ? t('statsTopSince') : t('statsTopEmpty'),
+                  )
+                : h(
+                    'ol',
+                    { className: 'dsh-nudge-top-list' },
+                    ...topPresets.map((item, index) =>
+                      h(
+                        'li',
+                        { key: item.preset.id, className: 'dsh-nudge-top-item' },
+                        h('span', { className: 'dsh-nudge-top-rank' }, String(index + 1)),
+                        h('span', { className: 'dsh-nudge-top-label', title: item.preset.text }, item.preset.label),
+                        h('span', { className: 'dsh-nudge-top-count' }, fill(t('statsCountUnit'), item.total)),
+                      ),
+                    ),
+                  ),
+              topPresets.length > 0
+                ? h('div', { className: 'dsh-nudge-stats-share' }, fill(t('statsTopShare'), topTotal))
+                : null,
+            ),
+          ),
+        )
+      }
 
 /**
  * The Settings section's render tree.
@@ -5947,11 +6362,6 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
         )
       }
 
-      /** Fill `{n}` in a message template. */
-      function fill(template, count) {
-        return template.replace('{n}', String(count))
-      }
-
       return function NudgeSettings() {
         const state = useSyncExternalStore(runtime.subscribe, runtime.getSnapshot, runtime.getSnapshot);
         const [error, setError] = React.useState('');
@@ -5966,327 +6376,6 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
         const [copyNote, setCopyNote] = React.useState('');
         const t = runtime.text;
         const delivery = runtime.effectiveDelivery();
-      /**
-       * The settings dashboard: today's split, a 15-day trend and the prompts
-       * used in the same window. Pure over the counters, so it reads on its own.
-       */
-      function StatsBoard(props) {
-        const { t } = props;
-        const today = dayKey();
-        const statsDays = props.stats?.days ?? {};
-        /** The trend window, oldest first; the chart and Top 3 share it. */
-        const windowKeys = recentDayKeys(15);
-        const windowTotals = { send: 0, insert: 0, annotation: 0 };
-        for (const key of windowKeys) {
-          for (const field of STAT_FIELDS) windowTotals[field] += statsDays[key]?.[field] ?? 0;
-        }
-        const windowTotal = STAT_FIELDS.reduce((sum, field) => sum + windowTotals[field], 0);
-        const windowInputs = windowTotals.send + windowTotals.insert;
-        // Two series: everything typed into or sent to the composer is one
-        // prompt use; notes stay separate because they answer a different
-        // question ("how much did I annotate?").
-        const inputSeries = windowKeys.map((key) => (statsDays[key]?.send ?? 0) + (statsDays[key]?.insert ?? 0));
-        const noteSeries = windowKeys.map((key) => statsDays[key]?.annotation ?? 0);
-        // Today splits the same two ways as the chart: a quick input counts
-        // once whether it was sent or written, and notes stay their own number.
-        const todayInputs = inputSeries[windowKeys.length - 1] ?? 0;
-        const todayNotes = noteSeries[windowKeys.length - 1] ?? 0;
-        const hasActivity = inputSeries.some((value) => value > 0) || noteSeries.some((value) => value > 0);
-        /** Tallest value in either series; both lines share one scale. */
-        const peak = Math.max(1, ...inputSeries, ...noteSeries);
-
-        // Rank the prompts used in this same window. Counts live beside the
-        // daily totals, so deleted prompts simply fall out of the list.
-        const presetTotals = new Map();
-        for (const key of windowKeys) {
-          const presets = statsDays[key]?.presets;
-          if (presets === null || typeof presets !== 'object') continue
-          for (const [id, count] of Object.entries(presets)) {
-            presetTotals.set(id, (presetTotals.get(id) ?? 0) + count);
-          }
-        }
-        const topPresets = [...presetTotals.entries()]
-          .map(([id, total]) => ({ preset: props.presets.find((item) => item.id === id), total }))
-          .filter((item) => item.preset !== undefined)
-          .sort((a, b) => b.total - a.total || String(a.preset.id).localeCompare(String(b.preset.id)))
-          .slice(0, 3);
-        const topTotal = topPresets.reduce((sum, item) => sum + item.total, 0);
-
-        // Hand-rolled SVG: the plugin ships no chart dependency. The days are
-        // discrete, so the line runs straight between them and every day that
-        // actually carries a count gets a marker: no invented smooth curve, and
-        // the reader can still see where the data really is.
-        const CHART_W = 320;
-        const CHART_H = 168;
-        const CHART_PAD_X = 6;
-        const CHART_PAD_TOP = 12;
-        const CHART_PAD_BOTTOM = 8;
-        const round = (value) => Math.round(value * 10) / 10;
-        const baseline = CHART_H - CHART_PAD_BOTTOM;
-        const plotHeight = CHART_H - CHART_PAD_TOP - CHART_PAD_BOTTOM;
-        /** The scale tops out at the busiest day; the top padding is the headroom. */
-        const scaleMax = Math.max(1, peak);
-        const xAt = (index) =>
-          windowKeys.length <= 1
-            ? CHART_PAD_X
-            : CHART_PAD_X + (index * (CHART_W - CHART_PAD_X * 2)) / (windowKeys.length - 1);
-        const yAt = (value) => baseline - (Math.max(0, value) / scaleMax) * plotHeight;
-        /** Straight segments between days: the value between two days is unknown. */
-        function linePath(series) {
-          return series
-            .map((value, index) => `${index === 0 ? 'M' : 'L'} ${round(xAt(index))} ${round(yAt(value))}`)
-            .join(' ')
-        }
-        /** The same line closed down to the baseline, for the soft fill. */
-        function areaPath(series) {
-          const first = round(xAt(0));
-          const last = round(xAt(series.length - 1));
-          return `${linePath(series)} L ${last} ${baseline} L ${first} ${baseline} Z`
-        }
-        /** One marker per day that really carries a count. */
-        function pointsOf(series, className) {
-          return series.flatMap((value, index) =>
-            value <= 0
-              ? []
-              : [
-                  h('circle', {
-                    key: `point-${className}-${index}`,
-                    className: `dsh-nudge-chart-point ${className}`,
-                    cx: round(xAt(index)),
-                    cy: round(yAt(value)),
-                    r: className === 'input' ? '2.9' : '2.5',
-                  }),
-                ],
-          )
-        }
-        /** Gridlines at half and full height, so the scale is readable. */
-        const gridValues = [1, 0.5];
-        const inputLine = linePath(inputSeries);
-        const noteLine = linePath(noteSeries);
-        const inputArea = areaPath(inputSeries);
-        const noteArea = areaPath(noteSeries);
-        const todayIndex = windowKeys.length - 1;
-
-        // The dashboard leads the settings page: it answers "am I using this?"
-        // before the switches that change how it behaves.
-        // before the switches that change how it behaves.
-        return h(
-          'div',
-          { key: 'stats', className: 'dsh-nudge-stats-group' },
-          h(
-            'div',
-            { className: 'dsh-nudge-stats-head' },
-            h('span', { className: 'dsh-nudge-toggle-title' }, t('statsTitle')),
-          ),
-          h('span', { className: 'dsh-nudge-toggle-desc' }, t('statsHint')),
-          h(
-            'div',
-            { className: 'dsh-nudge-stats-board' },
-            h(
-              'div',
-              { className: 'dsh-nudge-stats-chart-pane' },
-              h(
-                'div',
-                { className: 'dsh-nudge-stats-trend-head' },
-                h('span', { className: 'dsh-nudge-chart-peak' }, fill(t('statsPeak'), peak)),
-                h('span', { className: 'dsh-nudge-stats-total' }, fill(t('statsTimes'), windowTotal)),
-              ),
-              h(
-                'div',
-                { className: 'dsh-nudge-chart-wrap' },
-                h(
-                  'svg',
-                  {
-                    className: 'dsh-nudge-chart-svg',
-                    viewBox: `0 0 ${CHART_W} ${CHART_H}`,
-                    preserveAspectRatio: 'none',
-                    'aria-hidden': 'true',
-                  },
-                  h(
-                    'defs',
-                    null,
-                    h(
-                      'linearGradient',
-                      { id: 'dsh-nudge-fill-input', x1: '0', y1: '0', x2: '0', y2: '1' },
-                      h('stop', { offset: '0%', stopColor: 'var(--dsw-static-deepseek-450,#5686fe)', stopOpacity: '0.14' }),
-                      h('stop', { offset: '100%', stopColor: 'var(--dsw-static-deepseek-450,#5686fe)', stopOpacity: '0' }),
-                    ),
-                    h(
-                      'linearGradient',
-                      { id: 'dsh-nudge-fill-note', x1: '0', y1: '0', x2: '0', y2: '1' },
-                      h('stop', { offset: '0%', stopColor: 'var(--dn-note)', stopOpacity: '0.10' }),
-                      h('stop', { offset: '100%', stopColor: 'var(--dn-note)', stopOpacity: '0' }),
-                    ),
-                  ),
-                  ...gridValues.map((fraction) =>
-                    h('line', {
-                      key: `grid-${fraction}`,
-                      className: 'dsh-nudge-chart-grid',
-                      x1: '0',
-                      y1: round(baseline - fraction * plotHeight),
-                      x2: CHART_W,
-                      y2: round(baseline - fraction * plotHeight),
-                      vectorEffect: 'non-scaling-stroke',
-                    }),
-                  ),
-                  h('line', {
-                    className: 'dsh-nudge-chart-axis-line',
-                    x1: '0',
-                    y1: baseline,
-                    x2: CHART_W,
-                    y2: baseline,
-                    vectorEffect: 'non-scaling-stroke',
-                  }),
-                  hasActivity
-                    ? h('path', {
-                        className: 'dsh-nudge-chart-area note',
-                        d: noteArea,
-                        fill: 'url(#dsh-nudge-fill-note)',
-                      })
-                    : null,
-                  hasActivity
-                    ? h('path', {
-                        className: 'dsh-nudge-chart-area input',
-                        d: inputArea,
-                        fill: 'url(#dsh-nudge-fill-input)',
-                      })
-                    : null,
-                  hasActivity
-                    ? h('path', {
-                        className: 'dsh-nudge-chart-line note',
-                        d: noteLine,
-                        fill: 'none',
-                        stroke: 'var(--dn-note)',
-                        strokeWidth: '1.6',
-                        strokeLinejoin: 'round',
-                        strokeLinecap: 'round',
-                        vectorEffect: 'non-scaling-stroke',
-                      })
-                    : null,
-                  hasActivity
-                    ? h('path', {
-                        className: 'dsh-nudge-chart-line input',
-                        d: inputLine,
-                        fill: 'none',
-                        stroke: 'var(--dsw-static-deepseek-450,#5686fe)',
-                        strokeWidth: '1.8',
-                        strokeLinejoin: 'round',
-                        strokeLinecap: 'round',
-                        vectorEffect: 'non-scaling-stroke',
-                      })
-                    : null,
-                  ...(hasActivity ? pointsOf(noteSeries, 'note') : []),
-                  ...(hasActivity ? pointsOf(inputSeries, 'input') : []),
-                ),
-                hasActivity
-                  ? null
-                  : h('div', { className: 'dsh-nudge-chart-empty' }, t('statsEmpty')),
-                h(
-                  'div',
-                  { className: 'dsh-nudge-chart-hits' },
-                  ...windowKeys.map((key, index) =>
-                    h(
-                      'div',
-                      { key, className: 'dsh-nudge-chart-hit' },
-                      h(
-                        'span',
-                        { className: 'dsh-nudge-chart-tip' },
-                        h(
-                          'span',
-                          { className: 'dsh-nudge-chart-tip-date' },
-                          key === today ? t('statsToday') : key.slice(5),
-                        ),
-                        h(
-                          'span',
-                          { className: 'dsh-nudge-chart-tip-values' },
-                          `${t('statsLegendInput')} ${inputSeries[index]} · ${t('statsAnnotation')} ${noteSeries[index]}`,
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-              h(
-                'div',
-                { className: 'dsh-nudge-stats-axis' },
-                h('span', null, windowKeys[0].slice(5)),
-                h('span', null, windowKeys[7].slice(5)),
-                h('span', null, t('statsToday')),
-              ),
-              h(
-                'div',
-                { className: 'dsh-nudge-chart-legend' },
-                h(
-                  'span',
-                  { className: 'dsh-nudge-chart-legend-item' },
-                  h('i', { className: 'dsh-nudge-chart-dot input' }),
-                  t('statsLegendInput'),
-                ),
-                h(
-                  'span',
-                  { className: 'dsh-nudge-chart-legend-item' },
-                  h('i', { className: 'dsh-nudge-chart-dot note' }),
-                  t('statsAnnotation'),
-                ),
-              ),
-            ),
-            h(
-              'div',
-              { className: 'dsh-nudge-stats-side' },
-              h(
-                'div',
-                { className: 'dsh-nudge-stats-today' },
-                h(
-                  'div',
-                  { className: 'dsh-nudge-stats-today-head' },
-                  h('span', { className: 'dsh-nudge-stats-today-label' }, t('statsToday')),
-                  h('span', { className: 'dsh-nudge-stats-today-date' }, today.slice(5)),
-                ),
-                h(
-                  'div',
-                  { className: 'dsh-nudge-stats' },
-                  ...[
-                    { key: 'input', value: todayInputs, label: t('statsLegendInput') },
-                    { key: 'note', value: todayNotes, label: t('statsAnnotation') },
-                  ].map((item) =>
-                    h(
-                      'div',
-                      { key: item.key, className: 'dsh-nudge-stat' },
-                      h('span', { className: 'dsh-nudge-stat-value' }, String(item.value)),
-                      h('span', { className: 'dsh-nudge-stat-label' }, item.label),
-                    ),
-                  ),
-                ),
-              ),
-              h('div', { className: 'dsh-nudge-stats-side-head' }, h('span', null, t('statsTopTitle'))),
-              topPresets.length === 0
-                ? h(
-                    'div',
-                    { className: 'dsh-nudge-stats-side-empty' },
-                    windowInputs > 0 ? t('statsTopSince') : t('statsTopEmpty'),
-                  )
-                : h(
-                    'ol',
-                    { className: 'dsh-nudge-top-list' },
-                    ...topPresets.map((item, index) =>
-                      h(
-                        'li',
-                        { key: item.preset.id, className: 'dsh-nudge-top-item' },
-                        h('span', { className: 'dsh-nudge-top-rank' }, String(index + 1)),
-                        h('span', { className: 'dsh-nudge-top-label', title: item.preset.text }, item.preset.label),
-                        h('span', { className: 'dsh-nudge-top-count' }, fill(t('statsCountUnit'), item.total)),
-                      ),
-                    ),
-                  ),
-              topPresets.length > 0
-                ? h('div', { className: 'dsh-nudge-stats-share' }, fill(t('statsTopShare'), topTotal))
-                : null,
-            ),
-          ),
-        )
-      }
-
-
         function add() {
           const result = runtime.addPreset(draftLabel, draftText);
           if (!result.ok) {
@@ -6700,49 +6789,14 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
     }
 
 /**
- * The floating window's render tree.
+ * The floating window's leaf parts: cards, the note tray and the quick-input form.
  *
- * The pill, the card, the modules and the overlays that hang off it.
+ * Every component here is a pure function of its props (and the `t` it is
+ * handed); the runtime arrives as callbacks, so these can be read and changed
+ * without knowing what else the window holds.
  *
  * Built into `client.js` by `scripts/build.mjs`; edit this file, not the bundle.
  */
-
-    /**
-     * Build the React view over one runtime.
-     * @param runtime - window runtime.
-     * @returns the slot component.
-     */
-    function makeView(runtime) {
-      /** The same form the shell section renders, reused by the in-window panel. */
-      const SettingsForm = makeSettingsView(runtime);
-
-      /**
-       * Write the dragged window's position straight onto its node.
-       *
-       * A drag is a pointer sample every 4–16 ms. Taking each one through the
-       * store re-rendered the whole card — the annotation tray and the prompt
-       * row included — for a position only the root element shows. The render
-       * keeps owning `left`/`top`; this write exists only between the press and
-       * the drop, and the drop commits the same numbers through the store, so
-       * the first render after it paints the value the pointer already shows.
-       */
-      function paintDrag(node, point) {
-        const style = node?.style;
-        if (!style) return
-        style.left = `${point.x}px`;
-        style.top = `${point.y}px`;
-      }
-
-      const useSyncExternalStore =
-        React.useSyncExternalStore ??
-        function useSyncExternalStoreFallback(subscribe, getSnapshot) {
-          const [value, setValue] = React.useState(getSnapshot);
-          React.useEffect(() => {
-            setValue(getSnapshot());
-            return subscribe(() => setValue(getSnapshot()))
-          }, [subscribe, getSnapshot]);
-          return value
-        };
 
       /** Keep the caret where it is: clicks on the window must not steal focus. */
       function keepFocus(event) {
@@ -7117,6 +7171,51 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
           ),
         )
       }
+
+/**
+ * The floating window's render tree.
+ *
+ * The pill, the card, the modules and the overlays that hang off it.
+ *
+ * Built into `client.js` by `scripts/build.mjs`; edit this file, not the bundle.
+ */
+
+    /**
+     * Build the React view over one runtime.
+     * @param runtime - window runtime.
+     * @returns the slot component.
+     */
+    function makeView(runtime) {
+      /** The same form the shell section renders, reused by the in-window panel. */
+      const SettingsForm = makeSettingsView(runtime);
+
+      /**
+       * Write the dragged window's position straight onto its node.
+       *
+       * A drag is a pointer sample every 4–16 ms. Taking each one through the
+       * store re-rendered the whole card — the annotation tray and the prompt
+       * row included — for a position only the root element shows. The render
+       * keeps owning `left`/`top`; this write exists only between the press and
+       * the drop, and the drop commits the same numbers through the store, so
+       * the first render after it paints the value the pointer already shows.
+       */
+      function paintDrag(node, point) {
+        const style = node?.style;
+        if (!style) return
+        style.left = `${point.x}px`;
+        style.top = `${point.y}px`;
+      }
+
+      const useSyncExternalStore =
+        React.useSyncExternalStore ??
+        function useSyncExternalStoreFallback(subscribe, getSnapshot) {
+          const [value, setValue] = React.useState(getSnapshot);
+          React.useEffect(() => {
+            setValue(getSnapshot());
+            return subscribe(() => setValue(getSnapshot()))
+          }, [subscribe, getSnapshot]);
+          return value
+        };
 
       /** Whether this browser wants the chip motion (reduced motion users do not). */
       function chipMotionOn() {
@@ -8510,7 +8609,7 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
 
     /**
      * Mount the Client half.
-     * @param ctx - Client plugin context.
+     * @param {DshClientContext} ctx - Client plugin context.
      */
     function apply(ctx) {
       const runtime = createRuntime(ctx);
@@ -8573,13 +8672,13 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
       // other settings, where a page that cannot be inspected can still report
       // which seam is missing on that build.
       ctx.effect(() => {
-        const timer = setTimeout(() => {
+        const timer = /** @type {ReturnType<typeof setTimeout> & { unref?: () => void }} */ (setTimeout(() => {
           try {
             runtime.probeSettingsSeams();
           } catch {
             /* diagnostics never break the plugin */
           }
-        }, 3000);
+        }, 3000));
         timer?.unref?.();
         return () => clearTimeout(timer)
       }, 'dsh-nudge: settings seams');

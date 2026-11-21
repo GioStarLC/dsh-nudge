@@ -267,7 +267,7 @@ window.__ModuleLoader__.load({
           {
             id: 'trigger',
             run() {
-              const trigger = findTrigger();
+              const trigger = /** @type {HTMLElement | null} */ (findTrigger());
               if (trigger === null || typeof trigger.click !== 'function') return false
               trigger.click();
               return true

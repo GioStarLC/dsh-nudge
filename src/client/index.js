@@ -30,7 +30,7 @@ import { makeView } from './view.js'
 
     /**
      * Mount the Client half.
-     * @param ctx - Client plugin context.
+     * @param {DshClientContext} ctx - Client plugin context.
      */
     function apply(ctx) {
       const runtime = createRuntime(ctx)
@@ -93,13 +93,13 @@ import { makeView } from './view.js'
       // other settings, where a page that cannot be inspected can still report
       // which seam is missing on that build.
       ctx.effect(() => {
-        const timer = setTimeout(() => {
+        const timer = /** @type {ReturnType<typeof setTimeout> & { unref?: () => void }} */ (setTimeout(() => {
           try {
             runtime.probeSettingsSeams()
           } catch {
             /* diagnostics never break the plugin */
           }
-        }, 3000)
+        }, 3000))
         timer?.unref?.()
         return () => clearTimeout(timer)
       }, 'dsh-nudge: settings seams')
