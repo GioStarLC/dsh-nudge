@@ -1,0 +1,35 @@
+name: check
+
+# The pre-commit hook only guards machines that installed it; this runs the same
+# gate on every push and pull request, on a clean clone.
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # No install step: the repository has no dependencies.
+      - run: npm run check
+
+  release-facts:
+    # Tags are the only place the version may equal the newest tag.
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm run check:release
+      # Regeneration must be a no-op on the tagged commit.
+      - run: node scripts/changelog.mjs --write
+      - run: git diff --exit-code -- CHANGELOG.md

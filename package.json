@@ -32,6 +32,7 @@
     "check:client": "node scripts/check-client.mjs",
     "check:host": "node scripts/check-host.mjs",
     "check:graph": "node scripts/check-graph.mjs",
+    "check:release": "node scripts/check-release.mjs",
     "preview": "node scripts/preview.mjs",
     "preview:all": "node scripts/preview.mjs --all",
     "changelog": "node scripts/changelog.mjs",

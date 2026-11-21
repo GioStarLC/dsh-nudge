@@ -13,12 +13,14 @@ locale/{en,zh}.json             插件元数据文案
 scripts/check-client.mjs        浏览器半部校验（VM + stub React；含与宿主半部的桥接检查）
 scripts/check-host.mjs          宿主半部校验（临时 profile 目录）
 scripts/check-graph.mjs         代码图校验：project root 必须解析成仓库根
+scripts/check-release.mjs       发版事实校验：tag、package.json、CHANGELOG 同名
 scripts/harness.mjs             共享 VM harness（check 与 preview 共用）
 scripts/preview.mjs             场景截图回路
 scripts/changelog.mjs           CHANGELOG 生成器（按 git 历史）
 scripts/release-notes/          每版手写说明 <tag>.md
 docs/RELEASE.md                 发版流程
 .githooks/pre-commit            提交守卫：npm run check
+.github/workflows/check.yml     CI：推送/PR 跑 check，打 v* 标签再跑发版校验
 ```
 
 生成物不提交：`preview-out/`、`.agent/`、`graphify-out/`。
@@ -30,10 +32,11 @@ Web GUI 每次启动换一个 loopback 端口，浏览器视角就是**新的 or
 ## 命令
 
 ```sh
-npm run check            # 唯一验证入口：client + host + graph 校验；零依赖、不编译
+npm run check            # 日常验证入口：client + host + graph 校验；零依赖、不编译
 npm run check:client     # 只跑浏览器半部
 npm run check:host       # 只跑宿主半部
 npm run check:graph      # 只校验代码图的 project root（无图时跳过）
+npm run check:release    # 仅在发布提交上跑：tag / 版本 / CHANGELOG 必须同名
 npm run preview          # 一个场景截图到 preview-out/<scene>.png
 npm run preview:all      # 所有场景，亮色 + 暗色
 npm run changelog        # 预览未发布窗口
