@@ -5342,6 +5342,380 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
           return value
         }
 
+      /** Keep the caret where it is: clicks on the window must not steal focus. */
+      function keepFocus(event) {
+        event.preventDefault()
+      }
+
+      /**
+       * The shell both annotation cards share: the floating box, its close
+       * button and the dialog semantics. The bodies differ; the frame does not.
+       */
+      function popupFrame(props) {
+        const { t } = props
+        return h(
+          'div',
+          {
+            key: props.key,
+            className: props.className ? `dsh-nudge-popup ${props.className}` : 'dsh-nudge-popup',
+            style: props.style,
+            role: 'dialog',
+            'aria-label': t('annotationsTitle'),
+          },
+          h(
+            'button',
+            {
+              key: 'close',
+              type: 'button',
+              className: 'dsh-nudge-popup-close',
+              title: `${t('dismissAnnotation')} (Esc)`,
+              'aria-label': t('dismissAnnotation'),
+              onClick: props.onClose,
+            },
+            '×',
+          ),
+          ...(props.children ?? []),
+        )
+      }
+
+      /**
+       * The note field both cards share: Enter saves, Shift+Enter keeps typing,
+       * Escape leaves, and typing never re-reads the page selection.
+       */
+      function noteField(props) {
+        const { t } = props
+        return h('textarea', {
+          key: 'note',
+          ref: props.inputRef,
+          rows: props.rows,
+          className: props.className,
+          value: props.value,
+          placeholder: t('annotationPlaceholder'),
+          'aria-label': t('annotationPlaceholder'),
+          onChange: (event) => props.onChange(event.target.value),
+          onKeyDown: (event) => {
+            if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+              event.preventDefault()
+              props.onSubmit()
+            } else if (event.key === 'Escape') {
+              event.preventDefault()
+              props.onDismiss()
+            }
+          },
+        })
+      }
+
+      /**
+       * The selection card: the note field, the two verdicts, save and copy.
+       * It deliberately does not repeat the quoted passage; the highlight is
+       * where the passage lives.
+       */
+      function CaptureCard(props) {
+        const { t } = props
+        return popupFrame({
+          key: props.key,
+          t,
+          style: props.style,
+          onClose: props.onDismiss,
+          children: [
+            noteField({
+              t,
+              inputRef: props.inputRef,
+              rows: 1,
+              className: 'dsh-nudge-annotation-input',
+              value: props.note,
+              onChange: props.onNote,
+              onSubmit: props.onSubmit,
+              onDismiss: props.onDismiss,
+            }),
+            h(
+              'div',
+              { key: 'actions', className: 'dsh-nudge-popup-row' },
+              h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'dsh-nudge-popup-quick agree',
+                  title: t('agree'),
+                  'aria-label': t('agree'),
+                  onClick: props.onAgree,
+                },
+                h('span', { className: 'emoji', 'aria-hidden': true }, '👍'),
+              ),
+              h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'dsh-nudge-popup-quick',
+                  title: t('disagree'),
+                  'aria-label': t('disagree'),
+                  onClick: props.onDisagree,
+                },
+                h('span', { className: 'emoji', 'aria-hidden': true }, '👎'),
+              ),
+              h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'dsh-nudge-popup-save',
+                  title: `${t('addAnnotation')} (Enter)`,
+                  onClick: props.onSubmit,
+                },
+                t('addAnnotation'),
+              ),
+              h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'dsh-nudge-popup-copy',
+                  title: t('copyHint'),
+                  'data-copied': props.copied ? 'true' : undefined,
+                  onClick: props.onCopy,
+                },
+                props.copyLabel,
+              ),
+            ),
+          ],
+        })
+      }
+
+      /**
+       * The in-place editor for one collected note, hung off the passage (or
+       * tray row) that was clicked. It owns the edit, so the window never has
+       * to unfold or grow for it.
+       */
+      function EditCard(props) {
+        const { t } = props
+        return popupFrame({
+          key: props.key,
+          t,
+          style: props.style,
+          className: 'dsh-nudge-edit-popup',
+          onClose: props.onDismiss,
+          children: [
+            h('div', { key: 'quote', className: 'dsh-nudge-annotation-quote dsh-nudge-edit-quote' }, props.quote),
+            noteField({
+              t,
+              inputRef: props.inputRef,
+              rows: 2,
+              className: 'dsh-nudge-annotation-input dsh-nudge-edit-input',
+              value: props.note,
+              onChange: props.onNote,
+              onSubmit: props.onSubmit,
+              onDismiss: props.onDismiss,
+            }),
+            h(
+              'div',
+              { key: 'actions', className: 'dsh-nudge-popup-row' },
+              h(
+                'button',
+                { type: 'button', className: 'dsh-nudge-edit-delete', onClick: props.onDelete },
+                t('deleteAnnotation'),
+              ),
+              h('button', { type: 'button', onClick: props.onDismiss }, t('dismissAnnotation')),
+              h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'dsh-nudge-popup-save',
+                  title: `${t('saveAnnotation')} (Enter)`,
+                  onClick: props.onSubmit,
+                },
+                t('saveAnnotation'),
+              ),
+            ),
+            h('div', { key: 'hint', className: 'dsh-nudge-popup-hint' }, h('span', null, t('editNoteHint'))),
+          ],
+        })
+      }
+
+      /**
+       * The in-window form that adds or edits one quick input: title, body and
+       * the two actions. Both callers differ only in which fields they bind and
+       * which class names the form wears, so the shape is written once.
+       */
+      function quickInputForm(props) {
+        const { t } = props
+        const onKeyDown = (kind) => (event) => {
+          if (event.isComposing) return
+          if (event.key === 'Enter' && (kind === 'single' || event.metaKey === true || event.ctrlKey === true)) {
+            event.preventDefault()
+            props.onSubmit()
+          } else if (event.key === 'Escape') {
+            event.preventDefault()
+            props.onCancel()
+          }
+        }
+        return h(
+          'div',
+          { key: props.key, className: props.className },
+          h(
+            'div',
+            { className: 'dsh-nudge-quick-add-head' },
+            h('span', { className: 'dsh-nudge-field-label' }, props.head),
+          ),
+          h(
+            'label',
+            { className: 'dsh-nudge-quick-add-field' },
+            h('span', { className: 'dsh-nudge-field-label' }, t('quickAddTitle')),
+            h('input', {
+              ref: props.inputRef,
+              type: 'text',
+              value: props.label,
+              placeholder: t('quickAddTitle'),
+              onChange: (event) => props.onLabel(event.target.value),
+              onKeyDown: onKeyDown('single'),
+            }),
+          ),
+          h(
+            'label',
+            { className: 'dsh-nudge-quick-add-field' },
+            h('span', { className: 'dsh-nudge-field-label' }, t('quickAddBody')),
+            h('textarea', {
+              rows: 3,
+              value: props.text,
+              placeholder: t('quickAddBody'),
+              onChange: (event) => props.onText(event.target.value),
+              onKeyDown: onKeyDown('multiline'),
+            }),
+          ),
+          props.error ? h('div', { className: 'dsh-nudge-settings-error', role: 'alert' }, props.error) : null,
+          h(
+            'div',
+            { className: 'dsh-nudge-annotation-actions' },
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'dsh-nudge-btn',
+                onMouseDown: keepFocus,
+                onPointerDown: keepFocus,
+                onClick: props.onCancel,
+              },
+              t('cancelPreset'),
+            ),
+            h(
+              'button',
+              {
+                type: 'button',
+                className: 'dsh-nudge-btn primary',
+                onMouseDown: keepFocus,
+                onPointerDown: keepFocus,
+                onClick: props.onSubmit,
+              },
+              t('savePreset'),
+            ),
+          ),
+        )
+      }
+
+      /**
+       * The note tray: one fixed-height list, the guide line and the two write
+       * actions. The fixed height is the point — a note landing must not resize
+       * the window — so the hint and the actions stay mounted when empty.
+       */
+      function AnnotationTray(props) {
+        const { t } = props
+        const rows =
+          props.annotations.length === 0
+            ? [
+                h(
+                  'div',
+                  {
+                    key: 'annotation-empty',
+                    className: 'dsh-nudge-annotation-hint dsh-nudge-annotation-empty',
+                  },
+                  props.quick ? t('annotationsHint') : t('annotationsOffHint'),
+                ),
+              ]
+            : props.annotations.map((item) =>
+                h(
+                  'div',
+                  { key: item.id, className: 'dsh-nudge-annotation-item' },
+                  h(
+                    'div',
+                    { className: 'dsh-nudge-annotation-item-head' },
+                    h(
+                      'button',
+                      {
+                        type: 'button',
+                        className: 'dsh-nudge-annotation-open',
+                        onClick: (event) =>
+                          props.onOpen(item.id, event?.currentTarget?.getBoundingClientRect?.()),
+                      },
+                      h('span', { className: 'dsh-nudge-annotation-quote', title: item.quote }, item.quote),
+                      item.note !== '' ? h('span', { className: 'dsh-nudge-annotation-note' }, item.note) : null,
+                      item.written === true
+                        ? h('span', { className: 'dsh-nudge-annotation-written' }, t('writtenTag'))
+                        : null,
+                    ),
+                    h(
+                      'button',
+                      {
+                        type: 'button',
+                        className: 'dsh-nudge-annotation-remove',
+                        title: t('deleteAnnotation'),
+                        'aria-label': t('deleteAnnotation'),
+                        onClick: () => props.onRemove(item.id),
+                      },
+                      '×',
+                    ),
+                  ),
+                ),
+              )
+        return h(
+          'div',
+          { className: 'dsh-nudge-module-body' },
+          h(
+            'div',
+            { key: 'annotation-tray', className: 'dsh-nudge-annotation-tray' },
+            h(
+              'div',
+              { key: 'annotation-list', className: 'dsh-nudge-annotation-list', ref: props.listRef },
+              ...rows,
+            ),
+            // Always mounted: the guidance line keeps its height when the first
+            // note arrives, so nothing below it moves.
+            h(
+              'div',
+              {
+                key: 'annotation-hint',
+                className: 'dsh-nudge-annotation-hint dsh-nudge-annotation-guide',
+              },
+              // Only a painted mark can be clicked, so the hint waits for the
+              // quick-notes switch.
+              props.annotations.length > 0 && props.quick ? t('highlightHint') : '',
+            ),
+            // Always mounted too; both buttons simply have nothing to do until a
+            // note is waiting.
+            h(
+              'div',
+              { key: 'annotation-actions', className: 'dsh-nudge-annotation-actions' },
+              h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'dsh-nudge-btn',
+                  disabled: props.pendingNotes === 0,
+                  onClick: props.onWrite,
+                },
+                t('writeAnnotations'),
+              ),
+              h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'dsh-nudge-btn primary',
+                  disabled: props.pendingNotes === 0,
+                  onClick: props.onSend,
+                },
+                t('sendAnnotations'),
+              ),
+            ),
+          ),
+        )
+      }
+
       return function NudgeWindow() {
         const state = useSyncExternalStore(runtime.subscribe, runtime.getSnapshot, runtime.getSnapshot)
         const drag = React.useRef(null)
@@ -5543,98 +5917,21 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
               : t('copyQuote')
         const popup =
           state.quick && draft !== null && state.annotationCardHidden !== true
-            ? h(
-                'div',
-                {
-                  key: 'popup',
-                  className: 'dsh-nudge-popup',
-                  style: runtime.popupPosition(),
-                  role: 'dialog',
-                  'aria-label': t('annotationsTitle'),
-                },
-                h(
-                  'button',
-                  {
-                    key: 'close',
-                    type: 'button',
-                    className: 'dsh-nudge-popup-close',
-                    title: `${t('dismissAnnotation')} (Esc)`,
-                    'aria-label': t('dismissAnnotation'),
-                    onClick: () => runtime.dismissAnnotationDraft(),
-                  },
-                  '×',
-                ),
-                h('textarea', {
-                  key: 'note',
-                  ref: popupInputRef,
-                  rows: 1,
-                  className: 'dsh-nudge-annotation-input',
-                  value: state.annotationNote,
-                  placeholder: t('annotationPlaceholder'),
-                  'aria-label': t('annotationPlaceholder'),
-                  // Typing must never be interrupted: the note field owns the
-                  // caret, so the transcript selection is left alone here.
-                  onChange: (event) => {
-                    runtime.setAnnotationNote(event.target.value)
-                  },
-                  onKeyDown: (event) => {
-                    if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
-                      event.preventDefault()
-                      runtime.addAnnotation()
-                    } else if (event.key === 'Escape') {
-                      event.preventDefault()
-                      runtime.dismissAnnotationDraft()
-                    }
-                  },
-                }),
-                h(
-                  'div',
-                  { key: 'actions', className: 'dsh-nudge-popup-row' },
-                  h(
-                    'button',
-                    {
-                      type: 'button',
-                      className: 'dsh-nudge-popup-quick agree',
-                      title: t('agree'),
-                      'aria-label': t('agree'),
-                      onClick: () => runtime.quickReply('agree'),
-                    },
-                    h('span', { className: 'emoji', 'aria-hidden': true }, '👍'),
-                  ),
-                  h(
-                    'button',
-                    {
-                      type: 'button',
-                      className: 'dsh-nudge-popup-quick',
-                      title: t('disagree'),
-                      'aria-label': t('disagree'),
-                      onClick: () => runtime.quickReply('disagree'),
-                    },
-                    h('span', { className: 'emoji', 'aria-hidden': true }, '👎'),
-                  ),
-                  h(
-                    'button',
-                    {
-                      type: 'button',
-                      className: 'dsh-nudge-popup-save',
-                      title: `${t('addAnnotation')} (Enter)`,
-                      onClick: () => runtime.addAnnotation(),
-                    },
-                    t('addAnnotation'),
-                  ),
-                  h(
-                    'button',
-                    {
-                      type: 'button',
-                      className: 'dsh-nudge-popup-copy',
-                      title: t('copyHint'),
-                      'data-copied': copyFlash === 'done' ? 'true' : undefined,
-                      onClick: copyQuote,
-                    },
-                    copyLabel,
-                  ),
-                ),
-              )
+            ? CaptureCard({
+                key: 'popup',
+                t,
+                style: runtime.popupPosition(),
+                note: state.annotationNote,
+                inputRef: popupInputRef,
+                copied: copyFlash === 'done',
+                copyLabel,
+                onNote: (value) => runtime.setAnnotationNote(value),
+                onSubmit: () => runtime.addAnnotation(),
+                onDismiss: () => runtime.dismissAnnotationDraft(),
+                onCopy: copyQuote,
+                onAgree: () => runtime.quickReply('agree'),
+                onDisagree: () => runtime.quickReply('disagree'),
+              })
             : null
         /** The note the in-place editor is about, or null. */
         const editingItem =
@@ -5648,85 +5945,18 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
          */
         const editPopup =
           state.annotationDraft === null && editingItem !== null
-            ? h(
-                'div',
-                {
-                  key: 'edit-popup',
-                  className: 'dsh-nudge-popup dsh-nudge-edit-popup',
-                  style: runtime.editPopupPosition(),
-                  role: 'dialog',
-                  'aria-label': t('annotationsTitle'),
-                },
-                h(
-                  'button',
-                  {
-                    key: 'close',
-                    type: 'button',
-                    className: 'dsh-nudge-popup-close',
-                    title: `${t('dismissAnnotation')} (Esc)`,
-                    'aria-label': t('dismissAnnotation'),
-                    onClick: () => runtime.cancelAnnotationEdit(),
-                  },
-                  '×',
-                ),
-                h(
-                  'div',
-                  { key: 'quote', className: 'dsh-nudge-annotation-quote dsh-nudge-edit-quote' },
-                  editingItem.quote,
-                ),
-                h('textarea', {
-                  key: 'note',
-                  ref: editInputRef,
-                  rows: 2,
-                  className: 'dsh-nudge-annotation-input dsh-nudge-edit-input',
-                  value: state.annotationNote,
-                  placeholder: t('annotationPlaceholder'),
-                  'aria-label': t('annotationPlaceholder'),
-                  onChange: (event) => runtime.setAnnotationNote(event.target.value),
-                  onKeyDown: (event) => {
-                    if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
-                      event.preventDefault()
-                      runtime.saveEditedAnnotation()
-                    } else if (event.key === 'Escape') {
-                      event.preventDefault()
-                      runtime.cancelAnnotationEdit()
-                    }
-                  },
-                }),
-                h(
-                  'div',
-                  { key: 'actions', className: 'dsh-nudge-popup-row' },
-                  h(
-                    'button',
-                    {
-                      type: 'button',
-                      className: 'dsh-nudge-edit-delete',
-                      onClick: () => runtime.removeAnnotation(editingItem.id),
-                    },
-                    t('deleteAnnotation'),
-                  ),
-                  h(
-                    'button',
-                    { type: 'button', onClick: () => runtime.cancelAnnotationEdit() },
-                    t('dismissAnnotation'),
-                  ),
-                  h(
-                    'button',
-                    {
-                      type: 'button',
-                      className: 'dsh-nudge-popup-save',
-                      title: `${t('saveAnnotation')} (Enter)`,
-                      onClick: () => runtime.saveEditedAnnotation(),
-                    },
-                    t('saveAnnotation'),
-                  ),
-                ),
-                h(
-                  'div',
-                  { key: 'hint', className: 'dsh-nudge-popup-hint' },
-                  h('span', null, t('editNoteHint')),
-                ),
-              )
+            ? EditCard({
+                key: 'edit-popup',
+                t,
+                style: runtime.editPopupPosition(),
+                quote: editingItem.quote,
+                note: state.annotationNote,
+                inputRef: editInputRef,
+                onNote: (value) => runtime.setAnnotationNote(value),
+                onSubmit: () => runtime.saveEditedAnnotation(),
+                onDismiss: () => runtime.cancelAnnotationEdit(),
+                onDelete: () => runtime.removeAnnotation(editingItem.id),
+              })
             : null
 
         const dotClass =
@@ -5763,8 +5993,6 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
               ? t('again')
               : t('ask')
         const askTitle = insertMode ? t('insertHint') : t('askHint')
-        /** Keep the caret where it is: clicks on the window must not steal focus. */
-        const keepFocus = (event) => event.preventDefault()
 
         /** Whether this browser wants the chip motion (reduced motion users do not). */
         function chipsMotionOn() {
@@ -6549,110 +6777,17 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
                 ),
               ),
               state.annotationExpanded
-                ? h(
-                    'div',
-                    { className: 'dsh-nudge-module-body' },
-                    // One fixed-height tray. Rows scroll inside the list, and the
-                    // guide line and the actions keep their rows, so a note
-                    // landing never changes the window's own size.
-                    h(
-                      'div',
-                      { key: 'annotation-tray', className: 'dsh-nudge-annotation-tray' },
-                      h(
-                        'div',
-                        { key: 'annotation-list', className: 'dsh-nudge-annotation-list', ref: noteListRef },
-                        ...(state.annotations.length === 0
-                          ? [
-                              h(
-                                'div',
-                                {
-                                  key: 'annotation-empty',
-                                  className: 'dsh-nudge-annotation-hint dsh-nudge-annotation-empty',
-                                },
-                                state.quick ? t('annotationsHint') : t('annotationsOffHint'),
-                              ),
-                            ]
-                          : state.annotations.map((item) =>
-                              h(
-                                'div',
-                                { key: item.id, className: 'dsh-nudge-annotation-item' },
-                                h(
-                                  'div',
-                                  { className: 'dsh-nudge-annotation-item-head' },
-                                  h(
-                                    'button',
-                                    {
-                                      type: 'button',
-                                      className: 'dsh-nudge-annotation-open',
-                                      onClick: (event) =>
-                                        runtime.startEditAnnotation(
-                                          item.id,
-                                          event?.currentTarget?.getBoundingClientRect?.(),
-                                        ),
-                                    },
-                                    h('span', { className: 'dsh-nudge-annotation-quote', title: item.quote }, item.quote),
-                                    item.note !== ''
-                                      ? h('span', { className: 'dsh-nudge-annotation-note' }, item.note)
-                                      : null,
-                                    item.written === true
-                                      ? h('span', { className: 'dsh-nudge-annotation-written' }, t('writtenTag'))
-                                      : null,
-                                  ),
-                                  h(
-                                    'button',
-                                    {
-                                      type: 'button',
-                                      className: 'dsh-nudge-annotation-remove',
-                                      title: t('deleteAnnotation'),
-                                      'aria-label': t('deleteAnnotation'),
-                                      onClick: () => runtime.removeAnnotation(item.id),
-                                    },
-                                    '×',
-                                  ),
-                                ),
-                              ),
-                            )),
-                      ),
-                      // Always mounted: the guidance line keeps its height when
-                      // the first note arrives, so nothing below it moves.
-                      h(
-                        'div',
-                        {
-                          key: 'annotation-hint',
-                          className: 'dsh-nudge-annotation-hint dsh-nudge-annotation-guide',
-                        },
-                        // Only a painted mark can be clicked, so the hint waits
-                        // for the quick-notes switch.
-                        state.annotations.length > 0 && state.quick ? t('highlightHint') : '',
-                      ),
-                      // Always mounted too; both buttons simply have nothing to
-                      // do until a note is waiting.
-                      h(
-                        'div',
-                        { key: 'annotation-actions', className: 'dsh-nudge-annotation-actions' },
-                        h(
-                          'button',
-                          {
-                            type: 'button',
-                            className: 'dsh-nudge-btn',
-                            disabled: pendingNotes === 0,
-                            onClick: () => runtime.writeAnnotations(),
-                          },
-                          t('writeAnnotations'),
-                        ),
-                        h(
-                          'button',
-                          {
-                            type: 'button',
-                            className: 'dsh-nudge-btn primary',
-                            disabled: pendingNotes === 0,
-                            onClick: () => runtime.sendAnnotations(),
-                          },
-                          t('sendAnnotations'),
-                        ),
-                      ),
-                    ),
-                  )
+                ? AnnotationTray({
+                    t,
+                    annotations: state.annotations,
+                    quick: state.quick,
+                    pendingNotes,
+                    listRef: noteListRef,
+                    onOpen: (id, rect) => runtime.startEditAnnotation(id, rect),
+                    onRemove: (id) => runtime.removeAnnotation(id),
+                    onWrite: () => runtime.writeAnnotations(),
+                    onSend: () => runtime.sendAnnotations(),
+                  })
                 : null,
             ),
             h(
@@ -6820,170 +6955,36 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
                   : null,
               ),
               state.nudgeEditId !== null && editingPreset !== null
-                ? h(
-                    'div',
-                    { key: 'quick-edit', className: 'dsh-nudge-quick-edit' },
-                    h(
-                      'div',
-                      { className: 'dsh-nudge-quick-add-head' },
-                      h('span', { className: 'dsh-nudge-field-label' }, t('editPresetHead')),
-                    ),
-                    h(
-                      'label',
-                      { className: 'dsh-nudge-quick-add-field' },
-                      h('span', { className: 'dsh-nudge-field-label' }, t('quickAddTitle')),
-                      h('input', {
-                        ref: quickEditInputRef,
-                        type: 'text',
-                        value: state.nudgeEditLabel,
-                        placeholder: t('quickAddTitle'),
-                        onChange: (event) => runtime.setNudgeEditLabel(event.target.value),
-                        onKeyDown: (event) => {
-                          if (event.isComposing) return
-                          if (event.key === 'Enter') {
-                            event.preventDefault()
-                            runtime.saveNudgeEdit()
-                          } else if (event.key === 'Escape') {
-                            event.preventDefault()
-                            runtime.cancelNudgeEdit()
-                          }
-                        },
-                      }),
-                    ),
-                    h(
-                      'label',
-                      { className: 'dsh-nudge-quick-add-field' },
-                      h('span', { className: 'dsh-nudge-field-label' }, t('quickAddBody')),
-                      h('textarea', {
-                        rows: 3,
-                        value: state.nudgeEditText,
-                        placeholder: t('quickAddBody'),
-                        onChange: (event) => runtime.setNudgeEditText(event.target.value),
-                        onKeyDown: (event) => {
-                          if (event.isComposing) return
-                          if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
-                            event.preventDefault()
-                            runtime.saveNudgeEdit()
-                          } else if (event.key === 'Escape') {
-                            event.preventDefault()
-                            runtime.cancelNudgeEdit()
-                          }
-                        },
-                      }),
-                    ),
-                    state.nudgeEditError
-                      ? h('div', { className: 'dsh-nudge-settings-error', role: 'alert' }, state.nudgeEditError)
-                      : null,
-                    h(
-                      'div',
-                      { className: 'dsh-nudge-annotation-actions' },
-                      h(
-                        'button',
-                        {
-                          type: 'button',
-                          className: 'dsh-nudge-btn',
-                          onMouseDown: keepFocus,
-                          onPointerDown: keepFocus,
-                          onClick: () => runtime.cancelNudgeEdit(),
-                        },
-                        t('cancelPreset'),
-                      ),
-                      h(
-                        'button',
-                        {
-                          type: 'button',
-                          className: 'dsh-nudge-btn primary',
-                          onMouseDown: keepFocus,
-                          onPointerDown: keepFocus,
-                          onClick: () => runtime.saveNudgeEdit(),
-                        },
-                        t('savePreset'),
-                      ),
-                    ),
-                  )
+                ? quickInputForm({
+                    key: 'quick-edit',
+                    t,
+                    className: 'dsh-nudge-quick-edit',
+                    head: t('editPresetHead'),
+                    inputRef: quickEditInputRef,
+                    label: state.nudgeEditLabel,
+                    text: state.nudgeEditText,
+                    error: state.nudgeEditError,
+                    onLabel: (value) => runtime.setNudgeEditLabel(value),
+                    onText: (value) => runtime.setNudgeEditText(value),
+                    onSubmit: () => runtime.saveNudgeEdit(),
+                    onCancel: () => runtime.cancelNudgeEdit(),
+                  })
                 : null,
               state.nudgeDraftOpen === true
-                ? h(
-                    'div',
-                    { key: 'quick-add', className: 'dsh-nudge-quick-add' },
-                    h(
-                      'div',
-                      { className: 'dsh-nudge-quick-add-head' },
-                      h('span', { className: 'dsh-nudge-field-label' }, t('addPreset')),
-                    ),
-                    h(
-                      'label',
-                      { className: 'dsh-nudge-quick-add-field' },
-                      h('span', { className: 'dsh-nudge-field-label' }, t('quickAddTitle')),
-                      h('input', {
-                        ref: quickAddInputRef,
-                        type: 'text',
-                        value: state.nudgeDraftLabel,
-                        placeholder: t('quickAddTitle'),
-                        onChange: (event) => runtime.setNudgeDraftLabel(event.target.value),
-                        onKeyDown: (event) => {
-                          if (event.isComposing) return
-                          if (event.key === 'Enter') {
-                            event.preventDefault()
-                            runtime.saveNudgeDraft()
-                          } else if (event.key === 'Escape') {
-                            event.preventDefault()
-                            runtime.cancelNudgeDraft()
-                          }
-                        },
-                      }),
-                    ),
-                    h(
-                      'label',
-                      { className: 'dsh-nudge-quick-add-field' },
-                      h('span', { className: 'dsh-nudge-field-label' }, t('quickAddBody')),
-                      h('textarea', {
-                        rows: 3,
-                        value: state.nudgeDraftText,
-                        placeholder: t('quickAddBody'),
-                        onChange: (event) => runtime.setNudgeDraftText(event.target.value),
-                        onKeyDown: (event) => {
-                          if (event.isComposing) return
-                          if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
-                            event.preventDefault()
-                            runtime.saveNudgeDraft()
-                          } else if (event.key === 'Escape') {
-                            event.preventDefault()
-                            runtime.cancelNudgeDraft()
-                          }
-                        },
-                      }),
-                    ),
-                    state.nudgeDraftError
-                      ? h('div', { className: 'dsh-nudge-settings-error', role: 'alert' }, state.nudgeDraftError)
-                      : null,
-                    h(
-                      'div',
-                      { className: 'dsh-nudge-annotation-actions' },
-                      h(
-                        'button',
-                        {
-                          type: 'button',
-                          className: 'dsh-nudge-btn',
-                          onMouseDown: keepFocus,
-                          onPointerDown: keepFocus,
-                          onClick: () => runtime.cancelNudgeDraft(),
-                        },
-                        t('cancelPreset'),
-                      ),
-                      h(
-                        'button',
-                        {
-                          type: 'button',
-                          className: 'dsh-nudge-btn primary',
-                          onMouseDown: keepFocus,
-                          onPointerDown: keepFocus,
-                          onClick: () => runtime.saveNudgeDraft(),
-                        },
-                        t('savePreset'),
-                      ),
-                    ),
-                  )
+                ? quickInputForm({
+                    key: 'quick-add',
+                    t,
+                    className: 'dsh-nudge-quick-add',
+                    head: t('addPreset'),
+                    inputRef: quickAddInputRef,
+                    label: state.nudgeDraftLabel,
+                    text: state.nudgeDraftText,
+                    error: state.nudgeDraftError,
+                    onLabel: (value) => runtime.setNudgeDraftLabel(value),
+                    onText: (value) => runtime.setNudgeDraftText(value),
+                    onSubmit: () => runtime.saveNudgeDraft(),
+                    onCancel: () => runtime.cancelNudgeDraft(),
+                  })
                 : null,
             ),
             turbo
