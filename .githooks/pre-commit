@@ -1,9 +1,39 @@
 #!/bin/sh
-# Guardrail: run the client + host checks before every commit.
+# Guardrail: rebuild the committed artifacts, stage them, then run the full gate
+# (types, unit checks, client/host checks, graph check).
 # Installed by `npm run hooks:install` (see package.json) or:
 #   git config core.hooksPath .githooks
 # Skip once with: git commit --no-verify
+#
+# The gate is verbose (hundreds of assertions); a passing run keeps three lines,
+# a failing one keeps the tail, so a commit stays readable either way.
 set -e
+echo "pre-commit: rebuilding artifacts from src/…"
+build=$(mktemp)
+if ! npm run --silent build >"$build" 2>&1; then
+  status=$?
+  echo "pre-commit: build failed; last 40 lines:" >&2
+  tail -n 40 "$build" >&2
+  rm -f "$build"
+  exit $status
+fi
+tail -n 1 "$build"
+rm -f "$build"
+
+# The gate reads the working tree and the commit records the index: stage the
+# rebuilt artifacts so the two never disagree, and so a forgotten build cannot
+# slip into a commit as a stale bundle.
+git add -- client.js client.settings-jump.js
+
 echo "pre-commit: running checks (npm run check)…"
-npm run --silent check
+log=$(mktemp)
+if ! npm run --silent check >"$log" 2>&1; then
+  status=$?
+  echo "pre-commit: checks failed; last 60 lines:" >&2
+  tail -n 60 "$log" >&2
+  rm -f "$log"
+  exit $status
+fi
+tail -n 3 "$log"
+rm -f "$log"
 echo "pre-commit: checks passed."

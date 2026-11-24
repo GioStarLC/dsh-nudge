@@ -160,6 +160,16 @@ const SCENES = {
       return { view: 'settings.section', width: 560, height: 1600 }
     },
   },
+  // The composer's own left row: three pinned prompts, the rest folds into
+  // 「更多」. Rendered on its own because the bar lives in the shell's input row.
+  'input-bar': {
+    bg: '#f3f4f6',
+    drive: async (b) => {
+      for (const id of ['brief', 'fast', 'four-line']) b.runtime.setPresetPinned(id, true)
+      await tick()
+      return { view: 'conversation.input.left', width: 420, height: 96 }
+    },
+  },
   'annotation-popup': {
     bg: '#f6f7f9',
     drive: async (b) => {
