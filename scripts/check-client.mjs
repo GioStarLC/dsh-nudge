@@ -1747,6 +1747,8 @@ function passageFlowStub(key, passages) {
   check('answer: the highlight covers the whole passage', firstNote.quote, '第一段完整内容')
   check('answer: the selection is the note', firstNote.note, '第一段')
   check('answer: the passage is anchored', firstNote.anchor?.key, 'turn-9')
+  check('answer: the marked span starts the passage', firstNote.answer?.start, 0)
+  check('answer: the marked span is the selection', firstNote.answer?.length, 3)
 
   selected = '第二段完整'
   range.intersectsNode = (node) => node === second.textNode
@@ -1762,6 +1764,48 @@ function passageFlowStub(key, passages) {
   const replaced = booted.runtime.getSnapshot().annotations
   check('answer: the same passage is replaced, not stacked', replaced.length, 2)
   check('answer: the newer note wins', replaced[1].note, '第二段')
+}
+
+{
+  // An answer note paints in its own registry, so the stylesheet can colour it
+  // differently from a plain note without touching the other marks.
+  const booted = await boot({ highlights: true })
+  booted.runtime.setQuick(true)
+  booted.sandbox.document.createRange = () => ({
+    setStart() {},
+    setEnd() {},
+    getBoundingClientRect: () => ({ left: 100, top: 300, right: 320, bottom: 320 }),
+  })
+  const first = passageStub('P', '第一段完整内容')
+  const flow = passageFlowStub('turn-11', [first])
+  booted.sandbox.document.querySelectorAll = (selector) =>
+    selector === '[data-chat-anchor-key]' ? [flow] : []
+  const range = {
+    commonAncestorContainer: first.block,
+    startContainer: first.textNode,
+    startOffset: 0,
+    endContainer: first.textNode,
+    endOffset: 3,
+    collapsed: false,
+    getBoundingClientRect: () => ({ left: 100, top: 300, right: 220, bottom: 320 }),
+    intersectsNode: (node) => node === first.textNode,
+  }
+  booted.sandbox.getSelection = () => ({
+    rangeCount: 1,
+    isCollapsed: false,
+    toString: () => '第一段',
+    anchorNode: first.textNode,
+    anchorOffset: 0,
+    focusNode: first.textNode,
+    focusOffset: 3,
+    getRangeAt: () => range,
+    removeAllRanges() {},
+  })
+  check('answer paint: captured', booted.runtime.captureSelection(), true)
+  check('answer paint: accepted', booted.runtime.markAsAnswer(), true)
+  const registry = booted.sandbox.CSS.highlights
+  check('answer paint: the marked words are purple', registry.get('dsh-nudge-answers')?.ranges.length, 1)
+  check('answer paint: the paragraph keeps its yellow remainder', registry.get('dsh-nudge-notes')?.ranges.length, 1)
 }
 
 {
@@ -1978,6 +2022,7 @@ function passageFlowStub(key, passages) {
   check('written note: added to the tray', booted.runtime.addAnnotation(), true)
   const registry = booted.sandbox.CSS.highlights
   check('written note: the passage is painted', registry.get('dsh-nudge-notes')?.ranges.length, 1)
+  check('written note: a plain note is not an answer', booted.runtime.getSnapshot().annotations[0].answer, undefined)
   let draft = ''
   booted.runtime.attachComposer({ readDraft: () => draft, setDraft: (value) => (draft = value) })
   check('written note: write accepted', booted.runtime.writeAnnotations(), true)
@@ -2288,6 +2333,11 @@ function countedFlowItem(key, text, counter) {
   )
   check('annotation: the card carries five actions', (findAllByTag(popup, 'button') ?? []).length, 5)
   check(
+    'annotation: actions follow the usage order',
+    (findAllByTag(actions, 'button') ?? []).map((item) => item.children?.[0]).join('|'),
+    '定为答案|添加批注|同意这段|不同意这段',
+  )
+  check(
     'annotation: copy reports its own result',
     await booted.runtime.copyDraftQuote(),
     false,
@@ -2397,14 +2447,12 @@ function countedFlowItem(key, text, counter) {
   near.runtime.captureSelection({ x: 150, y: 310 })
   const nearView = near.registrations.find((item) => item.entry.name === 'shell.overlay').Component
   popup = findByClass(nearView(), 'dsh-nudge-popup')
-  check('annotation: the selection pointer stays the anchor', popup?.props?.style?.left, '162px')
-  check('annotation: the card sits below the pointer', popup?.props?.style?.top, '322px')
-  // The release point sits left of the card's own gutter, so the origin is
-  // clamped to the card's left edge instead of going negative.
+  check('annotation: the release point anchors the answer button', popup?.props?.style?.left, '106px')
+  check('annotation: the card opens above the release point', popup?.props?.style?.top, '334px')
   check(
     'annotation: the card grows from the release point',
     popup?.props?.style?.transformOrigin,
-    '0px 0px',
+    '44px 100%',
   )
 }
 

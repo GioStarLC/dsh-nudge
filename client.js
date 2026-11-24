@@ -64,6 +64,8 @@ window.__ModuleLoader__.load({
     const DRAG_ROOT_SELECTOR = '.dsh-nudge-card, .dsh-nudge-pill'
     /** Registry name for the annotated-passage highlight. */
     const HIGHLIGHT_NAME = 'dsh-nudge-notes'
+    /** Registry name for passages a note marked as the answer. */
+    const ANSWER_HIGHLIGHT = 'dsh-nudge-answers'
     /** Registry name for the passage currently being annotated. */
     const CAPTURE_HIGHLIGHT = 'dsh-nudge-capture'
     /** How much context one anchor keeps on each side of its quote. */
@@ -2827,15 +2829,21 @@ window.__ModuleLoader__.load({
         }
         if (anchor === null) anchor = anchorFromQuote(quote)
         if (anchor === null) recordAnchorMiss(quote)
+        // Where the marked words sit inside the highlighted paragraph, in the
+        // same whitespace-free projection the anchor uses. The purple span is
+        // measured from it, so the mark survives a note edit.
+        const packed = packedText(quote)
+        const packedAnswer = packedText(draft.quote)
+        const at = packedAnswer === '' ? -1 : packed.indexOf(packedAnswer)
         const annotation = {
           id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
           quote,
           note: draft.quote,
           anchor,
+          answer: at === -1 ? true : { start: at, length: packedAnswer.length },
         }
         // One answer per passage: marking the same block again replaces the
         // earlier note instead of stacking an identical highlight.
-        const packed = packedText(quote)
         const next = [
           ...state.annotations.filter((item) => packedText(item.quote) !== packed),
           annotation,
@@ -2984,14 +2992,13 @@ window.__ModuleLoader__.load({
        * ambiguous one falls through to the recovery pass, which can prove the
        * row is the only carrier.
        */
-      function rangeWithinElement(entry, key, full) {
+      function spanWithinElement(entry, key, full) {
         const packed = packedText(entry.anchor.quote)
         if (packed === '') return null
         const at = full.packed.indexOf(packed)
         if (at === -1) return null
         if (full.packed.indexOf(packed, at + 1) !== -1) return null
-        const range = rangeFromPacked(full, at, at + packed.length)
-        if (range === null) return null
+        if (rangeFromPacked(full, at, at + packed.length) === null) return null
         if (entry.note !== null && typeof entry.note?.id === 'string') {
           resolvedAnchors.set(entry.note.id, {
             key,
@@ -3001,7 +3008,7 @@ window.__ModuleLoader__.load({
             index: at,
           })
         }
-        return range
+        return { start: at, end: at + packed.length }
       }
 
       /** Recompute which spans carry a note and repaint the CSS highlight. */
@@ -3016,6 +3023,7 @@ window.__ModuleLoader__.load({
           const sources = state.annotations
           if (state.quick !== true || (sources.length === 0 && captureDraft === null)) {
             registry.delete(HIGHLIGHT_NAME)
+            registry.delete(ANSWER_HIGHLIGHT)
             registry.delete(CAPTURE_HIGHLIGHT)
             return
           }
@@ -3046,6 +3054,7 @@ window.__ModuleLoader__.load({
           }
           if (byKey.size === 0) {
             registry.delete(HIGHLIGHT_NAME)
+            registry.delete(ANSWER_HIGHLIGHT)
             let painted = false
             const fallback = captureDraft?.range
             try {
@@ -3062,8 +3071,53 @@ window.__ModuleLoader__.load({
           const elements = document.querySelectorAll?.(ANCHOR_SELECTOR) ?? []
           const maps = new Map()
           const ranges = []
+          const answerRanges = []
           const captureRanges = []
           const misses = []
+          /**
+           * Put one note's passage into the paint lists.
+           *
+           * An answer note splits its paragraph around the words that were
+           * marked: the paragraph stays yellow before and after them, and only
+           * that span is purple. Splitting instead of stacking two highlights
+           * keeps the result independent of registry paint order.
+           */
+          function paintNote(entry, full, start, end) {
+            const painted = []
+            const answer = entry.note?.answer
+            const from = typeof answer?.start === 'number' ? answer.start : -1
+            const length = typeof answer?.length === 'number' ? answer.length : 0
+            if (from < 0 || length <= 0) {
+              const range = rangeFromPacked(full, start, end)
+              if (range !== null) {
+                ranges.push(range)
+                painted.push(range)
+              }
+              return painted
+            }
+            const answerStart = Math.max(start, Math.min(start + from, end))
+            const answerEnd = Math.max(answerStart, Math.min(answerStart + length, end))
+            if (answerStart > start) {
+              const range = rangeFromPacked(full, start, answerStart)
+              if (range !== null) {
+                ranges.push(range)
+                painted.push(range)
+              }
+            }
+            if (answerEnd < end) {
+              const range = rangeFromPacked(full, answerEnd, end)
+              if (range !== null) {
+                ranges.push(range)
+                painted.push(range)
+              }
+            }
+            const purple = rangeFromPacked(full, answerStart, answerEnd)
+            if (purple !== null) {
+              answerRanges.push(purple)
+              painted.push(purple)
+            }
+            return painted
+          }
           for (const element of elements) {
             const key = element.getAttribute?.('data-chat-anchor-key')
             const wanted = byKey.get(key)
@@ -3074,21 +3128,25 @@ window.__ModuleLoader__.load({
               maps.set(key, full)
             }
             for (const entry of wanted) {
-              const span = locateAnchor(full, entry.anchor)
-              let range = span === null ? null : rangeFromPacked(full, span.start, span.end)
               // The row is here but the stored offsets drifted: the passage is
               // still inside it, so heal it without searching the transcript.
-              if (range === null) range = rangeWithinElement(entry, key, full)
-              if (range === null) {
+              const span = locateAnchor(full, entry.anchor) ?? spanWithinElement(entry, key, full)
+              if (span === null) {
                 misses.push({ entry, quote: entry.anchor.quote })
                 continue
               }
               if (entry.capture === true) {
+                const range = rangeFromPacked(full, span.start, span.end)
+                if (range === null) {
+                  misses.push({ entry, quote: entry.anchor.quote })
+                  continue
+                }
                 captureRanges.push(range)
                 continue
               }
-              ranges.push(range)
-              highlighted.push({ note: entry.note, range })
+              for (const range of paintNote(entry, full, span.start, span.end)) {
+                highlighted.push({ note: entry.note, range })
+              }
             }
           }
           // A key that names no element is the other half of the same problem:
@@ -3122,14 +3180,15 @@ window.__ModuleLoader__.load({
             // the mark wait for the render that brings its passage back.
             if (holders.length !== 1) continue
             const index = holders[0].full.packed.indexOf(packed)
-            const range = rangeFromPacked(holders[0].full, index, index + packed.length)
-            if (range === null) continue
+            if (index === -1) continue
             if (miss.entry.capture === true) {
-              captureRanges.push(range)
+              const range = rangeFromPacked(holders[0].full, index, index + packed.length)
+              if (range !== null) captureRanges.push(range)
               continue
             }
-            ranges.push(range)
-            highlighted.push({ note: miss.entry.note, range })
+            for (const range of paintNote(miss.entry, holders[0].full, index, index + packed.length)) {
+              highlighted.push({ note: miss.entry.note, range })
+            }
             // Heal the anchor so the next repaint takes the direct path.
             if (miss.entry.note !== null && typeof miss.entry.note?.id === 'string') {
               resolvedAnchors.set(miss.entry.note.id, {
@@ -3146,6 +3205,12 @@ window.__ModuleLoader__.load({
           if (ranges.length === 0) registry.delete(HIGHLIGHT_NAME)
           else if (!sameRanges(registry.get(HIGHLIGHT_NAME), ranges)) {
             registry.set(HIGHLIGHT_NAME, new window.Highlight(...ranges))
+          }
+          // Answer passages keep their own registry, so the stylesheet can give
+          // them a different colour without touching a plain note's mark.
+          if (answerRanges.length === 0) registry.delete(ANSWER_HIGHLIGHT)
+          else if (!sameRanges(registry.get(ANSWER_HIGHLIGHT), answerRanges)) {
+            registry.set(ANSWER_HIGHLIGHT, new window.Highlight(...answerRanges))
           }
           if (captureAnchor === null && captureDraft !== null && captureDraft.range) {
             try {
@@ -3310,46 +3375,40 @@ window.__ModuleLoader__.load({
       }
 
       /**
-       * Viewport box for the selection card: pinned to the pointer that finished
-       * the selection, opened below-right of it when there is room and flipped to
-       * the other side when the viewport edge is near. Without a pointer — or
-       * when the pointer belongs to a click elsewhere — it falls back to the
+       * Viewport box for the selection card.
+       *
+       * A mouse selection ends on the release point, so the card opens above it
+       * with its first button — 定为答案 — centred on that point: the next click
+       * lands without moving the mouse. When the card does not fit above the
+       * point, or the pointer belongs to a click elsewhere, it falls back to the
        * quote box, centred above/below it.
        */
       function popupPosition() {
         const draft = state.annotationDraft
         const width = 340
         const margin = 8
-        const gap = 10
-        const offset = 12
         const approxHeight = 280
+        // Border + padding + half the first button: the button's centre sits
+        // this far inside the card. The card is pinned by its bottom edge, so
+        // the same measure vertically needs no card height.
+        const answerInsetX = 44
+        const answerInsetY = 24
         const vw = viewport().width
-        const vh = viewport().height
         const boxWidth = Math.min(width, vw - margin * 2)
         const rect = draft?.rect ?? null
         const pointer = pointerNearRect(draft?.pointer, rect) ? draft.pointer : null
         const clampX = (value) => Math.max(margin, Math.min(value, vw - boxWidth - margin))
         if (pointer) {
           const { x, y } = pointer
-          const flipLeft = x + offset + boxWidth > vw - margin
-          const leftValue = flipLeft ? clampX(x - offset - boxWidth) : clampX(x + offset)
-          // The card grows out of the point that opened it. Horizontally only:
-          // an upward card is pinned by its bottom edge, so y is always the
-          // anchor line and a vertical origin would move the card on frame one.
-          const origin = {
-            transformOrigin: `${Math.round(Math.max(0, Math.min(x - leftValue, boxWidth)))}px 0px`,
-          }
-          const top = y + offset
-          if (top + approxHeight <= vh - margin) {
-            return { left: `${Math.round(leftValue)}px`, top: `${Math.round(top)}px`, ...origin, transform: 'none' }
-          }
-          // Not enough room below: open above the cursor instead.
-          const aboveTop = Math.max(margin, y - offset)
-          return {
-            left: `${Math.round(leftValue)}px`,
-            top: `${Math.round(aboveTop)}px`,
-            ...origin,
-            transform: 'translateY(-100%)',
+          const leftValue = clampX(x - answerInsetX)
+          const top = y + answerInsetY
+          if (top - approxHeight >= margin) {
+            return {
+              left: `${Math.round(leftValue)}px`,
+              top: `${Math.round(top)}px`,
+              transformOrigin: `${Math.round(Math.max(0, Math.min(x - leftValue, boxWidth)))}px 100%`,
+              transform: 'translateY(-100%)',
+            }
           }
         }
         return placeOverRect(rect, approxHeight)
@@ -4995,6 +5054,7 @@ window.__ModuleLoader__.load({
         }
         try {
           window.CSS?.highlights?.delete(HIGHLIGHT_NAME)
+          window.CSS?.highlights?.delete(ANSWER_HIGHLIGHT)
           window.CSS?.highlights?.delete(CAPTURE_HIGHLIGHT)
         } catch {
           /* no highlight registry */
@@ -5232,10 +5292,8 @@ window.__ModuleLoader__.load({
 .dsh-nudge-popup-copy[data-copied="done"]{color:var(--dn-accent);border-color:var(--dn-accent-line);background:var(--dn-accent-soft)}
 .dsh-nudge-popup-copy[data-copied="failed"]{color:var(--dsw-alias-state-error-primary,#c8433c);border-color:color-mix(in srgb,var(--dsw-alias-state-error-primary,#c8433c) 45%,transparent)}
 .dsh-nudge-popup-row .dsh-nudge-popup-quick:hover{background:var(--dn-hover)}
-.dsh-nudge-popup-row .dsh-nudge-popup-answer{border-color:var(--dn-accent-line);background:var(--dn-accent-soft);color:var(--dn-accent)}
-.dsh-nudge-popup-row .dsh-nudge-popup-answer:hover{background:color-mix(in srgb,var(--dn-accent) 20%,transparent)}
-.dsh-nudge-popup-row .dsh-nudge-popup-save{border-color:var(--dn-accent);background:var(--dn-accent);color:var(--dsw-alias-label-primary-inverted,#fff);font-weight:600}
-.dsh-nudge-popup-row .dsh-nudge-popup-save:hover{filter:brightness(1.06)}
+.dsh-nudge-popup-row .dsh-nudge-popup-answer{border-color:var(--dn-accent);background:var(--dn-accent);color:var(--dsw-alias-label-primary-inverted,#fff);font-weight:600}
+.dsh-nudge-popup-row .dsh-nudge-popup-answer:hover{filter:brightness(1.06)}
 .dsh-nudge-popup-hint{display:flex;justify-content:space-between;gap:8px;font-size:11px;line-height:1.5;color:var(--dsw-alias-label-secondary,#5a5a66)}
 .dsh-nudge-popup-hint kbd{font:inherit;padding:0 3px;border:1px solid var(--dn-line);border-radius:4px;background:color-mix(in srgb,var(--dsw-alias-label-primary,#1a1a1a) 4%,transparent)}
 /* The in-place note editor: the capture card's shape, hung off the passage.
@@ -5288,6 +5346,9 @@ window.__ModuleLoader__.load({
 @keyframes dsh-nudge-attention{0%{box-shadow:inset 0 0 0 0 var(--dn-accent-line);opacity:0}20%{box-shadow:inset 0 0 0 3px var(--dn-accent-soft);opacity:1}100%{box-shadow:inset 0 0 0 0 transparent;opacity:0}}
 .dsh-nudge-attention-ring{position:absolute;inset:0;border-radius:inherit;pointer-events:none;animation:dsh-nudge-attention .9s ease-out}
 ::highlight(dsh-nudge-notes){background:#fde68a;color:#1f2937}
+/* A passage marked as the answer keeps the note's own purple, on a light tint
+   so the text under it stays readable in the light theme. */
+::highlight(dsh-nudge-answers){background:var(--dsh-nudge-answer-bg,#ddd6fe);color:var(--dsh-nudge-answer-fg,#1f2937)}
 /* Same colours as the browser's own selection on Chromium/Windows, because
    focusing the note field collapses the real selection before it can be kept.
    --dsh-nudge-capture-bg / -fg stay overridable for other platforms/themes. */
@@ -5795,6 +5856,27 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
                     'button',
                     {
                       type: 'button',
+                      className: 'dsh-nudge-popup-answer',
+                      title: t('asAnswerHint'),
+                      'aria-label': t('asAnswerHint'),
+                      onClick: () => runtime.markAsAnswer(),
+                    },
+                    t('asAnswer'),
+                  ),
+                  h(
+                    'button',
+                    {
+                      type: 'button',
+                      className: 'dsh-nudge-popup-save',
+                      title: `${t('addAnnotation')} (Enter)`,
+                      onClick: () => runtime.addAnnotation(),
+                    },
+                    t('addAnnotation'),
+                  ),
+                  h(
+                    'button',
+                    {
+                      type: 'button',
                       className: 'dsh-nudge-popup-quick',
                       title: t('agreeThis'),
                       'aria-label': t('agreeThis'),
@@ -5812,27 +5894,6 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
                       onClick: () => runtime.quickReply('disagree'),
                     },
                     t('disagreeThis'),
-                  ),
-                  h(
-                    'button',
-                    {
-                      type: 'button',
-                      className: 'dsh-nudge-popup-answer',
-                      title: t('asAnswerHint'),
-                      'aria-label': t('asAnswerHint'),
-                      onClick: () => runtime.markAsAnswer(),
-                    },
-                    t('asAnswer'),
-                  ),
-                  h(
-                    'button',
-                    {
-                      type: 'button',
-                      className: 'dsh-nudge-popup-save',
-                      title: `${t('addAnnotation')} (Enter)`,
-                      onClick: () => runtime.addAnnotation(),
-                    },
-                    t('addAnnotation'),
                   ),
                 ),
               )
