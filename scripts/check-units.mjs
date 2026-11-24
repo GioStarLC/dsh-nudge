@@ -12,6 +12,7 @@
 import { MAX_TIP_LENGTH, MAX_TIPS, STATS_DAYS } from '../src/client/constants.js'
 import { createComposerInsertion } from '../src/client/composer-insert.js'
 import { createPresetActions } from '../src/client/preset-actions.js'
+import { createTipActions } from '../src/client/tip-actions.js'
 import { occurrencesOf, rectDistance } from '../src/client/dom.js'
 import { chipSlotAt, clamp, isPoint, rectValue } from '../src/client/geometry.js'
 import {
@@ -343,6 +344,64 @@ check(
 
   check('presets: an empty paste is refused', api.importPresets('   ').error, 'importEmpty')
   check('presets: no preset sends the editor away', api.cancelPresetEdit(), false)
+}
+
+
+// --- idle lines: the list, the cap and the rotation ----------------------
+
+{
+  const state = {
+    lang: 'zh',
+    tips: ['甲', '乙'],
+    tipIndex: 0,
+    flash: '',
+    tipEditingIndex: null,
+  }
+  const persisted = []
+  const cleared = []
+  const api = createTipActions({
+    getState: () => state,
+    setState: (patch) => Object.assign(state, patch),
+    text: (key) => key,
+    persistSetting: (name, value) => persisted.push([name, value]),
+    clearSetting: (name) => cleared.push(name),
+  })
+
+  const appended = api.addTip('  丙  ')
+  check('tips: a trimmed line is accepted', appended.ok, true)
+  check('tips: the line joins the list', state.tips.join('|'), '甲|乙|丙')
+  check('tips: a blank line is refused', api.addTip('   ').error, 'tipTextRequired')
+
+  const pasted = api.addTips('甲\n\n丁\n')
+  check('tips: a pasted block adds only the new lines', pasted.added, 1)
+  check('tips: the duplicate is reported as skipped', pasted.skipped, 1)
+  check('tips: the pasted line landed', state.tips.includes('丁'), true)
+
+  state.tips = ['唯一']
+  check('tips: the last line cannot be removed', api.removeTip(0), false)
+  state.tips = ['甲', '乙']
+  check('tips: a line can be removed', api.removeTip(0), true)
+  check('tips: the removal is written down', persisted.some(([name]) => name === 'tips'), true)
+
+  state.tips = ['甲', '乙', '丙']
+  state.tipEditingIndex = 0
+  check('tips: a line moves down', api.moveTipTo(0, 2), true)
+  check('tips: the editor follows its line', state.tipEditingIndex, 2)
+
+  state.tipIndex = 0
+  state.flash = ''
+  api.advanceTip()
+  check('tips: the rotation takes the next line', state.tipIndex, 1)
+  state.tipIndex = 2
+  api.advanceTip()
+  check('tips: the rotation wraps', state.tipIndex, 0)
+  state.flash = '已复制'
+  api.advanceTip()
+  check('tips: a confirmation line holds the rotation', state.tipIndex, 0)
+
+  api.resetTips()
+  check('tips: reset clears the stored list', cleared.includes('tips'), true)
+  check('tips: reset restores the built-ins', state.tips.length > 1, true)
 }
 
 console.log(`\nunit checks: ${checks - failures} passed, ${failures} failed`)
