@@ -49,6 +49,11 @@ uv run --with "graphifyy[mcp]==0.9.57" graphify update "$(cygpath -w "$PWD")"
 
 `check` 是本项目的"单测"，不是构建：不编译、不下载、不装 `node_modules`。可以直接跑，不受全局「构建约束」限制。`test` 脚本不存在，也不要新增。
 
+
+## 收尾推送
+
+用户说「收尾推送」（或「总结未推送的内容并写到 changelog，推送到 git，不需要打 tag」）时，读并执行 [.dsh/skills/closeout-push/SKILL.md](.dsh/skills/closeout-push/SKILL.md)：盘点 → 摘要确认 → 一次提交 → 生成 CHANGELOG → 校验 → 推 `origin main`。不建 tag，不动版本号。
+
 ## graphify
 
 项目根有 `graphify-out/`，但它是 gitignored——新 clone 或换机器时不存在，先按上面「命令」建图，别默默退回归 grep。
