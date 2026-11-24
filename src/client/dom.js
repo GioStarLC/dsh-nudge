@@ -62,6 +62,93 @@ import { ANCHOR_SELECTOR, CONTEXT_CHARS, MAX_OCCURRENCES } from './constants.js'
       return { packed, map }
     }
 
+    /**
+     * Tags whose text reads as one passage. A selection inside one of these is
+     * promoted to the whole block, so the highlight covers the paragraph the
+     * words sit in rather than the words alone.
+     */
+    const PASSAGE_TAGS = {
+      P: true,
+      LI: true,
+      H1: true,
+      H2: true,
+      H3: true,
+      H4: true,
+      H5: true,
+      H6: true,
+      BLOCKQUOTE: true,
+      PRE: true,
+      TD: true,
+      TH: true,
+      DT: true,
+      DD: true,
+      FIGCAPTION: true,
+    }
+
+    /** Whether a range touches one node; a node that cannot be asked is skipped. */
+    function rangeTouches(range, node) {
+      try {
+        return typeof range.intersectsNode === 'function' && range.intersectsNode(node) === true
+      } catch {
+        return false
+      }
+    }
+
+    /** The innermost passage tag between a node and its flow item. */
+    function passageBlockOf(node, flowItem) {
+      let element = elementOfNode(node)
+      while (element !== null && element !== flowItem) {
+        if (PASSAGE_TAGS[String(element.tagName ?? '').toUpperCase()] === true) return element
+        element = element.parentElement ?? null
+      }
+      return flowItem
+    }
+
+    /** The text one block carries, with only its trailing whitespace dropped. */
+    function blockTextOf(block) {
+      let text = ''
+      const walk = (node) => {
+        for (const child of node.childNodes ?? []) {
+          if (child.nodeType === 3) text += child.data ?? ''
+          else if (child.nodeType === 1 && !isHiddenElement(child)) walk(child)
+        }
+      }
+      walk(block)
+      return text.replace(/\s+$/, '')
+    }
+
+    /**
+     * The whole passages a selection touches, in document order.
+     *
+     * A selection inside a paragraph names that paragraph; one crossing several
+     * names all of them. The innermost block wins, so a list item wrapping a
+     * paragraph contributes its words once, and a flow item that carries no
+     * block of its own stands for its whole text.
+     */
+    function passagesOfRange(range) {
+      const elements = document.querySelectorAll?.(ANCHOR_SELECTOR) ?? []
+      const blocks = []
+      for (const element of elements) {
+        const walk = (node) => {
+          for (const child of node.childNodes ?? []) {
+            if (child.nodeType === 3) {
+              if (!rangeTouches(range, child)) continue
+              const block = passageBlockOf(child, element)
+              if (!blocks.includes(block)) blocks.push(block)
+            } else if (child.nodeType === 1 && !isHiddenElement(child)) {
+              walk(child)
+            }
+          }
+        }
+        walk(element)
+      }
+      const innermost = blocks.filter(
+        (block) => !blocks.some((other) => other !== block && block.contains?.(other) === true),
+      )
+      const texts = innermost.map(blockTextOf).filter((text) => text.trim() !== '')
+      return texts.length === 0 ? '' : texts.join('\n\n')
+    }
+
     /** A DOM Range covering [start, end) of a packed map, or null. */
     function rangeFromPacked(full, start, end) {
       if (start < 0 || end <= start) return null
@@ -224,4 +311,4 @@ import { ANCHOR_SELECTOR, CONTEXT_CHARS, MAX_OCCURRENCES } from './constants.js'
       return { start: best.index, end: best.index + anchor.quote.length }
     }
 
-export { elementOfNode, NON_TEXT_TAGS, isHiddenElement, packedText, packedMapOf, rangeFromPacked, occurrencesOf, rectDistance, anchorFromRange, anchorFromQuote, sameRanges, locateAnchor }
+export { elementOfNode, NON_TEXT_TAGS, isHiddenElement, packedText, packedMapOf, passagesOfRange, rangeFromPacked, occurrencesOf, rectDistance, anchorFromRange, anchorFromQuote, sameRanges, locateAnchor }

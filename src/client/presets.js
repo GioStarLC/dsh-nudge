@@ -28,6 +28,7 @@ import { storage } from './storage.js'
         label: lang === 'zh' ? preset.labelZh : preset.labelEn,
         text: preset.text,
         enabled: true,
+        pinned: false,
       }))
     }
 
@@ -71,6 +72,7 @@ import { storage } from './storage.js'
           label: rawLabel.length > 0 ? rawLabel : text.slice(0, 8),
           text,
           enabled: item.enabled !== false,
+          pinned: item.pinned === true,
         })
       }
       return list

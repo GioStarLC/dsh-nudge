@@ -15,8 +15,9 @@ import { h } from './react.js'
       }
 
       /**
-       * The shell both annotation cards share: the floating box, its close
-       * button and the dialog semantics. The bodies differ; the frame does not.
+       * The shell both annotation cards share: the floating box and the dialog
+       * semantics. Escape in the field leaves, so the card carries no close
+       * button; the bodies differ, the frame does not.
        */
       function popupFrame(props) {
         const { t } = props
@@ -29,18 +30,6 @@ import { h } from './react.js'
             role: 'dialog',
             'aria-label': t('annotationsTitle'),
           },
-          h(
-            'button',
-            {
-              key: 'close',
-              type: 'button',
-              className: 'dsh-nudge-popup-close',
-              title: `${t('dismissAnnotation')} (Esc)`,
-              'aria-label': t('dismissAnnotation'),
-              onClick: props.onClose,
-            },
-            '×',
-          ),
           ...(props.children ?? []),
         )
       }
@@ -72,29 +61,88 @@ import { h } from './react.js'
         })
       }
 
+      /** Copy the captured passage; the icon reports the result in place. */
+      const copyIcon = h(
+        'svg',
+        { width: 14, height: 14, viewBox: '0 0 16 16', fill: 'none', 'aria-hidden': true },
+        h('rect', {
+          x: 5.4,
+          y: 5.4,
+          width: 7.4,
+          height: 7.4,
+          rx: 1.6,
+          stroke: 'currentColor',
+          strokeWidth: 1.3,
+        }),
+        h('path', {
+          d: 'M10.6 5.4V4.2A1.6 1.6 0 0 0 9 2.6H4.2A1.6 1.6 0 0 0 2.6 4.2V9c0 .9.7 1.6 1.6 1.6h1.2',
+          stroke: 'currentColor',
+          strokeWidth: 1.3,
+          strokeLinecap: 'round',
+        }),
+      )
+      const copiedIcon = h(
+        'svg',
+        { width: 14, height: 14, viewBox: '0 0 16 16', fill: 'none', 'aria-hidden': true },
+        h('path', {
+          d: 'm3.4 8.4 3 3 6.2-6.4',
+          stroke: 'currentColor',
+          strokeWidth: 1.6,
+          strokeLinecap: 'round',
+          strokeLinejoin: 'round',
+        }),
+      )
+      const copyFailedIcon = h(
+        'svg',
+        { width: 14, height: 14, viewBox: '0 0 16 16', fill: 'none', 'aria-hidden': true },
+        h('path', {
+          d: 'M4.4 4.4l7.2 7.2M11.6 4.4l-7.2 7.2',
+          stroke: 'currentColor',
+          strokeWidth: 1.6,
+          strokeLinecap: 'round',
+        }),
+      )
+
       /**
-       * The selection card: the note field, the two verdicts, save and copy.
-       * It deliberately does not repeat the quoted passage; the highlight is
-       * where the passage lives.
+       * The selection card: the note field (with the copy icon on its right),
+       * the answer shortcut, save and the two verdicts. It deliberately does
+       * not repeat the quoted passage; the highlight is where the passage
+       * lives.
        */
       function CaptureCard(props) {
         const { t } = props
+        const copy = props.copy ?? ''
         return popupFrame({
           key: props.key,
           t,
           style: props.style,
-          onClose: props.onDismiss,
           children: [
-            noteField({
-              t,
-              inputRef: props.inputRef,
-              rows: 1,
-              className: 'dsh-nudge-annotation-input',
-              value: props.note,
-              onChange: props.onNote,
-              onSubmit: props.onSubmit,
-              onDismiss: props.onDismiss,
-            }),
+            h(
+              'div',
+              { key: 'field', className: 'dsh-nudge-popup-field' },
+              noteField({
+                t,
+                inputRef: props.inputRef,
+                rows: 1,
+                className: 'dsh-nudge-annotation-input',
+                value: props.note,
+                onChange: props.onNote,
+                onSubmit: props.onSubmit,
+                onDismiss: props.onDismiss,
+              }),
+              h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'dsh-nudge-popup-copy',
+                  title: copy === 'done' ? t('copiedShort') : copy === 'failed' ? t('copyFailedShort') : t('copyHint'),
+                  'aria-label': t('copyHint'),
+                  'data-copied': copy === '' ? undefined : copy,
+                  onClick: props.onCopy,
+                },
+                copy === 'done' ? copiedIcon : copy === 'failed' ? copyFailedIcon : copyIcon,
+              ),
+            ),
             h(
               'div',
               { key: 'actions', className: 'dsh-nudge-popup-row' },
@@ -102,23 +150,12 @@ import { h } from './react.js'
                 'button',
                 {
                   type: 'button',
-                  className: 'dsh-nudge-popup-quick agree',
-                  title: t('agree'),
-                  'aria-label': t('agree'),
-                  onClick: props.onAgree,
+                  className: 'dsh-nudge-popup-answer',
+                  title: t('asAnswerHint'),
+                  'aria-label': t('asAnswerHint'),
+                  onClick: props.onAnswer,
                 },
-                h('span', { className: 'emoji', 'aria-hidden': true }, '👍'),
-              ),
-              h(
-                'button',
-                {
-                  type: 'button',
-                  className: 'dsh-nudge-popup-quick',
-                  title: t('disagree'),
-                  'aria-label': t('disagree'),
-                  onClick: props.onDisagree,
-                },
-                h('span', { className: 'emoji', 'aria-hidden': true }, '👎'),
+                t('asAnswer'),
               ),
               h(
                 'button',
@@ -134,12 +171,23 @@ import { h } from './react.js'
                 'button',
                 {
                   type: 'button',
-                  className: 'dsh-nudge-popup-copy',
-                  title: t('copyHint'),
-                  'data-copied': props.copied ? 'true' : undefined,
-                  onClick: props.onCopy,
+                  className: 'dsh-nudge-popup-quick',
+                  title: t('agreeThis'),
+                  'aria-label': t('agreeThis'),
+                  onClick: props.onAgree,
                 },
-                props.copyLabel,
+                t('agreeThis'),
+              ),
+              h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'dsh-nudge-popup-quick',
+                  title: t('disagreeThis'),
+                  'aria-label': t('disagreeThis'),
+                  onClick: props.onDisagree,
+                },
+                t('disagreeThis'),
               ),
             ),
           ],
@@ -158,7 +206,6 @@ import { h } from './react.js'
           t,
           style: props.style,
           className: 'dsh-nudge-edit-popup',
-          onClose: props.onDismiss,
           children: [
             h('div', { key: 'quote', className: 'dsh-nudge-annotation-quote dsh-nudge-edit-quote' }, props.quote),
             noteField({

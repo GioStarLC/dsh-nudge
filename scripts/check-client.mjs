@@ -73,13 +73,17 @@ function expandTree(node) {
   check('overlay slot injected', booted.injects.includes('shell.overlay'), true)
   check('settings slot injected', booted.injects.includes('settings.section'), true)
   check('composer slot injected', booted.injects.includes('conversation.input.overlay'), true)
-  check('three slot entries', booted.registrations.length, 3)
+  check('four slot entries', booted.registrations.length, 4)
+  check('input bar slot injected', booted.injects.includes('conversation.input.left'), true)
   const overlay = booted.registrations.find((item) => item.entry.name === 'shell.overlay')
   const settings = booted.registrations.find((item) => item.entry.name === 'settings.section')
   const bridge = booted.registrations.find((item) => item.entry.name === 'conversation.input.overlay')
+  const inputBar = booted.registrations.find((item) => item.entry.name === 'conversation.input.left')
   check('overlay entry id', overlay?.entry.id, 'dsh-nudge')
   check('settings entry id', settings?.entry.id, 'dsh-nudge')
   check('composer bridge entry id', bridge?.entry.id, 'dsh-nudge')
+  check('input bar entry id', inputBar?.entry.id, 'dsh-nudge')
+  check('input bar renders nothing while nothing is pinned', inputBar?.Component?.({}), null)
   check('composer bridge renders no DOM', bridge?.Component?.({}), null)
   check('settings label is lazy and localized', typeof settings?.entry.label, 'function')
   includes('settings label text', settings?.entry.label?.(), '状态')
@@ -752,7 +756,13 @@ function expandTree(node) {
   const settings = booted.registrations.find((item) => item.entry.name === 'settings.section').Component
   const tree = () => expandTree(settings())
   check('every preset starts enabled', runtime.getSnapshot().presets.every((preset) => preset.enabled !== false), true)
-  check('the settings row offers a state switch', (findAllByClass(tree(), 'dsh-nudge-preset-state') ?? []).length, 3)
+  const places = findAllByClass(tree(), 'dsh-nudge-preset-place') ?? []
+  check('the settings row offers two place switches', places.length, 6)
+  check(
+    'the places are the window and the input',
+    places.map((node) => node.props?.['data-place']).join(','),
+    'window,input,window,input,window,input',
+  )
 
   const target = runtime.getSnapshot().presets[1].id
   runtime.setPreset(target)
@@ -1609,6 +1619,50 @@ function flowItemStub(key, text, children = []) {
   return element
 }
 
+/**
+ * One synthetic passage: a block element (P, LI, …) inside a flow item, with a
+ * single text node. `closest` answers the anchor selector with the flow item
+ * and a passage selector with the block itself.
+ */
+function passageStub(tagName, text) {
+  const block = {
+    nodeType: 1,
+    tagName,
+    hidden: false,
+    childNodes: [],
+    parentElement: null,
+    contains: (other) => other === block || other === textNode,
+  }
+  const textNode = { nodeType: 3, data: text, textContent: text, parentElement: block }
+  block.childNodes.push(textNode)
+  block.closest = (selector) =>
+    selector === '[data-chat-anchor-key]'
+      ? block.parentElement
+      : selector.includes('figcaption')
+        ? block
+        : null
+  return { block, textNode }
+}
+
+/** One flow item made of passages, for whole-paragraph expansion. */
+function passageFlowStub(key, passages) {
+  const element = {
+    nodeType: 1,
+    tagName: 'DIV',
+    hidden: false,
+    childNodes: [],
+    getAttribute: (name) => (name === 'data-chat-anchor-key' ? key : null),
+    matches: (selector) => selector === '[data-chat-anchor-key]',
+    contains: (other) => other === element || passages.some((item) => item.block.contains(other)),
+    closest: (selector) => (selector === '[data-chat-anchor-key]' ? element : null),
+  }
+  for (const item of passages) {
+    item.block.parentElement = element
+    element.childNodes.push(item.block)
+  }
+  return element
+}
+
 {
   const booted = await boot({})
   booted.sandbox.getSelection = selectionStub('原文内容', { nodeType: 1, closest: () => null })
@@ -1663,6 +1717,157 @@ function flowItemStub(key, text, children = []) {
   booted.runtime.attachComposer({ readDraft: () => '', setDraft: (value) => (written = value) })
   check('quick reply: write accepted', booted.runtime.writeAnnotations(), true)
   check('quick reply: composed message carries verdict + remark', written.includes('我的回答：同意，但第三点要改'), true)
+}
+
+{
+  // 「作为答案」: the mark covers the whole paragraph the selection sits in, the
+  // selected words become the note, and marking the same passage again replaces
+  // the earlier note instead of stacking a second identical highlight.
+  const booted = await boot({})
+  booted.sandbox.document.createRange = () => ({
+    setStart() {},
+    setEnd() {},
+    getBoundingClientRect: () => ({ left: 100, top: 300, right: 320, bottom: 320 }),
+  })
+  const first = passageStub('P', '第一段完整内容')
+  const second = passageStub('P', '第二段完整内容')
+  const flow = passageFlowStub('turn-9', [first, second])
+  booted.sandbox.document.querySelectorAll = (selector) =>
+    selector === '[data-chat-anchor-key]' ? [flow] : []
+  let selected = '第一段'
+  const range = {
+    commonAncestorContainer: first.block,
+    startContainer: first.textNode,
+    startOffset: 0,
+    endContainer: first.textNode,
+    endOffset: 3,
+    collapsed: false,
+    getBoundingClientRect: () => ({ left: 100, top: 300, right: 220, bottom: 320 }),
+    intersectsNode: (node) => node === first.textNode,
+  }
+  booted.sandbox.getSelection = () => ({
+    rangeCount: 1,
+    isCollapsed: false,
+    toString: () => selected,
+    anchorNode: first.textNode,
+    anchorOffset: 0,
+    focusNode: first.textNode,
+    focusOffset: selected.length,
+    getRangeAt: () => range,
+    removeAllRanges() {},
+  })
+  check('answer: captured', booted.runtime.captureSelection(), true)
+  check('answer: accepted', booted.runtime.markAsAnswer(), true)
+  const firstNote = booted.runtime.getSnapshot().annotations[0]
+  check('answer: the highlight covers the whole passage', firstNote.quote, '第一段完整内容')
+  check('answer: the selection is the note', firstNote.note, '第一段')
+  check('answer: the passage is anchored', firstNote.anchor?.key, 'turn-9')
+  check('answer: the marked span starts the passage', firstNote.answer?.start, 0)
+  check('answer: the marked span is the selection', firstNote.answer?.length, 3)
+
+  selected = '第二段完整'
+  range.intersectsNode = (node) => node === second.textNode
+  check('answer: a second passage is captured', booted.runtime.captureSelection(), true)
+  check('answer: a second passage is accepted', booted.runtime.markAsAnswer(), true)
+  const tray = booted.runtime.getSnapshot().annotations
+  check('answer: another passage stacks', tray.length, 2)
+  check('answer: the second passage is highlighted', tray[1].quote, '第二段完整内容')
+
+  selected = '第二段'
+  check('answer: the same passage is captured again', booted.runtime.captureSelection(), true)
+  check('answer: the same passage is accepted again', booted.runtime.markAsAnswer(), true)
+  const replaced = booted.runtime.getSnapshot().annotations
+  check('answer: the same passage is replaced, not stacked', replaced.length, 2)
+  check('answer: the newer note wins', replaced[1].note, '第二段')
+}
+
+{
+  // An answer note paints in its own registry, so the stylesheet can colour it
+  // differently from a plain note without touching the other marks.
+  const booted = await boot({ highlights: true })
+  booted.runtime.setQuick(true)
+  booted.sandbox.document.createRange = () => ({
+    setStart() {},
+    setEnd() {},
+    getBoundingClientRect: () => ({ left: 100, top: 300, right: 320, bottom: 320 }),
+  })
+  const first = passageStub('P', '第一段完整内容')
+  const flow = passageFlowStub('turn-11', [first])
+  booted.sandbox.document.querySelectorAll = (selector) =>
+    selector === '[data-chat-anchor-key]' ? [flow] : []
+  const range = {
+    commonAncestorContainer: first.block,
+    startContainer: first.textNode,
+    startOffset: 0,
+    endContainer: first.textNode,
+    endOffset: 3,
+    collapsed: false,
+    getBoundingClientRect: () => ({ left: 100, top: 300, right: 220, bottom: 320 }),
+    intersectsNode: (node) => node === first.textNode,
+  }
+  booted.sandbox.getSelection = () => ({
+    rangeCount: 1,
+    isCollapsed: false,
+    toString: () => '第一段',
+    anchorNode: first.textNode,
+    anchorOffset: 0,
+    focusNode: first.textNode,
+    focusOffset: 3,
+    getRangeAt: () => range,
+    removeAllRanges() {},
+  })
+  check('answer paint: captured', booted.runtime.captureSelection(), true)
+  check('answer paint: accepted', booted.runtime.markAsAnswer(), true)
+  const registry = booted.sandbox.CSS.highlights
+  check('answer paint: the marked words are purple', registry.get('dsh-nudge-answers')?.ranges.length, 1)
+  check('answer paint: the paragraph keeps its yellow remainder', registry.get('dsh-nudge-notes')?.ranges.length, 1)
+}
+
+{
+  // A selection crossing paragraphs marks every passage it touches, joined in
+  // document order, and the selection itself stays the note.
+  const booted = await boot({})
+  booted.sandbox.document.createRange = () => ({
+    setStart() {},
+    setEnd() {},
+    getBoundingClientRect: () => ({ left: 100, top: 300, right: 320, bottom: 360 }),
+  })
+  const first = passageStub('P', '第一段完整内容')
+  const second = passageStub('P', '第二段完整内容')
+  const flow = passageFlowStub('turn-10', [first, second])
+  booted.sandbox.document.querySelectorAll = (selector) =>
+    selector === '[data-chat-anchor-key]' ? [flow] : []
+  const selected = '第一段...第二段'
+  const range = {
+    commonAncestorContainer: flow,
+    startContainer: first.textNode,
+    startOffset: 0,
+    endContainer: second.textNode,
+    endOffset: 3,
+    collapsed: false,
+    getBoundingClientRect: () => ({ left: 100, top: 300, right: 320, bottom: 360 }),
+    intersectsNode: (node) => node === first.textNode || node === second.textNode,
+  }
+  booted.sandbox.getSelection = () => ({
+    rangeCount: 1,
+    isCollapsed: false,
+    toString: () => selected,
+    anchorNode: first.textNode,
+    anchorOffset: 0,
+    focusNode: second.textNode,
+    focusOffset: 3,
+    getRangeAt: () => range,
+    removeAllRanges() {},
+  })
+  check('answer: a cross-paragraph selection is captured', booted.runtime.captureSelection(), true)
+  check('answer: a cross-paragraph selection is accepted', booted.runtime.markAsAnswer(), true)
+  const note = booted.runtime.getSnapshot().annotations[0]
+  check(
+    'answer: every touched passage is highlighted in order',
+    note.quote,
+    '第一段完整内容\n\n第二段完整内容',
+  )
+  check('answer: the cross-paragraph note keeps the selection', note.note, selected)
 }
 
 {
@@ -1832,6 +2037,7 @@ function flowItemStub(key, text, children = []) {
   check('written note: added to the tray', booted.runtime.addAnnotation(), true)
   const registry = booted.sandbox.CSS.highlights
   check('written note: the passage is painted', registry.get('dsh-nudge-notes')?.ranges.length, 1)
+  check('written note: a plain note is not an answer', booted.runtime.getSnapshot().annotations[0].answer, undefined)
   let draft = ''
   booted.runtime.attachComposer({ readDraft: () => draft, setDraft: (value) => (draft = value) })
   check('written note: write accepted', booted.runtime.writeAnnotations(), true)
@@ -2093,9 +2299,9 @@ function countedFlowItem(key, text, counter) {
     null,
   )
   check(
-    'annotation: card carries its own close button',
-    Boolean(findByClass(popup, 'dsh-nudge-popup-close')),
-    true,
+    'annotation: the card carries no close button',
+    findByClass(popup, 'dsh-nudge-popup-close'),
+    null,
   )
   check(
     'annotation: card keeps the single quick-action row',
@@ -2104,20 +2310,47 @@ function countedFlowItem(key, text, counter) {
   )
   const quicks = findAllByClass(popup, 'dsh-nudge-popup-quick') ?? []
   check(
-    'annotation: the verdict buttons are icon-only',
-    quicks[0]?.children?.length === 1 && quicks[1]?.children?.length === 1,
-    true,
+    'annotation: the verdicts are words, not emoji',
+    quicks.map((item) => item?.children?.[0]).join('|'),
+    '同意这段|不同意这段',
   )
+  check('annotation: the card paints no emoji', findByClass(popup, 'emoji'), null)
   check(
-    'annotation: icon-only verdicts stay labelled',
+    'annotation: the verdicts name the passage they judge',
     quicks[0]?.props?.['aria-label'],
-    '同意',
+    '同意这段',
   )
   check(
-    'annotation: card offers save and copy',
-    Boolean(findByClass(popup, 'dsh-nudge-popup-save')) &&
-      Boolean(findByClass(popup, 'dsh-nudge-popup-copy')),
-    true,
+    'annotation: card offers the primary action',
+    findByClass(popup, 'dsh-nudge-popup-save')?.children?.[0],
+    '添加批注',
+  )
+  const field = findByClass(popup, 'dsh-nudge-popup-field')
+  const copyButton = findByClass(field, 'dsh-nudge-popup-copy')
+  check(
+    'annotation: copying sits with the field, not the actions',
+    copyButton?.props?.['aria-label'],
+    '复制选中的原文',
+  )
+  check('annotation: copying is one icon, not a label', copyButton?.children?.[0]?.type, 'svg')
+  const actions = findByClass(popup, 'dsh-nudge-popup-row')
+  check(
+    'annotation: the action row holds only outcomes',
+    findAllByClass(actions, 'dsh-nudge-popup-copy').length,
+    0,
+  )
+  const answerButton = findByClass(popup, 'dsh-nudge-popup-answer')
+  check('annotation: card offers the answer action', answerButton?.children?.[0], '定为答案')
+  check(
+    'annotation: the answer action explains itself',
+    answerButton?.props?.title,
+    '把它作为答案：高亮整段，选中的文字作为批注',
+  )
+  check('annotation: the card carries five actions', (findAllByTag(popup, 'button') ?? []).length, 5)
+  check(
+    'annotation: actions follow the usage order',
+    (findAllByTag(actions, 'button') ?? []).map((item) => item.children?.[0]).join('|'),
+    '定为答案|添加批注|同意这段|不同意这段',
   )
   check(
     'annotation: copy reports its own result',
@@ -2152,6 +2385,7 @@ function countedFlowItem(key, text, counter) {
   let tree = View()
   let popup = findByClass(tree, 'dsh-nudge-edit-popup')
   check('edit: the bubble opens over the passage', Boolean(popup), true)
+  check('edit: the bubble carries no close button', findByClass(popup, 'dsh-nudge-popup-close'), null)
   check('edit: the window leaves its tray folded', findByClass(tree, 'dsh-nudge-annotation-tray'), null)
   check('edit: the passage is quoted', findByClass(popup, 'dsh-nudge-edit-quote')?.children?.[0], '要改的那段原文')
   check('edit: the field holds the stored note', findByClass(popup, 'dsh-nudge-edit-input')?.props?.value, '原来的批注')
@@ -2228,18 +2462,111 @@ function countedFlowItem(key, text, counter) {
   near.runtime.captureSelection({ x: 150, y: 310 })
   const nearView = near.registrations.find((item) => item.entry.name === 'shell.overlay').Component
   popup = findByClass(nearView(), 'dsh-nudge-popup')
-  check('annotation: the selection pointer stays the anchor', popup?.props?.style?.left, '162px')
-  check('annotation: the card sits below the pointer', popup?.props?.style?.top, '322px')
-  // The release point sits left of the card's own gutter, so the origin is
-  // clamped to the card's left edge instead of going negative.
+  check('annotation: the release point anchors the answer button', popup?.props?.style?.left, '106px')
+  check('annotation: the card opens above the release point', popup?.props?.style?.top, '334px')
   check(
     'annotation: the card grows from the release point',
     popup?.props?.style?.transformOrigin,
-    '0px 0px',
+    '44px 100%',
   )
 }
 
 // --- turbo mode: no primary button, double-click runs a prompt ----------
+
+
+{
+  // Pinned prompts ride the composer's own left row: one click appends the
+  // prompt to the draft on a new line; the floating window is not involved.
+  const booted = await boot({})
+  const first = booted.runtime.getSnapshot().presets[0]
+  check('input bar: pinning accepted', booted.runtime.setPresetPinned(first.id, true), true)
+  check('input bar: pin state stored', booted.runtime.getSnapshot().presets[0].pinned, true)
+
+  const entry = booted.registrations.find((item) => item.entry.name === 'conversation.input.left')
+  check('input bar: the slot entry is registered', Boolean(entry), true)
+  const bar = entry.Component()
+  const chips = findAllByClass(bar, 'dsh-nudge-bar-chip')
+  check('input bar: the pinned prompt is a chip', chips[0]?.children?.[0], first.label)
+
+  const writes = []
+  booted.runtime.attachComposer({ readDraft: () => '已有内容', setDraft: (value) => writes.push(value) })
+  chips[0]?.props?.onClick?.()
+  check('input bar: one click appends on a new line', writes[0], '已有内容\n' + first.text)
+
+  check('input bar: the window place does not gate the bar', booted.runtime.setPresetEnabled(first.id, false), true)
+  check('input bar: a window-off prompt stays in the bar', Boolean(findByClass(entry.Component(), 'dsh-nudge-bar-chip')), true)
+  check('input bar: unpinning accepted', booted.runtime.setPresetPinned(first.id, false), true)
+  check('input bar: with both places off nothing renders', entry.Component(), null)
+  check('input bar: window place back on', booted.runtime.setPresetEnabled(first.id, true), true)
+
+  // Five pinned prompts: four chips plus the folded rest.
+  for (const label of ['临时甲', '临时乙']) {
+    const added = booted.runtime.addPreset(label, '内容' + label)
+    if (added.ok) booted.runtime.setPresetPinned(added.id, true)
+  }
+  for (const preset of booted.runtime.getSnapshot().presets.slice(0, 5)) {
+    booted.runtime.setPresetPinned(preset.id, true)
+  }
+  const pinned = booted.runtime.getSnapshot().presets.filter((item) => item.pinned === true)
+  const full = entry.Component()
+  check('input bar: four chips plus the more button', (findAllByClass(full, 'dsh-nudge-bar-chip') ?? []).length, 5)
+  check(
+    'input bar: the rest fold into a menu',
+    (findAllByClass(full, 'dsh-nudge-bar-menu-item') ?? []).length,
+    pinned.length - 4,
+  )
+}
+
+{
+  const booted = await boot({})
+  const settings = booted.registrations.find((item) => item.entry.name === 'settings.section').Component
+  const id = booted.runtime.getSnapshot().presets[0].id
+  booted.runtime.togglePresetOpen(id)
+  const tree = expandTree(settings())
+  const row = findByProp(tree, 'data-preset-id', id)
+  const place = (findAllByClass(row, 'dsh-nudge-preset-place') ?? []).find(
+    (item) => item.props?.['data-place'] === 'input',
+  )
+  check('settings: the row offers an input-place switch', Boolean(place), true)
+  place?.props?.onClick?.()
+  check('settings: the switch pins the preset', booted.runtime.getSnapshot().presets[0].pinned, true)
+  const sheet = String(findAllByTag(tree, 'style')?.[0]?.children?.[0] ?? '')
+  check('settings: narrow rows keep the places as glyphs', sheet.includes('@container (max-width:520px)'), true)
+}
+
+
+{
+  // One press appends; the second press of a double click sends the composed
+  // draft and clears it. The pair counts as one send, not an insert plus one.
+  const booted = await boot({})
+  booted.sessionsList.set({ ids: ['A'], byId: { A: { title: '会话 A', retainedBy: { mainView: 1 } } } })
+  await tick()
+  const preset = booted.runtime.getSnapshot().presets[0]
+  booted.runtime.setPresetPinned(preset.id, true)
+  let draft = '已有内容'
+  booted.runtime.attachComposer({
+    readDraft: () => draft,
+    setDraft: (value) => {
+      draft = value
+    },
+  })
+  const entry = booted.registrations.find((item) => item.entry.name === 'conversation.input.left')
+  const chip = findAllByClass(entry.Component(), 'dsh-nudge-bar-chip')[0]
+  chip?.props?.onClick?.({ detail: 1 })
+  check('bar: one press appends', draft, '已有内容\n' + preset.text)
+  chip?.props?.onClick?.({ detail: 2 })
+  check(
+    'bar: two presses send the whole draft',
+    booted.calls.prompt[0]?.request?.content?.[0]?.text,
+    '已有内容\n' + preset.text,
+  )
+  check('bar: the draft is cleared after sending', draft, '')
+  await sleep(320)
+  const stats = JSON.parse(booted.localStorage.getItem('dsh-nudge:stats') ?? '{}')
+  const today = Object.keys(stats.days ?? {}).sort().at(-1)
+  check('bar: the pair counts one send', stats.days?.[today]?.send, 1)
+  check('bar: the pair counts no insert', stats.days?.[today]?.insert, undefined)
+}
 
 {
   const booted = await boot({})

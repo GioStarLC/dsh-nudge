@@ -530,12 +530,6 @@ import { makeSettingsView } from './settings-view.js'
             copyFlashTimer.current = window.setTimeout(() => setCopyFlash(''), 1400)
           })
         }
-        const copyLabel =
-          copyFlash === 'done'
-            ? t('copiedShort')
-            : copyFlash === 'failed'
-              ? t('copyFailedShort')
-              : t('copyQuote')
         const popup =
           state.quick && draft !== null && state.annotationCardHidden !== true
             ? CaptureCard({
@@ -544,12 +538,12 @@ import { makeSettingsView } from './settings-view.js'
                 style: runtime.popupPosition(),
                 note: state.annotationNote,
                 inputRef: popupInputRef,
-                copied: copyFlash === 'done',
-                copyLabel,
+                copy: copyFlash,
                 onNote: (value) => runtime.setAnnotationNote(value),
                 onSubmit: () => runtime.addAnnotation(),
                 onDismiss: () => runtime.dismissAnnotationDraft(),
                 onCopy: copyQuote,
+                onAnswer: () => runtime.markAsAnswer(),
                 onAgree: () => runtime.quickReply('agree'),
                 onDisagree: () => runtime.quickReply('disagree'),
               })

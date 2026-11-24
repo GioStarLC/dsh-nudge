@@ -113,6 +113,7 @@ import { STAT_FIELDS, dayKey, recentDayKeys } from './stats.js'
         }
 
         const enabled = preset.enabled !== false
+        const placed = enabled || preset.pinned === true
 
         /**
          * Live reorder while the pointer travels: the dragged row trades slots
@@ -215,17 +216,37 @@ import { STAT_FIELDS, dayKey, recentDayKeys } from './stats.js'
               'button',
               {
                 type: 'button',
-                className: `dsh-nudge-preset-state${enabled ? ' on' : ''}`,
-                title: enabled ? t('presetEnabledHint') : t('presetDisabledHint'),
+                className: `dsh-nudge-preset-place${enabled ? ' on' : ''}`,
+                'data-place': 'window',
+                title: enabled ? t('placeWindowHint') : t('placeWindowOffHint'),
                 role: 'switch',
                 'aria-checked': enabled ? 'true' : 'false',
-                'aria-label': enabled ? t('presetEnabledHint') : t('presetDisabledHint'),
+                'aria-label': t('placeWindow'),
                 onClick: () => {
                   runtime.togglePresetEnabled(preset.id)
                   onError('')
                 },
               },
-              enabled ? t('presetEnabled') : t('presetDisabled'),
+              h('span', { className: 'dsh-nudge-place-long' }, t('placeWindow')),
+              h('span', { className: 'dsh-nudge-place-short', 'aria-hidden': 'true' }, t('placeWindowShort')),
+            ),
+            h(
+              'button',
+              {
+                type: 'button',
+                className: `dsh-nudge-preset-place${preset.pinned === true ? ' on' : ''}`,
+                'data-place': 'input',
+                title: t('placeInputHint'),
+                role: 'switch',
+                'aria-checked': preset.pinned === true ? 'true' : 'false',
+                'aria-label': t('placeInput'),
+                onClick: () => {
+                  runtime.setPresetPinned(preset.id, preset.pinned !== true)
+                  onError('')
+                },
+              },
+              h('span', { className: 'dsh-nudge-place-long' }, t('placeInput')),
+              h('span', { className: 'dsh-nudge-place-short', 'aria-hidden': 'true' }, t('placeInputShort')),
             ),
             h(
               'button',
@@ -263,7 +284,7 @@ import { STAT_FIELDS, dayKey, recentDayKeys } from './stats.js'
 
         const body =
           open && !editing
-            ? h('div', { className: 'dsh-nudge-preset-body' }, preset.text)
+            ? h('div', { className: 'dsh-nudge-preset-body' }, h('div', { className: 'dsh-nudge-preset-text' }, preset.text))
             : null
 
         const editor = editing
@@ -311,7 +332,7 @@ import { STAT_FIELDS, dayKey, recentDayKeys } from './stats.js'
         return h(
           'div',
           {
-            className: `dsh-nudge-preset-row${editing ? ' editing' : ''}${enabled ? '' : ' disabled'}`,
+            className: `dsh-nudge-preset-row${editing ? ' editing' : ''}${placed ? '' : ' disabled'}`,
             'data-preset-id': preset.id,
             'data-open': open ? 'true' : 'false',
             onDragOver: dragOverRow,

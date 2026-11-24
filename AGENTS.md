@@ -6,12 +6,13 @@ dsh-nudge 是一个 DSH Web 插件：在悬浮窗里选一条快捷输入，让 
 
 ```
 index.js                        宿主半部：设置持久化 + loopback 路由（inject: webServer）
-src/client/index.js             浏览器半部入口：扩展点清单、apply、三个 slot 的注册
+src/client/index.js             浏览器半部入口：扩展点清单、apply、四个 slot 的注册
 src/client/runtime.js           窗口状态机：投递、等待、批注、设置、统计
 src/client/view.js              悬浮窗渲染树；settings-view.js 是设置页渲染树
 src/client/composer.js          输入区桥；其余模块按职责拆分（设置、存储、词表、几何、CSS…）
 src/client/delivery.js          投递与等待：probe 进对话、事件窗口关联、超时与回执
 src/client/view-parts.js        视图叶子组件：批注卡片、就地编辑、批注栏、快捷输入表单
+src/client/input-bar.js         输入框左下角那一行：钉住的快捷输入、更多菜单
 src/client/stats-board.js       设置页看板：今日拆分、15 天趋势、快捷输入 Top 3
 src/types/client.d.ts           ctx / 服务 / 运行时状态的形状（全局声明，JSDoc 引用）
 src/types/react.d.ts            本插件用到的 React 面：createElement 与六个 hook
@@ -67,6 +68,10 @@ uv run --with "graphifyy[mcp]==0.9.57" graphify update "$PWD"
 ```
 
 `check` 的顺序是有意的：先 `build --verify`（`src/` 改了却没重新构建，这一步直接失败），再 `tsc --checkJs`（形状不对），再 `check-units`（纯逻辑），最后才是 client、host、graph 的行为校验。`test` 脚本不存在，也不要新增。
+
+## 收尾推送
+
+用户说「收尾推送」（或「总结未推送的内容并写到 changelog，推送到 git，不需要打 tag」）时，读并执行 [.dsh/skills/closeout-push/SKILL.md](.dsh/skills/closeout-push/SKILL.md)：盘点 → 摘要确认 → 一次提交 → 生成 CHANGELOG → 校验 → 推 `origin main`。不建 tag，不动版本号。
 
 ## graphify
 

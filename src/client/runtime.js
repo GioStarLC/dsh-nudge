@@ -5,11 +5,11 @@
  *
  * Built into `client.js` by `scripts/build.mjs`; edit this file, not the bundle.
  */
-import { ANCHOR_SELECTOR, CAPTURE_HIGHLIGHT, CONTEXT_CHARS, DEFAULT_DELIVERY, DEFAULT_PRESET, DIAG_SAMPLES, FLASH_HOLD_MS, HIGHLIGHT_NAME, MAX_STAT_PRESET_ID, MAX_TIPS, MISS_RESCAN_MS, PILL_SIZE, SELF_SELECTOR, UI_KEY } from './constants.js'
+import { ANCHOR_SELECTOR, ANSWER_HIGHLIGHT, CAPTURE_HIGHLIGHT, CONTEXT_CHARS, DEFAULT_DELIVERY, DEFAULT_PRESET, DIAG_SAMPLES, FLASH_HOLD_MS, HIGHLIGHT_NAME, MAX_STAT_PRESET_ID, MAX_TIPS, MISS_RESCAN_MS, PILL_SIZE, SELF_SELECTOR, UI_KEY } from './constants.js'
 import { readLang, resolveTarget, statusOf } from './context.js'
 import { CSS } from './css.js'
 import { createDelivery } from './delivery.js'
-import { anchorFromQuote, anchorFromRange, locateAnchor, packedMapOf, packedText, rangeFromPacked, sameRanges } from './dom.js'
+import { anchorFromQuote, anchorFromRange, locateAnchor, packedMapOf, packedText, passagesOfRange, rangeFromPacked, sameRanges } from './dom.js'
 import { chipSlotAt, clampPoint, dockPosition, isPoint, rectValue, snapToEdge, viewport } from './geometry.js'
 import { EN, ZH } from './locale.js'
 import { notesOfSession, saveNotesOfSession } from './notes.js'
@@ -192,6 +192,12 @@ import { builtinTips, normalizeTipList, tidyTip } from './tips.js'
        * for the current draft; the plugin never touches the editor DOM.
        */
       let composer
+      /**
+       * A bar press counts its insert only when no second press follows: the
+       * pair is one send, not an insert plus a send.
+       */
+      let barInsertTimer
+      let barInsertId = ''
 
       /** The focused composer editor element, when the caret is inside it. */
       function composerNode() {
@@ -254,13 +260,13 @@ import { builtinTips, normalizeTipList, tidyTip } from './tips.js'
        * The caret ends up past the written text; existing content is kept and
        * separated by one newline (a blank draft gets no leading newline).
        */
-      function insertPreset() {
+      function insertPreset(id, count = true) {
         const handle = composer
         if (handle === undefined || typeof handle.setDraft !== 'function') {
           setState({ note: text('insertUnavailable'), error: '' })
           return false
         }
-        const preset = activePreset()
+        const preset = id === undefined ? activePreset() : presetOf(state.presets, id)
         if (!preset) return false
         let draft = ''
         try {
@@ -281,7 +287,70 @@ import { builtinTips, normalizeTipList, tidyTip } from './tips.js'
           return false
         }
         setState({ note: '', error: '' })
-        countStat('insert', preset.id)
+        if (count === true) countStat('insert', preset.id)
+        return true
+      }
+
+      /**
+       * A single press on a pinned prompt: append it now, and count the insert
+       * only if the press is not followed by the second half of a double click.
+       */
+      function appendPrompt(id) {
+        if (barInsertTimer !== undefined) {
+          clearTimeout(barInsertTimer)
+          barInsertTimer = undefined
+          if (barInsertId !== '') countStat('insert', barInsertId)
+          barInsertId = ''
+        }
+        if (!insertPreset(id, false)) return false
+        barInsertId = id
+        barInsertTimer = setTimeout(() => {
+          barInsertTimer = undefined
+          const pending = barInsertId
+          barInsertId = ''
+          if (pending !== '') countStat('insert', pending)
+        }, 260)
+        return true
+      }
+
+      /**
+       * A double press on a pinned prompt: send the draft the first press
+       * composed. That press's insert count is dropped, so the pair counts as
+       * one send; a failed send keeps the draft as it was.
+       */
+      function sendDraft(id) {
+        const handle = composer
+        if (handle === undefined || typeof handle.setDraft !== 'function') {
+          setState({ note: text('insertUnavailable'), error: '' })
+          return false
+        }
+        if (barInsertTimer !== undefined) {
+          clearTimeout(barInsertTimer)
+          barInsertTimer = undefined
+          barInsertId = ''
+        }
+        const preset = presetOf(state.presets, id)
+        let draft = ''
+        try {
+          draft = handle.readDraft?.() ?? ''
+        } catch {
+          draft = ''
+        }
+        if (typeof draft !== 'string') draft = ''
+        const body = preset?.text ?? ''
+        // The first press writes through the shell's input store; if that write
+        // has not reached the reader yet, compose it here so the send is whole.
+        if (body !== '' && !draft.replace(/\s+$/, '').endsWith(body.trim())) {
+          draft = draft.trim() === '' ? body : `${draft}${draft.endsWith('\n') ? '' : '\n'}${body}`
+        }
+        if (draft.trim() === '') return false
+        if (!deliver(draft)) return false
+        try {
+          handle.setDraft('')
+        } catch {
+          /* the text stays if the shell refuses the clear */
+        }
+        countStat('send', id)
         return true
       }
 
@@ -772,6 +841,59 @@ import { builtinTips, normalizeTipList, tidyTip } from './tips.js'
       }
 
       /**
+       * Commit the captured passage as an answer.
+       *
+       * The highlight covers the whole paragraph(s) the selection sits in, and
+       * the selected words become the note itself — the note says "this is the
+       * answer" without the user retyping it.
+       */
+      function markAsAnswer() {
+        const draft = state.annotationDraft
+        if (!draft || typeof draft.quote !== 'string' || draft.quote.trim() === '') return false
+        let quote = draft.quote
+        if (draft.range != null) {
+          try {
+            quote = passagesOfRange(draft.range) || draft.quote
+          } catch {
+            quote = draft.quote
+          }
+        }
+        let anchor = null
+        if (draft.range != null) {
+          try {
+            anchor = anchorFromRange(draft.range, quote)
+          } catch {
+            anchor = null
+          }
+        }
+        if (anchor === null) anchor = anchorFromQuote(quote)
+        if (anchor === null) recordAnchorMiss(quote)
+        // Where the marked words sit inside the highlighted paragraph, in the
+        // same whitespace-free projection the anchor uses. The purple span is
+        // measured from it, so the mark survives a note edit.
+        const packed = packedText(quote)
+        const packedAnswer = packedText(draft.quote)
+        const at = packedAnswer === '' ? -1 : packed.indexOf(packedAnswer)
+        const annotation = {
+          id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+          quote,
+          note: draft.quote,
+          anchor,
+          answer: at === -1 ? true : { start: at, length: packedAnswer.length },
+        }
+        // One answer per passage: marking the same block again replaces the
+        // earlier note instead of stacking an identical highlight.
+        const next = [
+          ...state.annotations.filter((item) => packedText(item.quote) !== packed),
+          annotation,
+        ]
+        clearNativeSelection(draft.quote)
+        commitAnnotations(next, { note: '', error: '' })
+        countStat('annotation')
+        return true
+      }
+
+      /**
        * Add the captured passage with the 同意 / 不同意 answer. A remark typed
        * in the card is kept: the verdict comes first, then the remark.
        */
@@ -909,14 +1031,13 @@ import { builtinTips, normalizeTipList, tidyTip } from './tips.js'
        * ambiguous one falls through to the recovery pass, which can prove the
        * row is the only carrier.
        */
-      function rangeWithinElement(entry, key, full) {
+      function spanWithinElement(entry, key, full) {
         const packed = packedText(entry.anchor.quote)
         if (packed === '') return null
         const at = full.packed.indexOf(packed)
         if (at === -1) return null
         if (full.packed.indexOf(packed, at + 1) !== -1) return null
-        const range = rangeFromPacked(full, at, at + packed.length)
-        if (range === null) return null
+        if (rangeFromPacked(full, at, at + packed.length) === null) return null
         if (entry.note !== null && typeof entry.note?.id === 'string') {
           resolvedAnchors.set(entry.note.id, {
             key,
@@ -926,7 +1047,7 @@ import { builtinTips, normalizeTipList, tidyTip } from './tips.js'
             index: at,
           })
         }
-        return range
+        return { start: at, end: at + packed.length }
       }
 
       /** Recompute which spans carry a note and repaint the CSS highlight. */
@@ -941,6 +1062,7 @@ import { builtinTips, normalizeTipList, tidyTip } from './tips.js'
           const sources = state.annotations
           if (state.quick !== true || (sources.length === 0 && captureDraft === null)) {
             registry.delete(HIGHLIGHT_NAME)
+            registry.delete(ANSWER_HIGHLIGHT)
             registry.delete(CAPTURE_HIGHLIGHT)
             return
           }
@@ -971,6 +1093,7 @@ import { builtinTips, normalizeTipList, tidyTip } from './tips.js'
           }
           if (byKey.size === 0) {
             registry.delete(HIGHLIGHT_NAME)
+            registry.delete(ANSWER_HIGHLIGHT)
             let painted = false
             const fallback = captureDraft?.range
             try {
@@ -987,8 +1110,53 @@ import { builtinTips, normalizeTipList, tidyTip } from './tips.js'
           const elements = document.querySelectorAll?.(ANCHOR_SELECTOR) ?? []
           const maps = new Map()
           const ranges = []
+          const answerRanges = []
           const captureRanges = []
           const misses = []
+          /**
+           * Put one note's passage into the paint lists.
+           *
+           * An answer note splits its paragraph around the words that were
+           * marked: the paragraph stays yellow before and after them, and only
+           * that span is purple. Splitting instead of stacking two highlights
+           * keeps the result independent of registry paint order.
+           */
+          function paintNote(entry, full, start, end) {
+            const painted = []
+            const answer = entry.note?.answer
+            const from = typeof answer?.start === 'number' ? answer.start : -1
+            const length = typeof answer?.length === 'number' ? answer.length : 0
+            if (from < 0 || length <= 0) {
+              const range = rangeFromPacked(full, start, end)
+              if (range !== null) {
+                ranges.push(range)
+                painted.push(range)
+              }
+              return painted
+            }
+            const answerStart = Math.max(start, Math.min(start + from, end))
+            const answerEnd = Math.max(answerStart, Math.min(answerStart + length, end))
+            if (answerStart > start) {
+              const range = rangeFromPacked(full, start, answerStart)
+              if (range !== null) {
+                ranges.push(range)
+                painted.push(range)
+              }
+            }
+            if (answerEnd < end) {
+              const range = rangeFromPacked(full, answerEnd, end)
+              if (range !== null) {
+                ranges.push(range)
+                painted.push(range)
+              }
+            }
+            const purple = rangeFromPacked(full, answerStart, answerEnd)
+            if (purple !== null) {
+              answerRanges.push(purple)
+              painted.push(purple)
+            }
+            return painted
+          }
           for (const element of elements) {
             const key = element.getAttribute?.('data-chat-anchor-key')
             const wanted = byKey.get(key)
@@ -999,21 +1167,25 @@ import { builtinTips, normalizeTipList, tidyTip } from './tips.js'
               maps.set(key, full)
             }
             for (const entry of wanted) {
-              const span = locateAnchor(full, entry.anchor)
-              let range = span === null ? null : rangeFromPacked(full, span.start, span.end)
               // The row is here but the stored offsets drifted: the passage is
               // still inside it, so heal it without searching the transcript.
-              if (range === null) range = rangeWithinElement(entry, key, full)
-              if (range === null) {
+              const span = locateAnchor(full, entry.anchor) ?? spanWithinElement(entry, key, full)
+              if (span === null) {
                 misses.push({ entry, quote: entry.anchor.quote })
                 continue
               }
               if (entry.capture === true) {
+                const range = rangeFromPacked(full, span.start, span.end)
+                if (range === null) {
+                  misses.push({ entry, quote: entry.anchor.quote })
+                  continue
+                }
                 captureRanges.push(range)
                 continue
               }
-              ranges.push(range)
-              highlighted.push({ note: entry.note, range })
+              for (const range of paintNote(entry, full, span.start, span.end)) {
+                highlighted.push({ note: entry.note, range })
+              }
             }
           }
           // A key that names no element is the other half of the same problem:
@@ -1047,14 +1219,15 @@ import { builtinTips, normalizeTipList, tidyTip } from './tips.js'
             // the mark wait for the render that brings its passage back.
             if (holders.length !== 1) continue
             const index = holders[0].full.packed.indexOf(packed)
-            const range = rangeFromPacked(holders[0].full, index, index + packed.length)
-            if (range === null) continue
+            if (index === -1) continue
             if (miss.entry.capture === true) {
-              captureRanges.push(range)
+              const range = rangeFromPacked(holders[0].full, index, index + packed.length)
+              if (range !== null) captureRanges.push(range)
               continue
             }
-            ranges.push(range)
-            highlighted.push({ note: miss.entry.note, range })
+            for (const range of paintNote(miss.entry, holders[0].full, index, index + packed.length)) {
+              highlighted.push({ note: miss.entry.note, range })
+            }
             // Heal the anchor so the next repaint takes the direct path.
             if (miss.entry.note !== null && typeof miss.entry.note?.id === 'string') {
               resolvedAnchors.set(miss.entry.note.id, {
@@ -1071,6 +1244,12 @@ import { builtinTips, normalizeTipList, tidyTip } from './tips.js'
           if (ranges.length === 0) registry.delete(HIGHLIGHT_NAME)
           else if (!sameRanges(registry.get(HIGHLIGHT_NAME), ranges)) {
             registry.set(HIGHLIGHT_NAME, new window.Highlight(...ranges))
+          }
+          // Answer passages keep their own registry, so the stylesheet can give
+          // them a different colour without touching a plain note's mark.
+          if (answerRanges.length === 0) registry.delete(ANSWER_HIGHLIGHT)
+          else if (!sameRanges(registry.get(ANSWER_HIGHLIGHT), answerRanges)) {
+            registry.set(ANSWER_HIGHLIGHT, new window.Highlight(...answerRanges))
           }
           if (captureAnchor === null && captureDraft !== null && captureDraft.range) {
             try {
@@ -1235,46 +1414,40 @@ import { builtinTips, normalizeTipList, tidyTip } from './tips.js'
       }
 
       /**
-       * Viewport box for the selection card: pinned to the pointer that finished
-       * the selection, opened below-right of it when there is room and flipped to
-       * the other side when the viewport edge is near. Without a pointer — or
-       * when the pointer belongs to a click elsewhere — it falls back to the
+       * Viewport box for the selection card.
+       *
+       * A mouse selection ends on the release point, so the card opens above it
+       * with its first button — 定为答案 — centred on that point: the next click
+       * lands without moving the mouse. When the card does not fit above the
+       * point, or the pointer belongs to a click elsewhere, it falls back to the
        * quote box, centred above/below it.
        */
       function popupPosition() {
         const draft = state.annotationDraft
         const width = 340
         const margin = 8
-        const gap = 10
-        const offset = 12
         const approxHeight = 280
+        // Border + padding + half the first button: the button's centre sits
+        // this far inside the card. The card is pinned by its bottom edge, so
+        // the same measure vertically needs no card height.
+        const answerInsetX = 44
+        const answerInsetY = 24
         const vw = viewport().width
-        const vh = viewport().height
         const boxWidth = Math.min(width, vw - margin * 2)
         const rect = draft?.rect ?? null
         const pointer = pointerNearRect(draft?.pointer, rect) ? draft.pointer : null
         const clampX = (value) => Math.max(margin, Math.min(value, vw - boxWidth - margin))
         if (pointer) {
           const { x, y } = pointer
-          const flipLeft = x + offset + boxWidth > vw - margin
-          const leftValue = flipLeft ? clampX(x - offset - boxWidth) : clampX(x + offset)
-          // The card grows out of the point that opened it. Horizontally only:
-          // an upward card is pinned by its bottom edge, so y is always the
-          // anchor line and a vertical origin would move the card on frame one.
-          const origin = {
-            transformOrigin: `${Math.round(Math.max(0, Math.min(x - leftValue, boxWidth)))}px 0px`,
-          }
-          const top = y + offset
-          if (top + approxHeight <= vh - margin) {
-            return { left: `${Math.round(leftValue)}px`, top: `${Math.round(top)}px`, ...origin, transform: 'none' }
-          }
-          // Not enough room below: open above the cursor instead.
-          const aboveTop = Math.max(margin, y - offset)
-          return {
-            left: `${Math.round(leftValue)}px`,
-            top: `${Math.round(aboveTop)}px`,
-            ...origin,
-            transform: 'translateY(-100%)',
+          const leftValue = clampX(x - answerInsetX)
+          const top = y + answerInsetY
+          if (top - approxHeight >= margin) {
+            return {
+              left: `${Math.round(leftValue)}px`,
+              top: `${Math.round(top)}px`,
+              transformOrigin: `${Math.round(Math.max(0, Math.min(x - leftValue, boxWidth)))}px 100%`,
+              transform: 'translateY(-100%)',
+            }
           }
         }
         return placeOverRect(rect, approxHeight)
@@ -1868,7 +2041,9 @@ import { builtinTips, normalizeTipList, tidyTip } from './tips.js'
             : current.label
         commitPresets(
           state.presets.map((preset) =>
-            preset.id === id ? { id, label, text: value, enabled: preset.enabled !== false } : preset,
+            preset.id === id
+              ? { ...preset, id, label, text: value, enabled: preset.enabled !== false }
+              : preset,
           ),
           state.presetId,
         )
@@ -1899,6 +2074,22 @@ import { builtinTips, normalizeTipList, tidyTip } from './tips.js'
         if ((current.enabled !== false) === enabled) return false
         commitPresets(
           state.presets.map((preset) => (preset.id === id ? { ...preset, enabled } : preset)),
+          state.presetId,
+        )
+        return true
+      }
+
+      /**
+       * Pin or unpin one preset on the composer's own left row. Disabled
+       * presets can stay pinned in the record but never render there.
+       */
+      function setPresetPinned(id, value) {
+        const current = presetOf(state.presets, id)
+        if (current === undefined) return false
+        const pinned = value === true
+        if ((current.pinned === true) === pinned) return false
+        commitPresets(
+          state.presets.map((preset) => (preset.id === id ? { ...preset, pinned } : preset)),
           state.presetId,
         )
         return true
@@ -2805,6 +2996,11 @@ import { builtinTips, normalizeTipList, tidyTip } from './tips.js'
         } catch {
           /* no document */
         }
+        if (barInsertTimer !== undefined) {
+          clearTimeout(barInsertTimer)
+          barInsertTimer = undefined
+          barInsertId = ''
+        }
         if (selectionTimer !== undefined) clearTimeout(selectionTimer)
         if (attentionTimer !== undefined) clearTimeout(attentionTimer)
         if (repaintTimer !== undefined) clearTimeout(repaintTimer)
@@ -2815,6 +3011,7 @@ import { builtinTips, normalizeTipList, tidyTip } from './tips.js'
         }
         try {
           window.CSS?.highlights?.delete(HIGHLIGHT_NAME)
+          window.CSS?.highlights?.delete(ANSWER_HIGHLIGHT)
           window.CSS?.highlights?.delete(CAPTURE_HIGHLIGHT)
         } catch {
           /* no highlight registry */
@@ -2831,6 +3028,12 @@ import { builtinTips, normalizeTipList, tidyTip } from './tips.js'
         ask,
         /** Turbo double-click: append when a draft exists, else send. */
         runPreset,
+        /** Append one prompt to the composer draft, on its own line. */
+        insertPreset,
+        /** One press on a bar chip: append, counting the insert unless a second press follows. */
+        appendPrompt,
+        /** Two presses on a bar chip: send the composed draft, clear it on success. */
+        sendDraft,
         setDelivery,
         effectiveDelivery,
         setTurbo,
@@ -2850,6 +3053,8 @@ import { builtinTips, normalizeTipList, tidyTip } from './tips.js'
         /** Enable / disable one prompt without deleting it. */
         setPresetEnabled,
         togglePresetEnabled,
+        /** Pin / unpin one prompt on the composer's own row. */
+        setPresetPinned,
         /** In-window "new prompt" form (title + body). */
         startNudgeDraft,
         cancelNudgeDraft,
@@ -2904,6 +3109,7 @@ import { builtinTips, normalizeTipList, tidyTip } from './tips.js'
         showTip,
         hideTip,
         addAnnotation,
+        markAsAnswer,
         quickReply,
         copyDraftQuote,
         startEditAnnotation,

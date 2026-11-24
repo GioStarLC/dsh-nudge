@@ -12,6 +12,7 @@
  *  - `ctx.sessions.list`        — which session the main view retains (the click target).
  *  - `ctx.uiSession.sessionStatus` — running / pending-interaction facts for the wait state.
  *  - `ctx.remote.session.prompt` — the composer's own delivery path (mode: queue = followup, steer).
+ *  - `conversation.input.left`   — the composer's left row: the pinned prompts ride it.
  *
  * Nothing is written to the page outside this component's own root, and the
  * bundle keeps no DOM of its own: unmounting the slot removes the window.
@@ -19,7 +20,8 @@
  * Built into `client.js` by `scripts/build.mjs`; edit this file, not the bundle.
  */
 import { makeComposerBridge } from './composer.js'
-import { COMPOSER_SLOT, ENTRY, SETTINGS_SLOT, SLOT } from './constants.js'
+import { COMPOSER_SLOT, ENTRY, INPUT_BAR_SLOT, SETTINGS_SLOT, SLOT } from './constants.js'
+import { makeInputBar } from './input-bar.js'
 import { EN, ZH } from './locale.js'
 import { createRuntime } from './runtime.js'
 import { makeSettingsView } from './settings-view.js'
@@ -83,6 +85,17 @@ import { makeView } from './view.js'
             ctx.slots.register({ name: COMPOSER_SLOT, id: ENTRY, order: 70 }, ComposerBridge),
           ),
         'dsh-nudge: composer bridge',
+      )
+
+      // The pinned prompts ride the input bar's own left row, next to the
+      // attach mark and the permission chip (dsh-vim uses the same seat).
+      const InputBar = makeInputBar(runtime)
+      ctx.effect(
+        () =>
+          ctx.slots.inject(INPUT_BAR_SLOT, () =>
+            ctx.slots.register({ name: INPUT_BAR_SLOT, id: ENTRY, order: 60 }, InputBar),
+          ),
+        'dsh-nudge: input bar',
       )
 
       // Debug/test handle: scripts/check-client.mjs drives this without a renderer.

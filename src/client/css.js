@@ -22,7 +22,7 @@ import { clamp } from './geometry.js'
     }
 
     const CSS = `
-.dsh-nudge-card,.dsh-nudge-pill,.dsh-nudge-settings,.dsh-nudge-popup{--dn-accent:color-mix(in srgb,var(--dsw-static-deepseek-450,#5686fe) 78%,var(--dsw-alias-label-primary,#1a1a1a) 22%);--dn-accent-soft:color-mix(in srgb,var(--dsw-static-deepseek-450,#5686fe) 14%,transparent);--dn-accent-line:color-mix(in srgb,var(--dsw-static-deepseek-450,#5686fe) 38%,transparent);--dn-accent-edge:color-mix(in srgb,var(--dsw-static-deepseek-450,#5686fe) 62%,transparent);--dn-line:var(--dsw-alias-border-l1,rgba(127,127,127,.25));--dn-line-strong:color-mix(in srgb,var(--dsw-alias-label-primary,#1a1a1a) 28%,transparent);--dn-hover:color-mix(in srgb,var(--dsw-alias-label-primary,#1a1a1a) 6%,transparent);--dn-agree:#2e7d32;--dn-note:#8b5cf6;--dn-frame:1px}
+.dsh-nudge-card,.dsh-nudge-pill,.dsh-nudge-settings,.dsh-nudge-popup{--dn-accent:color-mix(in srgb,var(--dsw-static-deepseek-450,#5686fe) 78%,var(--dsw-alias-label-primary,#1a1a1a) 22%);--dn-accent-soft:color-mix(in srgb,var(--dsw-static-deepseek-450,#5686fe) 14%,transparent);--dn-accent-line:color-mix(in srgb,var(--dsw-static-deepseek-450,#5686fe) 38%,transparent);--dn-accent-edge:color-mix(in srgb,var(--dsw-static-deepseek-450,#5686fe) 62%,transparent);--dn-line:var(--dsw-alias-border-l1,rgba(127,127,127,.25));--dn-line-strong:color-mix(in srgb,var(--dsw-alias-label-primary,#1a1a1a) 28%,transparent);--dn-hover:color-mix(in srgb,var(--dsw-alias-label-primary,#1a1a1a) 6%,transparent);--dn-note:#8b5cf6;--dn-frame:1px}
 .dsh-nudge-card{position:fixed;z-index:${Z_INDEX};width:min(304px,calc(100vw - 24px));display:flex;flex-direction:column;border-radius:16px;border:var(--dn-frame) solid var(--dn-accent-edge);background:var(--dsw-alias-bg-layer-1,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);box-shadow:0 1px 2px rgba(15,23,42,.04),0 18px 44px -22px rgba(15,23,42,.3);font:13px/1.55 ui-sans-serif,system-ui,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;overflow:hidden;pointer-events:auto;animation:dsh-nudge-in .18s ease-out}
 @keyframes dsh-nudge-in{from{opacity:0;transform:translateY(-5px) scale(.985)}to{opacity:1;transform:none}}
 .dsh-nudge-title{display:flex;align-items:center;gap:8px;padding:12px 12px 10px 14px;cursor:grab;user-select:none;touch-action:none;border-bottom:1px solid var(--dn-line)}
@@ -97,7 +97,9 @@ import { clamp } from './geometry.js'
 .dsh-nudge-ask:focus-visible{outline:2px solid var(--dn-accent-line);outline-offset:2px}
 .dsh-nudge-annotation-quote{font-size:11.5px;line-height:1.5;color:var(--dsw-alias-label-secondary,#5a5a66);white-space:pre-wrap;word-break:break-word;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
 .dsh-nudge-annotation-hint{font-size:11px;line-height:1.5;color:var(--dsw-alias-label-secondary,#5a5a66)}
-.dsh-nudge-popup{position:fixed;z-index:${Z_INDEX + 1};box-sizing:border-box;width:280px;max-width:calc(100vw - 16px);display:flex;flex-direction:column;gap:8px;padding:10px;border-radius:12px;border:1px solid var(--dn-line);background:var(--dsw-alias-bg-layer-1,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);box-shadow:0 10px 30px rgba(0,0,0,.16),0 2px 8px rgba(0,0,0,.08);font:13px/1.45 ui-sans-serif,system-ui,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;pointer-events:auto;opacity:.72;transition:opacity .22s ease;animation:dsh-nudge-popup-in .12s cubic-bezier(.16,1,.3,1)}
+/* 340 is also the width popupPosition()/placeOverRect() lay the card out with:
+   change one and the card drifts off its anchor and past the viewport edge. */
+.dsh-nudge-popup{position:fixed;z-index:${Z_INDEX + 1};box-sizing:border-box;width:340px;max-width:calc(100vw - 16px);display:flex;flex-direction:column;gap:8px;padding:10px;border-radius:12px;border:1px solid var(--dn-line);background:var(--dsw-alias-bg-layer-1,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);box-shadow:0 10px 30px rgba(0,0,0,.16),0 2px 8px rgba(0,0,0,.08);font:13px/1.45 ui-sans-serif,system-ui,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;pointer-events:auto;opacity:.72;transition:opacity .22s ease;animation:dsh-nudge-popup-in .12s cubic-bezier(.16,1,.3,1)}
 .dsh-nudge-popup:hover,.dsh-nudge-popup:focus-within{opacity:1}
 /* The end state stays open on purpose: the card takes the focus in the frame
    it mounts, so :focus-within makes its resting opacity 1 — a fixed
@@ -106,8 +108,6 @@ import { clamp } from './geometry.js'
    an upward-opening card. */
 @keyframes dsh-nudge-popup-in{from{opacity:0;scale:.97}}
 @media (prefers-reduced-motion:reduce){.dsh-nudge-popup{animation:none;transition:none}}
-.dsh-nudge-popup-close{position:absolute;top:6px;right:6px;width:22px;height:22px;padding:0;border:0;border-radius:6px;background:transparent;color:var(--dsw-alias-label-secondary,#5a5a66);font:inherit;font-size:16px;line-height:20px;cursor:pointer}
-.dsh-nudge-popup-close:hover{background:var(--dn-hover);color:var(--dsw-alias-label-primary,#1a1a1a)}
 .dsh-nudge-settings-panel{display:flex;flex-direction:column;gap:10px;padding:12px;flex:1 1 auto;min-height:0;max-height:min(520px,72vh);overflow:auto}
 .dsh-nudge-settings-head{display:flex;align-items:center;gap:8px}
 .dsh-nudge-settings-name{font:inherit;font-size:12px;font-weight:600;color:var(--dsw-alias-label-primary,#1a1a1a)}
@@ -117,15 +117,19 @@ import { clamp } from './geometry.js'
 .dsh-nudge-popup-row button:focus-visible{outline:2px solid var(--dn-accent-line);outline-offset:2px}
 .dsh-nudge-popup-mic{display:inline-flex;align-items:center;gap:5px;height:26px;padding:0 9px;border:1px solid var(--dn-line);border-radius:999px;background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-secondary,#5a5a66);font:inherit;font-size:11px;line-height:1;cursor:pointer}
 .dsh-nudge-popup-mic-hint{font-size:11px;line-height:1.4;color:var(--dsw-alias-label-secondary,#5a5a66)}
-.dsh-nudge-popup-quick{display:inline-flex;align-items:center;justify-content:center;gap:5px;min-width:0;padding:0 6px}
-.dsh-nudge-popup-quick .emoji{font-size:15px;line-height:1}
-.dsh-nudge-popup-quick:hover{background:var(--dn-hover)}
-.dsh-nudge-popup-quick.agree{border-color:var(--dn-agree);background:var(--dn-agree);color:#fff;font-weight:600}
-.dsh-nudge-popup-quick.agree:hover{filter:brightness(.94)}
-.dsh-nudge-popup-row .dsh-nudge-popup-save{border-color:var(--dn-accent-line);background:var(--dn-accent-soft);color:var(--dn-accent);font-weight:600}
-.dsh-nudge-popup-row .dsh-nudge-popup-save:hover{background:color-mix(in srgb,var(--dn-accent) 20%,transparent)}
-.dsh-nudge-popup-row .dsh-nudge-popup-copy{color:var(--dn-accent)}
-.dsh-nudge-popup-copy[data-copied="true"]{border-color:var(--dn-accent-line);background:var(--dn-accent-soft)}
+/* One action style for the whole card: same height, radius and type, and only
+   one primary. The actions size themselves by their words, so the longer
+   verdict labels stay readable; copying is a utility and sits with the field. */
+.dsh-nudge-popup-field{display:flex;align-items:flex-start;gap:6px}
+.dsh-nudge-popup-field .dsh-nudge-annotation-input{flex:1 1 auto;min-width:0}
+.dsh-nudge-popup-copy{flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;width:34px;height:34px;padding:0;border:1px solid var(--dn-line);border-radius:8px;background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-secondary,#5a5a66);cursor:pointer;transition:color .12s ease,background-color .12s ease,border-color .12s ease}
+.dsh-nudge-popup-copy:hover{color:var(--dn-accent);background:var(--dn-hover)}
+.dsh-nudge-popup-copy:focus-visible{outline:2px solid var(--dn-accent-line);outline-offset:2px}
+.dsh-nudge-popup-copy[data-copied="done"]{color:var(--dn-accent);border-color:var(--dn-accent-line);background:var(--dn-accent-soft)}
+.dsh-nudge-popup-copy[data-copied="failed"]{color:var(--dsw-alias-state-error-primary,#c8433c);border-color:color-mix(in srgb,var(--dsw-alias-state-error-primary,#c8433c) 45%,transparent)}
+.dsh-nudge-popup-row .dsh-nudge-popup-quick:hover{background:var(--dn-hover)}
+.dsh-nudge-popup-row .dsh-nudge-popup-answer{border-color:var(--dsw-static-deepseek-450,#5686fe);background:var(--dsw-static-deepseek-450,#5686fe);color:var(--dsw-alias-label-primary-inverted,#fff);font-weight:600}
+.dsh-nudge-popup-row .dsh-nudge-popup-answer:hover{filter:brightness(1.06)}
 .dsh-nudge-popup-hint{display:flex;justify-content:space-between;gap:8px;font-size:11px;line-height:1.5;color:var(--dsw-alias-label-secondary,#5a5a66)}
 .dsh-nudge-popup-hint kbd{font:inherit;padding:0 3px;border:1px solid var(--dn-line);border-radius:4px;background:color-mix(in srgb,var(--dsw-alias-label-primary,#1a1a1a) 4%,transparent)}
 /* The in-place note editor: the capture card's shape, hung off the passage.
@@ -178,6 +182,9 @@ import { clamp } from './geometry.js'
 @keyframes dsh-nudge-attention{0%{box-shadow:inset 0 0 0 0 var(--dn-accent-line);opacity:0}20%{box-shadow:inset 0 0 0 3px var(--dn-accent-soft);opacity:1}100%{box-shadow:inset 0 0 0 0 transparent;opacity:0}}
 .dsh-nudge-attention-ring{position:absolute;inset:0;border-radius:inherit;pointer-events:none;animation:dsh-nudge-attention .9s ease-out}
 ::highlight(dsh-nudge-notes){background:#fde68a;color:#1f2937}
+/* A passage marked as the answer keeps the note's own purple, on a light tint
+   so the text under it stays readable in the light theme. */
+::highlight(dsh-nudge-answers){background:var(--dsh-nudge-answer-bg,#ddd6fe);color:var(--dsh-nudge-answer-fg,#1f2937)}
 /* Same colours as the browser's own selection on Chromium/Windows, because
    focusing the note field collapses the real selection before it can be kept.
    --dsh-nudge-capture-bg / -fg stay overridable for other platforms/themes. */
@@ -298,7 +305,7 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
 .dsh-nudge-preset-grip{cursor:grab;padding:2px;border-radius:6px;color:var(--dsw-alias-label-secondary,#8a8a8a);font-size:13px;line-height:1;user-select:none}
 .dsh-nudge-preset-grip:active{cursor:grabbing}
 .dsh-nudge-preset-grip:focus-visible{outline:2px solid var(--dn-accent-line);outline-offset:1px}
-.dsh-nudge-preset-toggle{flex:1 1 auto;min-width:0;display:flex;align-items:center;gap:6px;padding:4px 6px;border:0;border-radius:8px;background:transparent;color:inherit;font:inherit;font-size:12px;text-align:left;cursor:pointer}
+.dsh-nudge-preset-toggle{flex:0 1 auto;min-width:0;margin-right:auto;display:flex;align-items:center;gap:6px;padding:4px 6px;border:0;border-radius:8px;background:transparent;color:inherit;font:inherit;font-size:12px;text-align:left;cursor:pointer}
 .dsh-nudge-preset-toggle:hover{background:var(--dn-hover)}
 .dsh-nudge-preset-toggle:focus-visible{outline:2px solid var(--dn-accent-line);outline-offset:1px}
 .dsh-nudge-preset-toggle svg{flex:0 0 auto;color:var(--dsw-alias-label-secondary,#8a8a8a)}
@@ -311,11 +318,21 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
 .dsh-nudge-preset-row.dragging{opacity:.65;border-color:var(--dn-accent-line);box-shadow:0 6px 18px rgba(0,0,0,.08)}
 .dsh-nudge-preset-row.disabled{opacity:.72}
 .dsh-nudge-preset-row.disabled .dsh-nudge-preset-name{color:var(--dsw-alias-label-secondary,#8a8a8a);font-weight:500}
-.dsh-nudge-preset-state{flex:0 0 auto;height:22px;padding:0 8px;border-radius:999px;border:1px solid var(--dn-line);background:transparent;color:var(--dsw-alias-label-secondary,#8a8a8a);font:inherit;font-size:11px;line-height:1;cursor:pointer;white-space:nowrap;transition:background .15s ease,color .15s ease,border-color .15s ease}
-.dsh-nudge-preset-state:hover{background:var(--dn-hover)}
-.dsh-nudge-preset-state.on{background:var(--dn-accent-soft);border-color:var(--dn-accent-line);color:var(--dn-accent)}
-.dsh-nudge-preset-state:focus-visible{outline:2px solid var(--dn-accent-line);outline-offset:1px}
+/* Two places one prompt can live: the window's prompt row and the row under
+   the input box. Same pill, same height; filled means "shown there". */
+.dsh-nudge-preset-place{flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;height:24px;padding:0 9px;border-radius:999px;border:1px solid var(--dn-line);background:transparent;color:var(--dsw-alias-label-secondary,#8a8a8a);font:inherit;font-size:11.5px;line-height:1;white-space:nowrap;cursor:pointer;transition:background .15s ease,color .15s ease,border-color .15s ease}
+.dsh-nudge-preset-place:hover{background:var(--dn-hover)}
+.dsh-nudge-preset-place.on{background:var(--dn-accent-soft);border-color:var(--dn-accent-line);color:var(--dn-accent)}
+.dsh-nudge-preset-place:focus-visible{outline:2px solid var(--dn-accent-line);outline-offset:1px}
+.dsh-nudge-place-short{display:none}
+@container (max-width:520px){.dsh-nudge-place-long{display:none}.dsh-nudge-place-short{display:inline}}
+.dsh-nudge-preset-row[data-preset-id]{gap:4px;padding:7px 9px;border:0;border-radius:0;background:transparent;container-type:inline-size}
+.dsh-nudge-preset-row[data-preset-id] + .dsh-nudge-preset-row[data-preset-id]{border-top:1px solid var(--dn-line)}
+.dsh-nudge-preset-row[data-preset-id] .dsh-nudge-preset-tools .dsh-nudge-btn.icon{border-color:transparent;background:transparent;color:var(--dsw-alias-label-secondary,#8a8a8a)}
+.dsh-nudge-preset-row[data-preset-id] .dsh-nudge-preset-tools .dsh-nudge-btn.icon:hover{background:var(--dn-hover);color:var(--dsw-alias-label-primary,#1a1a1a)}
+.dsh-nudge-preset-row[data-preset-id] .dsh-nudge-preset-tools .dsh-nudge-btn.icon.danger{color:var(--dsw-alias-state-error-primary,#c8433c)}
 .dsh-nudge-preset-body{margin:0 6px 2px 30px;padding:8px 10px;border-radius:9px;background:color-mix(in srgb,var(--dsw-alias-label-primary,#1a1a1a) 4%,transparent);color:var(--dsw-alias-label-secondary,#555);font-size:12px;line-height:1.6;white-space:pre-wrap;word-break:break-word;max-height:min(280px,36vh);overflow-y:auto}
+.dsh-nudge-preset-text{white-space:pre-wrap;word-break:break-word}
 .dsh-nudge-preset-editor{display:flex;flex-direction:column;gap:8px;padding:2px 6px 2px 30px}
 .dsh-nudge-preset-editor input{flex:0 0 auto}
 .dsh-nudge-preset-empty{padding:14px;border:1px dashed var(--dn-line);border-radius:12px;color:var(--dsw-alias-label-secondary,#8a8a8a);font-size:12px;line-height:1.6;text-align:center}
