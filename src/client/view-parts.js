@@ -105,9 +105,11 @@ import { h } from './react.js'
 
       /**
        * The selection card: the note field (with the copy icon on its right),
-       * the answer shortcut, save and the two verdicts. It deliberately does
-       * not repeat the quoted passage; the highlight is where the passage
-       * lives.
+       * then the order the buttons were asked for — the answer shortcut, the two
+       * verdicts, and the note that commits whatever was typed. The verdicts
+       * carry a glyph so the two stay apart without relying on colour alone.
+       * It deliberately does not repeat the quoted passage; the highlight is
+       * where the passage lives.
        */
       function CaptureCard(props) {
         const { t } = props
@@ -161,33 +163,35 @@ import { h } from './react.js'
                 'button',
                 {
                   type: 'button',
-                  className: 'dsh-nudge-popup-save',
+                  className: 'dsh-nudge-popup-agree',
+                  title: t('agreeHint'),
+                  'aria-label': t('agreeHint'),
+                  onClick: props.onAgree,
+                },
+                h('span', { key: 'sym', className: 'dsh-nudge-popup-sym', 'aria-hidden': true }, '✓'),
+                t('agree'),
+              ),
+              h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'dsh-nudge-popup-disagree',
+                  title: t('disagreeHint'),
+                  'aria-label': t('disagreeHint'),
+                  onClick: props.onDisagree,
+                },
+                h('span', { key: 'sym', className: 'dsh-nudge-popup-sym', 'aria-hidden': true }, '✕'),
+                t('disagree'),
+              ),
+              h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'dsh-nudge-popup-note',
                   title: `${t('addAnnotation')} (Enter)`,
                   onClick: props.onSubmit,
                 },
                 t('addAnnotation'),
-              ),
-              h(
-                'button',
-                {
-                  type: 'button',
-                  className: 'dsh-nudge-popup-quick',
-                  title: t('agreeThis'),
-                  'aria-label': t('agreeThis'),
-                  onClick: props.onAgree,
-                },
-                t('agreeThis'),
-              ),
-              h(
-                'button',
-                {
-                  type: 'button',
-                  className: 'dsh-nudge-popup-quick',
-                  title: t('disagreeThis'),
-                  'aria-label': t('disagreeThis'),
-                  onClick: props.onDisagree,
-                },
-                t('disagreeThis'),
               ),
             ),
           ],

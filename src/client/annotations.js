@@ -16,7 +16,7 @@ import {
   FLASH_HOLD_MS,
   SELF_SELECTOR,
 } from './constants.js'
-import { anchorFromQuote, anchorFromRange, packedText, passagesOfRange } from './dom.js'
+import { anchorFromQuote, anchorFromRange, coversPassage, packedText, passagesOfRange } from './dom.js'
 import { rectValue, viewport } from './geometry.js'
 import { annotationBlock, annotationNoteLine, blockBreak, quoteMarkdown, tidyQuote } from './annotation-text.js'
 import { saveNotesOfSession } from './notes.js'
@@ -280,6 +280,9 @@ import { frameLabelKey, isFrameWidth } from './settings.js'
         } catch {
           anchor = null
         }
+        // Whether the selection is already the passage: the card still opens,
+        // but it stops parking a button under the release point then, because
+        // the click after a whole-paragraph selection is rarely meant for it.
         settleAnnotation({
           ...IDLE_ANNOTATION,
           annotationDraft: {
@@ -301,6 +304,7 @@ import { frameLabelKey, isFrameWidth } from './settings.js'
                 }
               : null,
             pointer,
+            wholePassage: coversPassage(selection.range, selection.quote),
           },
           note: '',
           error: '',

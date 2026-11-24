@@ -127,9 +127,19 @@ import { clamp } from './geometry.js'
 .dsh-nudge-popup-copy:focus-visible{outline:2px solid var(--dn-accent-line);outline-offset:2px}
 .dsh-nudge-popup-copy[data-copied="done"]{color:var(--dn-accent);border-color:var(--dn-accent-line);background:var(--dn-accent-soft)}
 .dsh-nudge-popup-copy[data-copied="failed"]{color:var(--dsw-alias-state-error-primary,#c8433c);border-color:color-mix(in srgb,var(--dsw-alias-state-error-primary,#c8433c) 45%,transparent)}
-.dsh-nudge-popup-row .dsh-nudge-popup-quick:hover{background:var(--dn-hover)}
-.dsh-nudge-popup-row .dsh-nudge-popup-answer{border-color:var(--dsw-static-deepseek-450,#5686fe);background:var(--dsw-static-deepseek-450,#5686fe);color:var(--dsw-alias-label-primary-inverted,#fff);font-weight:600}
-.dsh-nudge-popup-row .dsh-nudge-popup-answer:hover{filter:brightness(1.06)}
+/* One filled primary (the answer), two soft verdicts, one quiet commit. The
+   verdicts also carry a ✓ / ✕ glyph, so they stay apart without leaning on
+   colour alone. Purple matches the answer highlight, so the button and the
+   mark it paints read as the same thing. */
+.dsh-nudge-popup-row .dsh-nudge-popup-answer{border-color:transparent;background:#6f4eea;color:var(--dsw-alias-label-primary-inverted,#fff);font-weight:600}
+.dsh-nudge-popup-row .dsh-nudge-popup-answer:hover{filter:brightness(1.07)}
+.dsh-nudge-popup-row .dsh-nudge-popup-agree{border-color:color-mix(in srgb,var(--dsw-alias-state-success-primary,#1f8f5f) 30%,transparent);background:color-mix(in srgb,var(--dsw-alias-state-success-primary,#1f8f5f) 11%,transparent);color:var(--dsw-alias-state-success-primary,#1f8f5f)}
+.dsh-nudge-popup-row .dsh-nudge-popup-agree:hover{background:color-mix(in srgb,var(--dsw-alias-state-success-primary,#1f8f5f) 18%,transparent)}
+.dsh-nudge-popup-row .dsh-nudge-popup-disagree{border-color:color-mix(in srgb,var(--dsw-alias-state-error-primary,#c8433c) 30%,transparent);background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#c8433c) 10%,transparent);color:var(--dsw-alias-state-error-primary,#c8433c)}
+.dsh-nudge-popup-row .dsh-nudge-popup-disagree:hover{background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#c8433c) 17%,transparent)}
+.dsh-nudge-popup-row .dsh-nudge-popup-note{margin-left:auto;border-color:transparent;background:transparent;color:var(--dsw-alias-label-secondary,#5a5a66)}
+.dsh-nudge-popup-row .dsh-nudge-popup-note:hover{background:var(--dn-hover);color:var(--dsw-alias-label-primary,#1a1a1a)}
+.dsh-nudge-popup-sym{font-size:11px;line-height:1;margin-right:3px;opacity:.9}
 .dsh-nudge-popup-hint{display:flex;justify-content:space-between;gap:8px;font-size:11px;line-height:1.5;color:var(--dsw-alias-label-secondary,#5a5a66)}
 .dsh-nudge-popup-hint kbd{font:inherit;padding:0 3px;border:1px solid var(--dn-line);border-radius:4px;background:color-mix(in srgb,var(--dsw-alias-label-primary,#1a1a1a) 4%,transparent)}
 /* The in-place note editor: the capture card's shape, hung off the passage.

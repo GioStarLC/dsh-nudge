@@ -5,7 +5,7 @@
  *
  * Built into `client.js` by `scripts/build.mjs`; edit this file, not the bundle.
  */
-import { ANCHOR_SELECTOR, CONTEXT_CHARS, MAX_OCCURRENCES } from './constants.js'
+import { ANCHOR_SELECTOR, CONTEXT_CHARS, MAX_OCCURRENCES, WHOLE_PASSAGE_RATIO } from './constants.js'
 
     /** The element a DOM node belongs to, or null. */
     function elementOfNode(node) {
@@ -147,6 +147,27 @@ import { ANCHOR_SELECTOR, CONTEXT_CHARS, MAX_OCCURRENCES } from './constants.js'
       )
       const texts = innermost.map(blockTextOf).filter((text) => text.trim() !== '')
       return texts.length === 0 ? '' : texts.join('\n\n')
+    }
+
+    /**
+     * Whether a selection already spans the passage it sits in.
+     *
+     * Whitespace is ignored, so a selection that only differs by line breaks is
+     * still the passage. A drag that stops a character or two short reads the
+     * same way to the eye, hence the ratio rather than an exact match. A range
+     * that names no passage (a selection outside the transcript) is never
+     * covered: the card keeps its usual placement there.
+     */
+    function coversPassage(range, quote) {
+      let passage = ''
+      try {
+        passage = passagesOfRange(range)
+      } catch {
+        passage = ''
+      }
+      const total = packedText(passage).length
+      if (total === 0) return false
+      return packedText(quote).length / total >= WHOLE_PASSAGE_RATIO
     }
 
     /** A DOM Range covering [start, end) of a packed map, or null. */
@@ -311,4 +332,4 @@ import { ANCHOR_SELECTOR, CONTEXT_CHARS, MAX_OCCURRENCES } from './constants.js'
       return { start: best.index, end: best.index + anchor.quote.length }
     }
 
-export { elementOfNode, NON_TEXT_TAGS, isHiddenElement, packedText, packedMapOf, passagesOfRange, rangeFromPacked, occurrencesOf, rectDistance, anchorFromRange, anchorFromQuote, sameRanges, locateAnchor }
+export { elementOfNode, NON_TEXT_TAGS, isHiddenElement, packedText, packedMapOf, passagesOfRange, coversPassage, rangeFromPacked, occurrencesOf, rectDistance, anchorFromRange, anchorFromQuote, sameRanges, locateAnchor }

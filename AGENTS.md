@@ -14,7 +14,7 @@ src/client/delivery.js          投递与等待：probe 进对话、事件窗口
 src/client/view-parts.js        视图叶子组件：批注卡片、就地编辑、批注栏、快捷输入表单
 src/client/view-chips.js        窗口内的快捷输入行：chip 渲染、拖动几何与落点动画
 src/client/input-bar.js         输入框左下角那一行：钉住的快捷输入、更多菜单
-src/client/annotations.js       批注状态机：选区、草稿、就地编辑、定为答案；annotation-text.js 是纯文本层
+src/client/annotations.js       批注状态机：选区、草稿、就地编辑、记为答案；annotation-text.js 是纯文本层
 src/client/highlights.js        高亮与锚点恢复：重绘合并、答案拆分绘制、转录订阅
 src/client/selection-extend.js  Shift 拖动扩大选区；quote-writing.js 是写入/发送批次
 src/client/popup.js             批注卡片定位与外部点击收起

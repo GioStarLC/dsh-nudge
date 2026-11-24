@@ -181,6 +181,8 @@ interface NudgeAnnotationDraft {
   anchorPoint: { node: Node; offset: number } | null
   rect: { left: number; top: number; right: number; bottom: number; width: number; height: number } | null
   pointer: NudgePoint | null
+  /** The selection already covers its passage; the card keeps off the pointer. */
+  wholePassage: boolean
 }
 
 /** The conversation a click is about. */

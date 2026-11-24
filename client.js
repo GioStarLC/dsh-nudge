@@ -269,6 +269,14 @@ const h = React.createElement;
     const TIP_ROTATE_MS = FLASH_HOLD_MS;
     /** Cap on one idle line, in characters; keeps the status row one line tall. */
     const MAX_TIP_LENGTH = 60;
+    /**
+     * How much of a passage a selection must cover to count as the whole thing.
+     *
+     * A drag that stops one character short of the paragraph end is, to the eye,
+     * the paragraph; the card must treat it the same as a 100% selection instead
+     * of parking a button under the release point.
+     */
+    const WHOLE_PASSAGE_RATIO = 0.9;
 
     const CARD_WIDTH = 320;
     /**
@@ -436,9 +444,9 @@ const h = React.createElement;
       annotationsHint: '选中对话里的文字，选区旁会弹出批注卡片；批注汇总在这里。',
     highlightHint: '点对话里的高亮，可以改批注或取消高亮。',
       annotationsOffHint: '快速批注已关闭；打开批注栏的开关才能从选中文字添加批注。',
-      addAnnotation: '添加批注',
-      asAnswer: '定为答案',
-      asAnswerHint: '把它作为答案：高亮整段，选中的文字作为批注',
+      addAnnotation: '存为批注',
+      asAnswer: '记为答案',
+      asAnswerHint: '记为答案：高亮整段，选中的文字作为批注',
       dismissAnnotation: '取消',
       deleteAnnotation: '取消高亮',
       editNoteHint: 'Enter 保存 · Shift+Enter 换行 · Esc 取消',
@@ -483,9 +491,9 @@ const h = React.createElement;
       collapseNudge: '收起快捷输入',
       expandNudge: '展开快捷输入',
       agree: '同意',
-      agreeThis: '同意这段',
+      agreeHint: '同意这段，记成批注',
       disagree: '不同意',
-      disagreeThis: '不同意这段',
+      disagreeHint: '不同意这段，记成批注',
       copiedShort: '已复制',
       copyFailedShort: '复制失败',
       saveAnnotation: '保存',
@@ -608,9 +616,9 @@ const h = React.createElement;
       annotationsHint: 'Select text in the conversation and a note card opens beside it; notes are collected here.',
     highlightHint: 'Click a highlight in the conversation to edit its note or remove the mark.',
       annotationsOffHint: 'Quick notes are off; turn them on in the note header to add notes from a selection.',
-      addAnnotation: 'Add note',
-      asAnswer: 'Mark as answer',
-      asAnswerHint: 'Mark it as the answer: highlight the whole passage, keep the selection as the note',
+      addAnnotation: 'Save as note',
+      asAnswer: 'Save as answer',
+      asAnswerHint: 'Save as the answer: highlight the whole passage, keep the selection as the note',
       dismissAnnotation: 'Cancel',
       deleteAnnotation: 'Remove highlight',
       editNoteHint: 'Enter saves · Shift+Enter starts a new line · Esc cancels',
@@ -655,9 +663,9 @@ const h = React.createElement;
       collapseNudge: 'Collapse quick input',
       expandNudge: 'Expand quick input',
       agree: 'Agree',
-      agreeThis: 'Agree with this',
+      agreeHint: 'Agree with this, recorded as a note',
       disagree: 'Disagree',
-      disagreeThis: 'Disagree with this',
+      disagreeHint: 'Disagree with this, recorded as a note',
       copiedShort: 'Copied',
       copyFailedShort: 'Copy failed',
       saveAnnotation: 'Save',
@@ -1168,9 +1176,19 @@ const h = React.createElement;
 .dsh-nudge-popup-copy:focus-visible{outline:2px solid var(--dn-accent-line);outline-offset:2px}
 .dsh-nudge-popup-copy[data-copied="done"]{color:var(--dn-accent);border-color:var(--dn-accent-line);background:var(--dn-accent-soft)}
 .dsh-nudge-popup-copy[data-copied="failed"]{color:var(--dsw-alias-state-error-primary,#c8433c);border-color:color-mix(in srgb,var(--dsw-alias-state-error-primary,#c8433c) 45%,transparent)}
-.dsh-nudge-popup-row .dsh-nudge-popup-quick:hover{background:var(--dn-hover)}
-.dsh-nudge-popup-row .dsh-nudge-popup-answer{border-color:var(--dsw-static-deepseek-450,#5686fe);background:var(--dsw-static-deepseek-450,#5686fe);color:var(--dsw-alias-label-primary-inverted,#fff);font-weight:600}
-.dsh-nudge-popup-row .dsh-nudge-popup-answer:hover{filter:brightness(1.06)}
+/* One filled primary (the answer), two soft verdicts, one quiet commit. The
+   verdicts also carry a ✓ / ✕ glyph, so they stay apart without leaning on
+   colour alone. Purple matches the answer highlight, so the button and the
+   mark it paints read as the same thing. */
+.dsh-nudge-popup-row .dsh-nudge-popup-answer{border-color:transparent;background:#6f4eea;color:var(--dsw-alias-label-primary-inverted,#fff);font-weight:600}
+.dsh-nudge-popup-row .dsh-nudge-popup-answer:hover{filter:brightness(1.07)}
+.dsh-nudge-popup-row .dsh-nudge-popup-agree{border-color:color-mix(in srgb,var(--dsw-alias-state-success-primary,#1f8f5f) 30%,transparent);background:color-mix(in srgb,var(--dsw-alias-state-success-primary,#1f8f5f) 11%,transparent);color:var(--dsw-alias-state-success-primary,#1f8f5f)}
+.dsh-nudge-popup-row .dsh-nudge-popup-agree:hover{background:color-mix(in srgb,var(--dsw-alias-state-success-primary,#1f8f5f) 18%,transparent)}
+.dsh-nudge-popup-row .dsh-nudge-popup-disagree{border-color:color-mix(in srgb,var(--dsw-alias-state-error-primary,#c8433c) 30%,transparent);background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#c8433c) 10%,transparent);color:var(--dsw-alias-state-error-primary,#c8433c)}
+.dsh-nudge-popup-row .dsh-nudge-popup-disagree:hover{background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#c8433c) 17%,transparent)}
+.dsh-nudge-popup-row .dsh-nudge-popup-note{margin-left:auto;border-color:transparent;background:transparent;color:var(--dsw-alias-label-secondary,#5a5a66)}
+.dsh-nudge-popup-row .dsh-nudge-popup-note:hover{background:var(--dn-hover);color:var(--dsw-alias-label-primary,#1a1a1a)}
+.dsh-nudge-popup-sym{font-size:11px;line-height:1;margin-right:3px;opacity:.9}
 .dsh-nudge-popup-hint{display:flex;justify-content:space-between;gap:8px;font-size:11px;line-height:1.5;color:var(--dsw-alias-label-secondary,#5a5a66)}
 .dsh-nudge-popup-hint kbd{font:inherit;padding:0 3px;border:1px solid var(--dn-line);border-radius:4px;background:color-mix(in srgb,var(--dsw-alias-label-primary,#1a1a1a) 4%,transparent)}
 /* The in-place note editor: the capture card's shape, hung off the passage.
@@ -1560,6 +1578,27 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
       );
       const texts = innermost.map(blockTextOf).filter((text) => text.trim() !== '');
       return texts.length === 0 ? '' : texts.join('\n\n')
+    }
+
+    /**
+     * Whether a selection already spans the passage it sits in.
+     *
+     * Whitespace is ignored, so a selection that only differs by line breaks is
+     * still the passage. A drag that stops a character or two short reads the
+     * same way to the eye, hence the ratio rather than an exact match. A range
+     * that names no passage (a selection outside the transcript) is never
+     * covered: the card keeps its usual placement there.
+     */
+    function coversPassage(range, quote) {
+      let passage = '';
+      try {
+        passage = passagesOfRange(range);
+      } catch {
+        passage = '';
+      }
+      const total = packedText(passage).length;
+      if (total === 0) return false
+      return packedText(quote).length / total >= WHOLE_PASSAGE_RATIO
     }
 
     /** A DOM Range covering [start, end) of a packed map, or null. */
@@ -2872,6 +2911,9 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
         } catch {
           anchor = null;
         }
+        // Whether the selection is already the passage: the card still opens,
+        // but it stops parking a button under the release point then, because
+        // the click after a whole-paragraph selection is rarely meant for it.
         settleAnnotation({
           ...IDLE_ANNOTATION,
           annotationDraft: {
@@ -2893,6 +2935,7 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
                 }
               : null,
             pointer,
+            wholePassage: coversPassage(selection.range, selection.quote),
           },
           note: '',
           error: '',
@@ -4563,10 +4606,14 @@ function createDelivery({ ctx, getState, setState, text }) {
        * Viewport box for the selection card.
        *
        * A mouse selection ends on the release point, so the card opens above it
-       * with its first button — 定为答案 — centred on that point: the next click
-       * lands without moving the mouse. When the card does not fit above the
-       * point, or the pointer belongs to a click elsewhere, it falls back to the
-       * quote box, centred above/below it.
+       * with its first button — 记为答案 — centred on that point: the next click
+       * lands without moving the mouse. That shortcut is only for a phrase
+       * picked out of a passage. A selection that already is the passage is
+       * usually read, copied or quoted, not marked, and the click that follows
+       * it belongs to something else — so the card keeps off the pointer then
+       * and hangs over the quote box instead. When the card does not fit above
+       * the point, or the pointer belongs to a click elsewhere, the quote box
+       * is the anchor too.
        */
       function popupPosition() {
         const draft = getState().annotationDraft;
@@ -4581,7 +4628,8 @@ function createDelivery({ ctx, getState, setState, text }) {
         const vw = viewport().width;
         const boxWidth = Math.min(width, vw - margin * 2);
         const rect = draft?.rect ?? null;
-        const pointer = pointerNearRect(draft?.pointer, rect) ? draft.pointer : null;
+        const pointer =
+          draft?.wholePassage === true || !pointerNearRect(draft?.pointer, rect) ? null : draft.pointer;
         const clampX = (value) => Math.max(margin, Math.min(value, vw - boxWidth - margin));
         if (pointer) {
           const { x, y } = pointer;
@@ -5465,6 +5513,7 @@ function createDelivery({ ctx, getState, setState, text }) {
                 }
               : null,
             pointer: null,
+            wholePassage: coversPassage(range, quote),
           },
           annotationCardHidden: false,
         });
@@ -8295,9 +8344,11 @@ function createDelivery({ ctx, getState, setState, text }) {
 
       /**
        * The selection card: the note field (with the copy icon on its right),
-       * the answer shortcut, save and the two verdicts. It deliberately does
-       * not repeat the quoted passage; the highlight is where the passage
-       * lives.
+       * then the order the buttons were asked for — the answer shortcut, the two
+       * verdicts, and the note that commits whatever was typed. The verdicts
+       * carry a glyph so the two stay apart without relying on colour alone.
+       * It deliberately does not repeat the quoted passage; the highlight is
+       * where the passage lives.
        */
       function CaptureCard(props) {
         const { t } = props;
@@ -8351,33 +8402,35 @@ function createDelivery({ ctx, getState, setState, text }) {
                 'button',
                 {
                   type: 'button',
-                  className: 'dsh-nudge-popup-save',
+                  className: 'dsh-nudge-popup-agree',
+                  title: t('agreeHint'),
+                  'aria-label': t('agreeHint'),
+                  onClick: props.onAgree,
+                },
+                h('span', { key: 'sym', className: 'dsh-nudge-popup-sym', 'aria-hidden': true }, '✓'),
+                t('agree'),
+              ),
+              h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'dsh-nudge-popup-disagree',
+                  title: t('disagreeHint'),
+                  'aria-label': t('disagreeHint'),
+                  onClick: props.onDisagree,
+                },
+                h('span', { key: 'sym', className: 'dsh-nudge-popup-sym', 'aria-hidden': true }, '✕'),
+                t('disagree'),
+              ),
+              h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'dsh-nudge-popup-note',
                   title: `${t('addAnnotation')} (Enter)`,
                   onClick: props.onSubmit,
                 },
                 t('addAnnotation'),
-              ),
-              h(
-                'button',
-                {
-                  type: 'button',
-                  className: 'dsh-nudge-popup-quick',
-                  title: t('agreeThis'),
-                  'aria-label': t('agreeThis'),
-                  onClick: props.onAgree,
-                },
-                t('agreeThis'),
-              ),
-              h(
-                'button',
-                {
-                  type: 'button',
-                  className: 'dsh-nudge-popup-quick',
-                  title: t('disagreeThis'),
-                  'aria-label': t('disagreeThis'),
-                  onClick: props.onDisagree,
-                },
-                t('disagreeThis'),
               ),
             ),
           ],

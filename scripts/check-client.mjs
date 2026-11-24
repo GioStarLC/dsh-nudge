@@ -2303,27 +2303,30 @@ function countedFlowItem(key, text, counter) {
     findByClass(popup, 'dsh-nudge-popup-close'),
     null,
   )
+  // A button's label is its text children; the verdicts also carry a glyph.
+  const labelOf = (item) => (item?.children ?? []).filter((child) => typeof child === 'string').join('')
+  const agreeButton = findByClass(popup, 'dsh-nudge-popup-agree')
+  const disagreeButton = findByClass(popup, 'dsh-nudge-popup-disagree')
   check(
-    'annotation: card keeps the single quick-action row',
-    (findAllByClass(popup, 'dsh-nudge-popup-quick') ?? []).length,
-    2,
+    'annotation: the two verdicts sit in their own treatment',
+    Boolean(agreeButton && disagreeButton),
+    true,
   )
-  const quicks = findAllByClass(popup, 'dsh-nudge-popup-quick') ?? []
   check(
     'annotation: the verdicts are words, not emoji',
-    quicks.map((item) => item?.children?.[0]).join('|'),
-    '同意这段|不同意这段',
+    [agreeButton, disagreeButton].map(labelOf).join('|'),
+    '同意|不同意',
+  )
+  check(
+    'annotation: a glyph carries the verdict alongside the colour',
+    [agreeButton, disagreeButton].map((item) => item?.children?.[0]?.children?.[0]).join(''),
+    '✓✕',
   )
   check('annotation: the card paints no emoji', findByClass(popup, 'emoji'), null)
   check(
-    'annotation: the verdicts name the passage they judge',
-    quicks[0]?.props?.['aria-label'],
-    '同意这段',
-  )
-  check(
-    'annotation: card offers the primary action',
-    findByClass(popup, 'dsh-nudge-popup-save')?.children?.[0],
-    '添加批注',
+    'annotation: the verdicts explain what they record',
+    agreeButton?.props?.['aria-label'],
+    '同意这段，记成批注',
   )
   const field = findByClass(popup, 'dsh-nudge-popup-field')
   const copyButton = findByClass(field, 'dsh-nudge-popup-copy')
@@ -2340,17 +2343,24 @@ function countedFlowItem(key, text, counter) {
     0,
   )
   const answerButton = findByClass(popup, 'dsh-nudge-popup-answer')
-  check('annotation: card offers the answer action', answerButton?.children?.[0], '定为答案')
+  check('annotation: card offers the answer action', labelOf(answerButton), '记为答案')
   check(
     'annotation: the answer action explains itself',
     answerButton?.props?.title,
-    '把它作为答案：高亮整段，选中的文字作为批注',
+    '记为答案：高亮整段，选中的文字作为批注',
+  )
+  const noteButton = findByClass(popup, 'dsh-nudge-popup-note')
+  check('annotation: the commit action is named for what it does', labelOf(noteButton), '存为批注')
+  check(
+    'annotation: the commit action keeps the Enter shortcut',
+    noteButton?.props?.title,
+    '存为批注 (Enter)',
   )
   check('annotation: the card carries five actions', (findAllByTag(popup, 'button') ?? []).length, 5)
   check(
     'annotation: actions follow the usage order',
-    (findAllByTag(actions, 'button') ?? []).map((item) => item.children?.[0]).join('|'),
-    '定为答案|添加批注|同意这段|不同意这段',
+    (findAllByTag(actions, 'button') ?? []).map(labelOf).join('|'),
+    '记为答案|同意|不同意|存为批注',
   )
   check(
     'annotation: copy reports its own result',
@@ -2368,6 +2378,83 @@ function countedFlowItem(key, text, counter) {
     'translateY(-100%)',
   )
   check('annotation: window keeps no compose box', findByClass(tree, 'dsh-nudge-annotation-compose'), null)
+}
+
+{
+  // Placement after a selection. A phrase picked out of a passage keeps the
+  // shortcut — the answer button sits under the release point, one click away.
+  // A selection that already *is* the passage must not: the click that follows
+  // it is almost always meant for the text, not for 记为答案.
+  const booted = await boot({})
+  booted.runtime.setQuick(true)
+  const whole = passageStub('P', '整段正文甲一二三四')
+  const almost = passageStub('P', '整段正文乙一二三四五')
+  const phrase = passageStub('P', '整段正文丙一二三四五')
+  const flow = passageFlowStub('turn-13', [whole, almost, phrase])
+  booted.sandbox.document.querySelectorAll = (selector) =>
+    selector === '[data-chat-anchor-key]' ? [flow] : []
+  const View = booted.registrations.find((item) => item.entry.name === 'shell.overlay').Component
+  const pointer = { x: 520, y: 300 }
+  const box = { left: 400, top: 300, right: 700, bottom: 322, width: 300, height: 22 }
+  const place = (passage, count) => {
+    const range = {
+      commonAncestorContainer: passage.block,
+      startContainer: passage.textNode,
+      startOffset: 0,
+      endContainer: passage.textNode,
+      endOffset: count,
+      collapsed: false,
+      cloneRange: () => range,
+      getBoundingClientRect: () => box,
+      intersectsNode: (node) => node === passage.textNode,
+    }
+    booted.sandbox.getSelection = () => ({
+      rangeCount: 1,
+      isCollapsed: false,
+      toString: () => passage.textNode.data.slice(0, count),
+      anchorNode: passage.textNode,
+      anchorOffset: 0,
+      focusNode: passage.textNode,
+      focusOffset: count,
+      getRangeAt: () => range,
+      removeAllRanges() {},
+    })
+    check(`placement: captured "${range.startContainer.data.slice(0, count)}"`, booted.runtime.captureSelection(pointer), true)
+    const style = findByClass(View(), 'dsh-nudge-popup')?.props?.style
+    return { style, draft: booted.runtime.getSnapshot().annotationDraft }
+  }
+
+  // Every character selected: the card hangs over the quote box, above the
+  // pointer, instead of putting a button under it.
+  const full = place(whole, 9)
+  check('placement: a whole-passage selection is recognised as whole', full.draft?.wholePassage, true)
+  check('placement: it leaves the release point alone', full.style?.left, '380px')
+  check(
+    'placement: its card ends above the pointer',
+    Number.parseFloat(full.style?.top) <= pointer.y,
+    true,
+  )
+
+  // One character short is still the paragraph to the eye: 9 of 10 counts.
+  const edge = place(almost, 9)
+  check('placement: 90% of the passage already counts as whole', edge.draft?.wholePassage, true)
+  check('placement: the boundary case moves off the pointer too', edge.style?.left, '380px')
+
+  // A phrase inside the passage keeps the one-click shortcut.
+  const part = place(phrase, 8)
+  check('placement: a phrase inside the passage is not the whole', part.draft?.wholePassage, false)
+  check(
+    'placement: the answer button stays centred on the release point',
+    Number.parseFloat(part.style?.left) + 44,
+    pointer.x,
+  )
+  check('placement: the card is pinned below the release point', part.style?.top, '324px')
+
+  // A selection that names no passage (outside the transcript) keeps it too.
+  booted.sandbox.getSelection = selectionStub('正文之外', { nodeType: 1, closest: () => null }, box)
+  booted.runtime.captureSelection(pointer)
+  const outside = findByClass(View(), 'dsh-nudge-popup')?.props?.style
+  check('placement: a selection outside the transcript keeps the shortcut', outside?.left, '476px')
 }
 
 {
