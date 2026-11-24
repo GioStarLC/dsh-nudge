@@ -32,6 +32,11 @@ window.__ModuleLoader__.load({
      * the draft without touching the editor DOM.
      */
     const COMPOSER_SLOT = 'conversation.input.overlay'
+    /**
+     * The composer's own left row: the seat shared by the attach mark, the
+     * permission chip and the pinned prompts.
+     */
+    const INPUT_BAR_SLOT = 'conversation.input.left'
     const ENTRY = 'dsh-nudge'
     const UI_KEY = 'dsh-nudge:ui'
     const DELIVERY_KEY = 'dsh-nudge:delivery'
@@ -64,6 +69,8 @@ window.__ModuleLoader__.load({
     const DRAG_ROOT_SELECTOR = '.dsh-nudge-card, .dsh-nudge-pill'
     /** Registry name for the annotated-passage highlight. */
     const HIGHLIGHT_NAME = 'dsh-nudge-notes'
+    /** Registry name for passages a note marked as the answer. */
+    const ANSWER_HIGHLIGHT = 'dsh-nudge-answers'
     /** Registry name for the passage currently being annotated. */
     const CAPTURE_HIGHLIGHT = 'dsh-nudge-capture'
     /** How much context one anchor keeps on each side of its quote. */
@@ -197,11 +204,13 @@ window.__ModuleLoader__.load({
       switchOff: '关',
       answerLabel: '我的回答：',
       annotationsTitle: '批注',
-      annotationPlaceholder: '对这段内容说点什么…',
+      annotationPlaceholder: '填写批注，可留空…',
       annotationsHint: '选中对话里的文字，选区旁会弹出批注卡片；批注汇总在这里。',
     highlightHint: '点对话里的高亮，可以改批注或取消高亮。',
       annotationsOffHint: '快速批注已关闭；打开批注栏的开关才能从选中文字添加批注。',
       addAnnotation: '添加批注',
+      asAnswer: '定为答案',
+      asAnswerHint: '把它作为答案：高亮整段，选中的文字作为批注',
       dismissAnnotation: '取消',
       deleteAnnotation: '取消高亮',
       editNoteHint: 'Enter 保存 · Shift+Enter 换行 · Esc 取消',
@@ -246,8 +255,9 @@ window.__ModuleLoader__.load({
       collapseNudge: '收起快捷输入',
       expandNudge: '展开快捷输入',
       agree: '同意',
+      agreeThis: '同意这段',
       disagree: '不同意',
-      copyQuote: '复制',
+      disagreeThis: '不同意这段',
       copiedShort: '已复制',
       copyFailedShort: '复制失败',
       saveAnnotation: '保存',
@@ -290,10 +300,14 @@ window.__ModuleLoader__.load({
       resetPresets: '恢复默认',
       deletePreset: '删除',
       presetCount: '共 {n} 条',
-      presetEnabled: '已启用',
-      presetDisabled: '已停用',
-      presetEnabledHint: '已启用：显示在窗口的快捷输入里',
-      presetDisabledHint: '已停用：保留在设置里，不在窗口显示',
+      placeWindow: '悬浮窗',
+      placeWindowShort: '窗',
+      placeWindowHint: '显示在悬浮窗的快捷输入里',
+      placeWindowOffHint: '不在悬浮窗里显示；仍可放到输入框下面',
+      placeInput: '输入框',
+      placeInputShort: '框',
+      placeInputHint: '显示在输入框下面那一行，点一下写进输入框',
+      morePrompts: '更多',
       presetTextRequired: '内容不能为空。',
       expandAllPresets: '全部展开',
       collapseAllPresets: '全部折叠',
@@ -362,11 +376,13 @@ window.__ModuleLoader__.load({
       switchOff: 'off',
       answerLabel: 'My answer: ',
       annotationsTitle: 'Notes',
-      annotationPlaceholder: 'Say something about this passage…',
+      annotationPlaceholder: 'Write a note, or leave it empty…',
       annotationsHint: 'Select text in the conversation and a note card opens beside it; notes are collected here.',
     highlightHint: 'Click a highlight in the conversation to edit its note or remove the mark.',
       annotationsOffHint: 'Quick notes are off; turn them on in the note header to add notes from a selection.',
       addAnnotation: 'Add note',
+      asAnswer: 'Mark as answer',
+      asAnswerHint: 'Mark it as the answer: highlight the whole passage, keep the selection as the note',
       dismissAnnotation: 'Cancel',
       deleteAnnotation: 'Remove highlight',
       editNoteHint: 'Enter saves · Shift+Enter starts a new line · Esc cancels',
@@ -411,8 +427,9 @@ window.__ModuleLoader__.load({
       collapseNudge: 'Collapse quick input',
       expandNudge: 'Expand quick input',
       agree: 'Agree',
+      agreeThis: 'Agree with this',
       disagree: 'Disagree',
-      copyQuote: 'Copy',
+      disagreeThis: 'Disagree with this',
       copiedShort: 'Copied',
       copyFailedShort: 'Copy failed',
       saveAnnotation: 'Save',
@@ -455,10 +472,14 @@ window.__ModuleLoader__.load({
       resetPresets: 'Reset defaults',
       deletePreset: 'Delete',
       presetCount: '{n} total',
-      presetEnabled: 'Enabled',
-      presetDisabled: 'Disabled',
-      presetEnabledHint: 'Enabled: shown in the window quick input',
-      presetDisabledHint: 'Disabled: kept in settings, hidden from the window',
+      placeWindow: 'Window',
+      placeWindowShort: 'W',
+      placeWindowHint: 'Shown among the window’s quick inputs',
+      placeWindowOffHint: 'Hidden from the window; can still sit under the input',
+      placeInput: 'Input',
+      placeInputShort: 'I',
+      placeInputHint: 'Shown on the row under the input; one click writes it into the box',
+      morePrompts: 'More',
       presetTextRequired: 'The text cannot be empty.',
       expandAllPresets: 'Expand all',
       collapseAllPresets: 'Collapse all',
@@ -570,6 +591,93 @@ window.__ModuleLoader__.load({
       }
       walk(root)
       return { packed, map }
+    }
+
+    /**
+     * Tags whose text reads as one passage. A selection inside one of these is
+     * promoted to the whole block, so the highlight covers the paragraph the
+     * words sit in rather than the words alone.
+     */
+    const PASSAGE_TAGS = {
+      P: true,
+      LI: true,
+      H1: true,
+      H2: true,
+      H3: true,
+      H4: true,
+      H5: true,
+      H6: true,
+      BLOCKQUOTE: true,
+      PRE: true,
+      TD: true,
+      TH: true,
+      DT: true,
+      DD: true,
+      FIGCAPTION: true,
+    }
+
+    /** Whether a range touches one node; a node that cannot be asked is skipped. */
+    function rangeTouches(range, node) {
+      try {
+        return typeof range.intersectsNode === 'function' && range.intersectsNode(node) === true
+      } catch {
+        return false
+      }
+    }
+
+    /** The innermost passage tag between a node and its flow item. */
+    function passageBlockOf(node, flowItem) {
+      let element = elementOfNode(node)
+      while (element !== null && element !== flowItem) {
+        if (PASSAGE_TAGS[String(element.tagName ?? '').toUpperCase()] === true) return element
+        element = element.parentElement ?? null
+      }
+      return flowItem
+    }
+
+    /** The text one block carries, with only its trailing whitespace dropped. */
+    function blockTextOf(block) {
+      let text = ''
+      const walk = (node) => {
+        for (const child of node.childNodes ?? []) {
+          if (child.nodeType === 3) text += child.data ?? ''
+          else if (child.nodeType === 1 && !isHiddenElement(child)) walk(child)
+        }
+      }
+      walk(block)
+      return text.replace(/\s+$/, '')
+    }
+
+    /**
+     * The whole passages a selection touches, in document order.
+     *
+     * A selection inside a paragraph names that paragraph; one crossing several
+     * names all of them. The innermost block wins, so a list item wrapping a
+     * paragraph contributes its words once, and a flow item that carries no
+     * block of its own stands for its whole text.
+     */
+    function passagesOfRange(range) {
+      const elements = document.querySelectorAll?.(ANCHOR_SELECTOR) ?? []
+      const blocks = []
+      for (const element of elements) {
+        const walk = (node) => {
+          for (const child of node.childNodes ?? []) {
+            if (child.nodeType === 3) {
+              if (!rangeTouches(range, child)) continue
+              const block = passageBlockOf(child, element)
+              if (!blocks.includes(block)) blocks.push(block)
+            } else if (child.nodeType === 1 && !isHiddenElement(child)) {
+              walk(child)
+            }
+          }
+        }
+        walk(element)
+      }
+      const innermost = blocks.filter(
+        (block) => !blocks.some((other) => other !== block && block.contains?.(other) === true),
+      )
+      const texts = innermost.map(blockTextOf).filter((text) => text.trim() !== '')
+      return texts.length === 0 ? '' : texts.join('\n\n')
     }
 
     /** A DOM Range covering [start, end) of a packed map, or null. */
@@ -1235,6 +1343,7 @@ window.__ModuleLoader__.load({
         label: lang === 'zh' ? preset.labelZh : preset.labelEn,
         text: preset.text,
         enabled: true,
+        pinned: false,
       }))
     }
 
@@ -1278,6 +1387,7 @@ window.__ModuleLoader__.load({
           label: rawLabel.length > 0 ? rawLabel : text.slice(0, 8),
           text,
           enabled: item.enabled !== false,
+          pinned: item.pinned === true,
         })
       }
       return list
@@ -2113,6 +2223,12 @@ window.__ModuleLoader__.load({
        * for the current draft; the plugin never touches the editor DOM.
        */
       let composer
+      /**
+       * A bar press counts its insert only when no second press follows: the
+       * pair is one send, not an insert plus a send.
+       */
+      let barInsertTimer
+      let barInsertId = ''
 
       /** The focused composer editor element, when the caret is inside it. */
       function composerNode() {
@@ -2175,13 +2291,13 @@ window.__ModuleLoader__.load({
        * The caret ends up past the written text; existing content is kept and
        * separated by one newline (a blank draft gets no leading newline).
        */
-      function insertPreset() {
+      function insertPreset(id, count = true) {
         const handle = composer
         if (handle === undefined || typeof handle.setDraft !== 'function') {
           setState({ note: text('insertUnavailable'), error: '' })
           return false
         }
-        const preset = activePreset()
+        const preset = id === undefined ? activePreset() : presetOf(state.presets, id)
         if (!preset) return false
         let draft = ''
         try {
@@ -2202,7 +2318,70 @@ window.__ModuleLoader__.load({
           return false
         }
         setState({ note: '', error: '' })
-        countStat('insert', preset.id)
+        if (count === true) countStat('insert', preset.id)
+        return true
+      }
+
+      /**
+       * A single press on a pinned prompt: append it now, and count the insert
+       * only if the press is not followed by the second half of a double click.
+       */
+      function appendPrompt(id) {
+        if (barInsertTimer !== undefined) {
+          clearTimeout(barInsertTimer)
+          barInsertTimer = undefined
+          if (barInsertId !== '') countStat('insert', barInsertId)
+          barInsertId = ''
+        }
+        if (!insertPreset(id, false)) return false
+        barInsertId = id
+        barInsertTimer = setTimeout(() => {
+          barInsertTimer = undefined
+          const pending = barInsertId
+          barInsertId = ''
+          if (pending !== '') countStat('insert', pending)
+        }, 260)
+        return true
+      }
+
+      /**
+       * A double press on a pinned prompt: send the draft the first press
+       * composed. That press's insert count is dropped, so the pair counts as
+       * one send; a failed send keeps the draft as it was.
+       */
+      function sendDraft(id) {
+        const handle = composer
+        if (handle === undefined || typeof handle.setDraft !== 'function') {
+          setState({ note: text('insertUnavailable'), error: '' })
+          return false
+        }
+        if (barInsertTimer !== undefined) {
+          clearTimeout(barInsertTimer)
+          barInsertTimer = undefined
+          barInsertId = ''
+        }
+        const preset = presetOf(state.presets, id)
+        let draft = ''
+        try {
+          draft = handle.readDraft?.() ?? ''
+        } catch {
+          draft = ''
+        }
+        if (typeof draft !== 'string') draft = ''
+        const body = preset?.text ?? ''
+        // The first press writes through the shell's input store; if that write
+        // has not reached the reader yet, compose it here so the send is whole.
+        if (body !== '' && !draft.replace(/\s+$/, '').endsWith(body.trim())) {
+          draft = draft.trim() === '' ? body : `${draft}${draft.endsWith('\n') ? '' : '\n'}${body}`
+        }
+        if (draft.trim() === '') return false
+        if (!deliver(draft)) return false
+        try {
+          handle.setDraft('')
+        } catch {
+          /* the text stays if the shell refuses the clear */
+        }
+        countStat('send', id)
         return true
       }
 
@@ -2691,6 +2870,59 @@ window.__ModuleLoader__.load({
       }
 
       /**
+       * Commit the captured passage as an answer.
+       *
+       * The highlight covers the whole paragraph(s) the selection sits in, and
+       * the selected words become the note itself — the note says "this is the
+       * answer" without the user retyping it.
+       */
+      function markAsAnswer() {
+        const draft = state.annotationDraft
+        if (!draft || typeof draft.quote !== 'string' || draft.quote.trim() === '') return false
+        let quote = draft.quote
+        if (draft.range != null) {
+          try {
+            quote = passagesOfRange(draft.range) || draft.quote
+          } catch {
+            quote = draft.quote
+          }
+        }
+        let anchor = null
+        if (draft.range != null) {
+          try {
+            anchor = anchorFromRange(draft.range, quote)
+          } catch {
+            anchor = null
+          }
+        }
+        if (anchor === null) anchor = anchorFromQuote(quote)
+        if (anchor === null) recordAnchorMiss(quote)
+        // Where the marked words sit inside the highlighted paragraph, in the
+        // same whitespace-free projection the anchor uses. The purple span is
+        // measured from it, so the mark survives a note edit.
+        const packed = packedText(quote)
+        const packedAnswer = packedText(draft.quote)
+        const at = packedAnswer === '' ? -1 : packed.indexOf(packedAnswer)
+        const annotation = {
+          id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+          quote,
+          note: draft.quote,
+          anchor,
+          answer: at === -1 ? true : { start: at, length: packedAnswer.length },
+        }
+        // One answer per passage: marking the same block again replaces the
+        // earlier note instead of stacking an identical highlight.
+        const next = [
+          ...state.annotations.filter((item) => packedText(item.quote) !== packed),
+          annotation,
+        ]
+        clearNativeSelection(draft.quote)
+        commitAnnotations(next, { note: '', error: '' })
+        countStat('annotation')
+        return true
+      }
+
+      /**
        * Add the captured passage with the 同意 / 不同意 answer. A remark typed
        * in the card is kept: the verdict comes first, then the remark.
        */
@@ -2828,14 +3060,13 @@ window.__ModuleLoader__.load({
        * ambiguous one falls through to the recovery pass, which can prove the
        * row is the only carrier.
        */
-      function rangeWithinElement(entry, key, full) {
+      function spanWithinElement(entry, key, full) {
         const packed = packedText(entry.anchor.quote)
         if (packed === '') return null
         const at = full.packed.indexOf(packed)
         if (at === -1) return null
         if (full.packed.indexOf(packed, at + 1) !== -1) return null
-        const range = rangeFromPacked(full, at, at + packed.length)
-        if (range === null) return null
+        if (rangeFromPacked(full, at, at + packed.length) === null) return null
         if (entry.note !== null && typeof entry.note?.id === 'string') {
           resolvedAnchors.set(entry.note.id, {
             key,
@@ -2845,7 +3076,7 @@ window.__ModuleLoader__.load({
             index: at,
           })
         }
-        return range
+        return { start: at, end: at + packed.length }
       }
 
       /** Recompute which spans carry a note and repaint the CSS highlight. */
@@ -2860,6 +3091,7 @@ window.__ModuleLoader__.load({
           const sources = state.annotations
           if (state.quick !== true || (sources.length === 0 && captureDraft === null)) {
             registry.delete(HIGHLIGHT_NAME)
+            registry.delete(ANSWER_HIGHLIGHT)
             registry.delete(CAPTURE_HIGHLIGHT)
             return
           }
@@ -2890,6 +3122,7 @@ window.__ModuleLoader__.load({
           }
           if (byKey.size === 0) {
             registry.delete(HIGHLIGHT_NAME)
+            registry.delete(ANSWER_HIGHLIGHT)
             let painted = false
             const fallback = captureDraft?.range
             try {
@@ -2906,8 +3139,53 @@ window.__ModuleLoader__.load({
           const elements = document.querySelectorAll?.(ANCHOR_SELECTOR) ?? []
           const maps = new Map()
           const ranges = []
+          const answerRanges = []
           const captureRanges = []
           const misses = []
+          /**
+           * Put one note's passage into the paint lists.
+           *
+           * An answer note splits its paragraph around the words that were
+           * marked: the paragraph stays yellow before and after them, and only
+           * that span is purple. Splitting instead of stacking two highlights
+           * keeps the result independent of registry paint order.
+           */
+          function paintNote(entry, full, start, end) {
+            const painted = []
+            const answer = entry.note?.answer
+            const from = typeof answer?.start === 'number' ? answer.start : -1
+            const length = typeof answer?.length === 'number' ? answer.length : 0
+            if (from < 0 || length <= 0) {
+              const range = rangeFromPacked(full, start, end)
+              if (range !== null) {
+                ranges.push(range)
+                painted.push(range)
+              }
+              return painted
+            }
+            const answerStart = Math.max(start, Math.min(start + from, end))
+            const answerEnd = Math.max(answerStart, Math.min(answerStart + length, end))
+            if (answerStart > start) {
+              const range = rangeFromPacked(full, start, answerStart)
+              if (range !== null) {
+                ranges.push(range)
+                painted.push(range)
+              }
+            }
+            if (answerEnd < end) {
+              const range = rangeFromPacked(full, answerEnd, end)
+              if (range !== null) {
+                ranges.push(range)
+                painted.push(range)
+              }
+            }
+            const purple = rangeFromPacked(full, answerStart, answerEnd)
+            if (purple !== null) {
+              answerRanges.push(purple)
+              painted.push(purple)
+            }
+            return painted
+          }
           for (const element of elements) {
             const key = element.getAttribute?.('data-chat-anchor-key')
             const wanted = byKey.get(key)
@@ -2918,21 +3196,25 @@ window.__ModuleLoader__.load({
               maps.set(key, full)
             }
             for (const entry of wanted) {
-              const span = locateAnchor(full, entry.anchor)
-              let range = span === null ? null : rangeFromPacked(full, span.start, span.end)
               // The row is here but the stored offsets drifted: the passage is
               // still inside it, so heal it without searching the transcript.
-              if (range === null) range = rangeWithinElement(entry, key, full)
-              if (range === null) {
+              const span = locateAnchor(full, entry.anchor) ?? spanWithinElement(entry, key, full)
+              if (span === null) {
                 misses.push({ entry, quote: entry.anchor.quote })
                 continue
               }
               if (entry.capture === true) {
+                const range = rangeFromPacked(full, span.start, span.end)
+                if (range === null) {
+                  misses.push({ entry, quote: entry.anchor.quote })
+                  continue
+                }
                 captureRanges.push(range)
                 continue
               }
-              ranges.push(range)
-              highlighted.push({ note: entry.note, range })
+              for (const range of paintNote(entry, full, span.start, span.end)) {
+                highlighted.push({ note: entry.note, range })
+              }
             }
           }
           // A key that names no element is the other half of the same problem:
@@ -2966,14 +3248,15 @@ window.__ModuleLoader__.load({
             // the mark wait for the render that brings its passage back.
             if (holders.length !== 1) continue
             const index = holders[0].full.packed.indexOf(packed)
-            const range = rangeFromPacked(holders[0].full, index, index + packed.length)
-            if (range === null) continue
+            if (index === -1) continue
             if (miss.entry.capture === true) {
-              captureRanges.push(range)
+              const range = rangeFromPacked(holders[0].full, index, index + packed.length)
+              if (range !== null) captureRanges.push(range)
               continue
             }
-            ranges.push(range)
-            highlighted.push({ note: miss.entry.note, range })
+            for (const range of paintNote(miss.entry, holders[0].full, index, index + packed.length)) {
+              highlighted.push({ note: miss.entry.note, range })
+            }
             // Heal the anchor so the next repaint takes the direct path.
             if (miss.entry.note !== null && typeof miss.entry.note?.id === 'string') {
               resolvedAnchors.set(miss.entry.note.id, {
@@ -2990,6 +3273,12 @@ window.__ModuleLoader__.load({
           if (ranges.length === 0) registry.delete(HIGHLIGHT_NAME)
           else if (!sameRanges(registry.get(HIGHLIGHT_NAME), ranges)) {
             registry.set(HIGHLIGHT_NAME, new window.Highlight(...ranges))
+          }
+          // Answer passages keep their own registry, so the stylesheet can give
+          // them a different colour without touching a plain note's mark.
+          if (answerRanges.length === 0) registry.delete(ANSWER_HIGHLIGHT)
+          else if (!sameRanges(registry.get(ANSWER_HIGHLIGHT), answerRanges)) {
+            registry.set(ANSWER_HIGHLIGHT, new window.Highlight(...answerRanges))
           }
           if (captureAnchor === null && captureDraft !== null && captureDraft.range) {
             try {
@@ -3154,46 +3443,40 @@ window.__ModuleLoader__.load({
       }
 
       /**
-       * Viewport box for the selection card: pinned to the pointer that finished
-       * the selection, opened below-right of it when there is room and flipped to
-       * the other side when the viewport edge is near. Without a pointer — or
-       * when the pointer belongs to a click elsewhere — it falls back to the
+       * Viewport box for the selection card.
+       *
+       * A mouse selection ends on the release point, so the card opens above it
+       * with its first button — 定为答案 — centred on that point: the next click
+       * lands without moving the mouse. When the card does not fit above the
+       * point, or the pointer belongs to a click elsewhere, it falls back to the
        * quote box, centred above/below it.
        */
       function popupPosition() {
         const draft = state.annotationDraft
         const width = 340
         const margin = 8
-        const gap = 10
-        const offset = 12
         const approxHeight = 280
+        // Border + padding + half the first button: the button's centre sits
+        // this far inside the card. The card is pinned by its bottom edge, so
+        // the same measure vertically needs no card height.
+        const answerInsetX = 44
+        const answerInsetY = 24
         const vw = viewport().width
-        const vh = viewport().height
         const boxWidth = Math.min(width, vw - margin * 2)
         const rect = draft?.rect ?? null
         const pointer = pointerNearRect(draft?.pointer, rect) ? draft.pointer : null
         const clampX = (value) => Math.max(margin, Math.min(value, vw - boxWidth - margin))
         if (pointer) {
           const { x, y } = pointer
-          const flipLeft = x + offset + boxWidth > vw - margin
-          const leftValue = flipLeft ? clampX(x - offset - boxWidth) : clampX(x + offset)
-          // The card grows out of the point that opened it. Horizontally only:
-          // an upward card is pinned by its bottom edge, so y is always the
-          // anchor line and a vertical origin would move the card on frame one.
-          const origin = {
-            transformOrigin: `${Math.round(Math.max(0, Math.min(x - leftValue, boxWidth)))}px 0px`,
-          }
-          const top = y + offset
-          if (top + approxHeight <= vh - margin) {
-            return { left: `${Math.round(leftValue)}px`, top: `${Math.round(top)}px`, ...origin, transform: 'none' }
-          }
-          // Not enough room below: open above the cursor instead.
-          const aboveTop = Math.max(margin, y - offset)
-          return {
-            left: `${Math.round(leftValue)}px`,
-            top: `${Math.round(aboveTop)}px`,
-            ...origin,
-            transform: 'translateY(-100%)',
+          const leftValue = clampX(x - answerInsetX)
+          const top = y + answerInsetY
+          if (top - approxHeight >= margin) {
+            return {
+              left: `${Math.round(leftValue)}px`,
+              top: `${Math.round(top)}px`,
+              transformOrigin: `${Math.round(Math.max(0, Math.min(x - leftValue, boxWidth)))}px 100%`,
+              transform: 'translateY(-100%)',
+            }
           }
         }
         return placeOverRect(rect, approxHeight)
@@ -3897,7 +4180,9 @@ window.__ModuleLoader__.load({
             : current.label
         commitPresets(
           state.presets.map((preset) =>
-            preset.id === id ? { id, label, text: value, enabled: preset.enabled !== false } : preset,
+            preset.id === id
+              ? { ...preset, id, label, text: value, enabled: preset.enabled !== false }
+              : preset,
           ),
           state.presetId,
         )
@@ -3928,6 +4213,22 @@ window.__ModuleLoader__.load({
         if ((current.enabled !== false) === enabled) return false
         commitPresets(
           state.presets.map((preset) => (preset.id === id ? { ...preset, enabled } : preset)),
+          state.presetId,
+        )
+        return true
+      }
+
+      /**
+       * Pin or unpin one preset on the composer's own left row. Disabled
+       * presets can stay pinned in the record but never render there.
+       */
+      function setPresetPinned(id, value) {
+        const current = presetOf(state.presets, id)
+        if (current === undefined) return false
+        const pinned = value === true
+        if ((current.pinned === true) === pinned) return false
+        commitPresets(
+          state.presets.map((preset) => (preset.id === id ? { ...preset, pinned } : preset)),
           state.presetId,
         )
         return true
@@ -4829,6 +5130,11 @@ window.__ModuleLoader__.load({
         } catch {
           /* no document */
         }
+        if (barInsertTimer !== undefined) {
+          clearTimeout(barInsertTimer)
+          barInsertTimer = undefined
+          barInsertId = ''
+        }
         if (selectionTimer !== undefined) clearTimeout(selectionTimer)
         if (attentionTimer !== undefined) clearTimeout(attentionTimer)
         if (repaintTimer !== undefined) clearTimeout(repaintTimer)
@@ -4839,6 +5145,7 @@ window.__ModuleLoader__.load({
         }
         try {
           window.CSS?.highlights?.delete(HIGHLIGHT_NAME)
+          window.CSS?.highlights?.delete(ANSWER_HIGHLIGHT)
           window.CSS?.highlights?.delete(CAPTURE_HIGHLIGHT)
         } catch {
           /* no highlight registry */
@@ -4855,6 +5162,12 @@ window.__ModuleLoader__.load({
         ask,
         /** Turbo double-click: append when a draft exists, else send. */
         runPreset,
+        /** Append one prompt to the composer draft, on its own line. */
+        insertPreset,
+        /** One press on a bar chip: append, counting the insert unless a second press follows. */
+        appendPrompt,
+        /** Two presses on a bar chip: send the composed draft, clear it on success. */
+        sendDraft,
         setDelivery,
         effectiveDelivery,
         setTurbo,
@@ -4874,6 +5187,8 @@ window.__ModuleLoader__.load({
         /** Enable / disable one prompt without deleting it. */
         setPresetEnabled,
         togglePresetEnabled,
+        /** Pin / unpin one prompt on the composer's own row. */
+        setPresetPinned,
         /** In-window "new prompt" form (title + body). */
         startNudgeDraft,
         cancelNudgeDraft,
@@ -4928,6 +5243,7 @@ window.__ModuleLoader__.load({
         showTip,
         hideTip,
         addAnnotation,
+        markAsAnswer,
         quickReply,
         copyDraftQuote,
         startEditAnnotation,
@@ -4973,7 +5289,7 @@ window.__ModuleLoader__.load({
     }
 
     const CSS = `
-.dsh-nudge-card,.dsh-nudge-pill,.dsh-nudge-settings,.dsh-nudge-popup{--dn-accent:color-mix(in srgb,var(--dsw-static-deepseek-450,#5686fe) 78%,var(--dsw-alias-label-primary,#1a1a1a) 22%);--dn-accent-soft:color-mix(in srgb,var(--dsw-static-deepseek-450,#5686fe) 14%,transparent);--dn-accent-line:color-mix(in srgb,var(--dsw-static-deepseek-450,#5686fe) 38%,transparent);--dn-accent-edge:color-mix(in srgb,var(--dsw-static-deepseek-450,#5686fe) 62%,transparent);--dn-line:var(--dsw-alias-border-l1,rgba(127,127,127,.25));--dn-line-strong:color-mix(in srgb,var(--dsw-alias-label-primary,#1a1a1a) 28%,transparent);--dn-hover:color-mix(in srgb,var(--dsw-alias-label-primary,#1a1a1a) 6%,transparent);--dn-agree:#2e7d32;--dn-note:#8b5cf6;--dn-frame:1px}
+.dsh-nudge-card,.dsh-nudge-pill,.dsh-nudge-settings,.dsh-nudge-popup{--dn-accent:color-mix(in srgb,var(--dsw-static-deepseek-450,#5686fe) 78%,var(--dsw-alias-label-primary,#1a1a1a) 22%);--dn-accent-soft:color-mix(in srgb,var(--dsw-static-deepseek-450,#5686fe) 14%,transparent);--dn-accent-line:color-mix(in srgb,var(--dsw-static-deepseek-450,#5686fe) 38%,transparent);--dn-accent-edge:color-mix(in srgb,var(--dsw-static-deepseek-450,#5686fe) 62%,transparent);--dn-line:var(--dsw-alias-border-l1,rgba(127,127,127,.25));--dn-line-strong:color-mix(in srgb,var(--dsw-alias-label-primary,#1a1a1a) 28%,transparent);--dn-hover:color-mix(in srgb,var(--dsw-alias-label-primary,#1a1a1a) 6%,transparent);--dn-note:#8b5cf6;--dn-frame:1px}
 .dsh-nudge-card{position:fixed;z-index:${Z_INDEX};width:min(304px,calc(100vw - 24px));display:flex;flex-direction:column;border-radius:16px;border:var(--dn-frame) solid var(--dn-accent-edge);background:var(--dsw-alias-bg-layer-1,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);box-shadow:0 1px 2px rgba(15,23,42,.04),0 18px 44px -22px rgba(15,23,42,.3);font:13px/1.55 ui-sans-serif,system-ui,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;overflow:hidden;pointer-events:auto;animation:dsh-nudge-in .18s ease-out}
 @keyframes dsh-nudge-in{from{opacity:0;transform:translateY(-5px) scale(.985)}to{opacity:1;transform:none}}
 .dsh-nudge-title{display:flex;align-items:center;gap:8px;padding:12px 12px 10px 14px;cursor:grab;user-select:none;touch-action:none;border-bottom:1px solid var(--dn-line)}
@@ -5048,7 +5364,9 @@ window.__ModuleLoader__.load({
 .dsh-nudge-ask:focus-visible{outline:2px solid var(--dn-accent-line);outline-offset:2px}
 .dsh-nudge-annotation-quote{font-size:11.5px;line-height:1.5;color:var(--dsw-alias-label-secondary,#5a5a66);white-space:pre-wrap;word-break:break-word;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
 .dsh-nudge-annotation-hint{font-size:11px;line-height:1.5;color:var(--dsw-alias-label-secondary,#5a5a66)}
-.dsh-nudge-popup{position:fixed;z-index:${Z_INDEX + 1};box-sizing:border-box;width:280px;max-width:calc(100vw - 16px);display:flex;flex-direction:column;gap:8px;padding:10px;border-radius:12px;border:1px solid var(--dn-line);background:var(--dsw-alias-bg-layer-1,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);box-shadow:0 10px 30px rgba(0,0,0,.16),0 2px 8px rgba(0,0,0,.08);font:13px/1.45 ui-sans-serif,system-ui,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;pointer-events:auto;opacity:.72;transition:opacity .22s ease;animation:dsh-nudge-popup-in .12s cubic-bezier(.16,1,.3,1)}
+/* 340 is also the width popupPosition()/placeOverRect() lay the card out with:
+   change one and the card drifts off its anchor and past the viewport edge. */
+.dsh-nudge-popup{position:fixed;z-index:${Z_INDEX + 1};box-sizing:border-box;width:340px;max-width:calc(100vw - 16px);display:flex;flex-direction:column;gap:8px;padding:10px;border-radius:12px;border:1px solid var(--dn-line);background:var(--dsw-alias-bg-layer-1,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);box-shadow:0 10px 30px rgba(0,0,0,.16),0 2px 8px rgba(0,0,0,.08);font:13px/1.45 ui-sans-serif,system-ui,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;pointer-events:auto;opacity:.72;transition:opacity .22s ease;animation:dsh-nudge-popup-in .12s cubic-bezier(.16,1,.3,1)}
 .dsh-nudge-popup:hover,.dsh-nudge-popup:focus-within{opacity:1}
 /* The end state stays open on purpose: the card takes the focus in the frame
    it mounts, so :focus-within makes its resting opacity 1 — a fixed
@@ -5057,8 +5375,6 @@ window.__ModuleLoader__.load({
    an upward-opening card. */
 @keyframes dsh-nudge-popup-in{from{opacity:0;scale:.97}}
 @media (prefers-reduced-motion:reduce){.dsh-nudge-popup{animation:none;transition:none}}
-.dsh-nudge-popup-close{position:absolute;top:6px;right:6px;width:22px;height:22px;padding:0;border:0;border-radius:6px;background:transparent;color:var(--dsw-alias-label-secondary,#5a5a66);font:inherit;font-size:16px;line-height:20px;cursor:pointer}
-.dsh-nudge-popup-close:hover{background:var(--dn-hover);color:var(--dsw-alias-label-primary,#1a1a1a)}
 .dsh-nudge-settings-panel{display:flex;flex-direction:column;gap:10px;padding:12px;flex:1 1 auto;min-height:0;max-height:min(520px,72vh);overflow:auto}
 .dsh-nudge-settings-head{display:flex;align-items:center;gap:8px}
 .dsh-nudge-settings-name{font:inherit;font-size:12px;font-weight:600;color:var(--dsw-alias-label-primary,#1a1a1a)}
@@ -5068,15 +5384,19 @@ window.__ModuleLoader__.load({
 .dsh-nudge-popup-row button:focus-visible{outline:2px solid var(--dn-accent-line);outline-offset:2px}
 .dsh-nudge-popup-mic{display:inline-flex;align-items:center;gap:5px;height:26px;padding:0 9px;border:1px solid var(--dn-line);border-radius:999px;background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-secondary,#5a5a66);font:inherit;font-size:11px;line-height:1;cursor:pointer}
 .dsh-nudge-popup-mic-hint{font-size:11px;line-height:1.4;color:var(--dsw-alias-label-secondary,#5a5a66)}
-.dsh-nudge-popup-quick{display:inline-flex;align-items:center;justify-content:center;gap:5px;min-width:0;padding:0 6px}
-.dsh-nudge-popup-quick .emoji{font-size:15px;line-height:1}
-.dsh-nudge-popup-quick:hover{background:var(--dn-hover)}
-.dsh-nudge-popup-quick.agree{border-color:var(--dn-agree);background:var(--dn-agree);color:#fff;font-weight:600}
-.dsh-nudge-popup-quick.agree:hover{filter:brightness(.94)}
-.dsh-nudge-popup-row .dsh-nudge-popup-save{border-color:var(--dn-accent-line);background:var(--dn-accent-soft);color:var(--dn-accent);font-weight:600}
-.dsh-nudge-popup-row .dsh-nudge-popup-save:hover{background:color-mix(in srgb,var(--dn-accent) 20%,transparent)}
-.dsh-nudge-popup-row .dsh-nudge-popup-copy{color:var(--dn-accent)}
-.dsh-nudge-popup-copy[data-copied="true"]{border-color:var(--dn-accent-line);background:var(--dn-accent-soft)}
+/* One action style for the whole card: same height, radius and type, and only
+   one primary. The actions size themselves by their words, so the longer
+   verdict labels stay readable; copying is a utility and sits with the field. */
+.dsh-nudge-popup-field{display:flex;align-items:flex-start;gap:6px}
+.dsh-nudge-popup-field .dsh-nudge-annotation-input{flex:1 1 auto;min-width:0}
+.dsh-nudge-popup-copy{flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;width:34px;height:34px;padding:0;border:1px solid var(--dn-line);border-radius:8px;background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-secondary,#5a5a66);cursor:pointer;transition:color .12s ease,background-color .12s ease,border-color .12s ease}
+.dsh-nudge-popup-copy:hover{color:var(--dn-accent);background:var(--dn-hover)}
+.dsh-nudge-popup-copy:focus-visible{outline:2px solid var(--dn-accent-line);outline-offset:2px}
+.dsh-nudge-popup-copy[data-copied="done"]{color:var(--dn-accent);border-color:var(--dn-accent-line);background:var(--dn-accent-soft)}
+.dsh-nudge-popup-copy[data-copied="failed"]{color:var(--dsw-alias-state-error-primary,#c8433c);border-color:color-mix(in srgb,var(--dsw-alias-state-error-primary,#c8433c) 45%,transparent)}
+.dsh-nudge-popup-row .dsh-nudge-popup-quick:hover{background:var(--dn-hover)}
+.dsh-nudge-popup-row .dsh-nudge-popup-answer{border-color:var(--dn-accent);background:var(--dn-accent);color:var(--dsw-alias-label-primary-inverted,#fff);font-weight:600}
+.dsh-nudge-popup-row .dsh-nudge-popup-answer:hover{filter:brightness(1.06)}
 .dsh-nudge-popup-hint{display:flex;justify-content:space-between;gap:8px;font-size:11px;line-height:1.5;color:var(--dsw-alias-label-secondary,#5a5a66)}
 .dsh-nudge-popup-hint kbd{font:inherit;padding:0 3px;border:1px solid var(--dn-line);border-radius:4px;background:color-mix(in srgb,var(--dsw-alias-label-primary,#1a1a1a) 4%,transparent)}
 /* The in-place note editor: the capture card's shape, hung off the passage.
@@ -5129,6 +5449,9 @@ window.__ModuleLoader__.load({
 @keyframes dsh-nudge-attention{0%{box-shadow:inset 0 0 0 0 var(--dn-accent-line);opacity:0}20%{box-shadow:inset 0 0 0 3px var(--dn-accent-soft);opacity:1}100%{box-shadow:inset 0 0 0 0 transparent;opacity:0}}
 .dsh-nudge-attention-ring{position:absolute;inset:0;border-radius:inherit;pointer-events:none;animation:dsh-nudge-attention .9s ease-out}
 ::highlight(dsh-nudge-notes){background:#fde68a;color:#1f2937}
+/* A passage marked as the answer keeps the note's own purple, on a light tint
+   so the text under it stays readable in the light theme. */
+::highlight(dsh-nudge-answers){background:var(--dsh-nudge-answer-bg,#ddd6fe);color:var(--dsh-nudge-answer-fg,#1f2937)}
 /* Same colours as the browser's own selection on Chromium/Windows, because
    focusing the note field collapses the real selection before it can be kept.
    --dsh-nudge-capture-bg / -fg stay overridable for other platforms/themes. */
@@ -5172,6 +5495,16 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
 .dsh-nudge-toggle-title{font-size:12px;font-weight:600;line-height:1.4;color:var(--dsw-alias-label-primary,#1a1a1a)}
 .dsh-nudge-toggle-desc{font-size:12px;line-height:1.5;color:var(--dsw-alias-label-secondary,#5a5a66)}
 .dsh-nudge-preset-row{display:flex;flex-direction:column;gap:8px;padding:12px;border-radius:12px;border:1px solid var(--dn-line);background:color-mix(in srgb,var(--dsw-alias-label-primary,#1a1a1a) 3%,transparent)}
+/* The prompt list reads as one list, not a stack of cards: rows share the
+   fold's surface and only a hairline separates them. Scoped to preset rows so
+   the idle-line list keeps its own cards. */
+.dsh-nudge-preset-row[data-preset-id]{gap:4px;padding:7px 9px;border:0;border-radius:0;background:transparent;container-type:inline-size}
+.dsh-nudge-preset-row[data-preset-id] + .dsh-nudge-preset-row[data-preset-id]{border-top:1px solid var(--dn-line)}
+/* Row actions are quiet until hovered: two state pills already carry the row's
+   weight, so the pencil and the bin do not need boxes of their own. */
+.dsh-nudge-preset-row[data-preset-id] .dsh-nudge-preset-tools .dsh-nudge-btn.icon{border-color:transparent;background:transparent;color:var(--dsw-alias-label-secondary,#8a8a8a)}
+.dsh-nudge-preset-row[data-preset-id] .dsh-nudge-preset-tools .dsh-nudge-btn.icon:hover{background:var(--dn-hover);color:var(--dsw-alias-label-primary,#1a1a1a)}
+.dsh-nudge-preset-row[data-preset-id] .dsh-nudge-preset-tools .dsh-nudge-btn.icon.danger{color:var(--dsw-alias-state-error-primary,#c8433c)}
 .dsh-nudge-preset-line{display:flex;align-items:center;gap:8px}
 .dsh-nudge-preset-row input{flex:1 1 auto;min-width:0;height:32px;box-sizing:border-box;border:1px solid var(--dn-line);border-radius:9px;background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);font:inherit;font-size:12px;padding:0 10px;transition:border-color .15s ease,box-shadow .15s ease}
 .dsh-nudge-preset-row textarea{width:100%;box-sizing:border-box;min-height:56px;field-sizing:content;max-height:min(320px,40vh);overflow-y:auto;border:1px solid var(--dn-line);border-radius:9px;background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);font:inherit;font-size:12px;line-height:1.55;padding:8px 10px;transition:border-color .15s ease,box-shadow .15s ease}
@@ -5249,7 +5582,7 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
 .dsh-nudge-preset-grip{cursor:grab;padding:2px;border-radius:6px;color:var(--dsw-alias-label-secondary,#8a8a8a);font-size:13px;line-height:1;user-select:none}
 .dsh-nudge-preset-grip:active{cursor:grabbing}
 .dsh-nudge-preset-grip:focus-visible{outline:2px solid var(--dn-accent-line);outline-offset:1px}
-.dsh-nudge-preset-toggle{flex:1 1 auto;min-width:0;display:flex;align-items:center;gap:6px;padding:4px 6px;border:0;border-radius:8px;background:transparent;color:inherit;font:inherit;font-size:12px;text-align:left;cursor:pointer}
+.dsh-nudge-preset-toggle{flex:0 1 auto;min-width:0;margin-right:auto;display:flex;align-items:center;gap:6px;padding:4px 6px;border:0;border-radius:8px;background:transparent;color:inherit;font:inherit;font-size:12px;text-align:left;cursor:pointer}
 .dsh-nudge-preset-toggle:hover{background:var(--dn-hover)}
 .dsh-nudge-preset-toggle:focus-visible{outline:2px solid var(--dn-accent-line);outline-offset:1px}
 .dsh-nudge-preset-toggle svg{flex:0 0 auto;color:var(--dsw-alias-label-secondary,#8a8a8a)}
@@ -5262,11 +5595,16 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
 .dsh-nudge-preset-row.dragging{opacity:.65;border-color:var(--dn-accent-line);box-shadow:0 6px 18px rgba(0,0,0,.08)}
 .dsh-nudge-preset-row.disabled{opacity:.72}
 .dsh-nudge-preset-row.disabled .dsh-nudge-preset-name{color:var(--dsw-alias-label-secondary,#8a8a8a);font-weight:500}
-.dsh-nudge-preset-state{flex:0 0 auto;height:22px;padding:0 8px;border-radius:999px;border:1px solid var(--dn-line);background:transparent;color:var(--dsw-alias-label-secondary,#8a8a8a);font:inherit;font-size:11px;line-height:1;cursor:pointer;white-space:nowrap;transition:background .15s ease,color .15s ease,border-color .15s ease}
-.dsh-nudge-preset-state:hover{background:var(--dn-hover)}
-.dsh-nudge-preset-state.on{background:var(--dn-accent-soft);border-color:var(--dn-accent-line);color:var(--dn-accent)}
-.dsh-nudge-preset-state:focus-visible{outline:2px solid var(--dn-accent-line);outline-offset:1px}
+/* Two places one prompt can live: the window's prompt row and the row under
+   the input box. Same pill, same height; filled means "shown there". */
+.dsh-nudge-preset-place{flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;height:24px;padding:0 9px;border-radius:999px;border:1px solid var(--dn-line);background:transparent;color:var(--dsw-alias-label-secondary,#8a8a8a);font:inherit;font-size:11.5px;line-height:1;white-space:nowrap;cursor:pointer;transition:background .15s ease,color .15s ease,border-color .15s ease}
+.dsh-nudge-preset-place:hover{background:var(--dn-hover)}
+.dsh-nudge-preset-place.on{background:var(--dn-accent-soft);border-color:var(--dn-accent-line);color:var(--dn-accent)}
+.dsh-nudge-preset-place:focus-visible{outline:2px solid var(--dn-accent-line);outline-offset:1px}
+.dsh-nudge-place-short{display:none}
+@container (max-width:520px){.dsh-nudge-place-long{display:none}.dsh-nudge-place-short{display:inline}}
 .dsh-nudge-preset-body{margin:0 6px 2px 30px;padding:8px 10px;border-radius:9px;background:color-mix(in srgb,var(--dsw-alias-label-primary,#1a1a1a) 4%,transparent);color:var(--dsw-alias-label-secondary,#555);font-size:12px;line-height:1.6;white-space:pre-wrap;word-break:break-word;max-height:min(280px,36vh);overflow-y:auto}
+.dsh-nudge-preset-text{white-space:pre-wrap;word-break:break-word}
 .dsh-nudge-preset-editor{display:flex;flex-direction:column;gap:8px;padding:2px 6px 2px 30px}
 .dsh-nudge-preset-editor input{flex:0 0 auto}
 .dsh-nudge-preset-empty{padding:14px;border:1px dashed var(--dn-line);border-radius:12px;color:var(--dsw-alias-label-secondary,#8a8a8a);font-size:12px;line-height:1.6;text-align:center}
@@ -5348,8 +5686,9 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
       }
 
       /**
-       * The shell both annotation cards share: the floating box, its close
-       * button and the dialog semantics. The bodies differ; the frame does not.
+       * The shell both annotation cards share: the floating box and the dialog
+       * semantics. Escape in the field leaves, so the card carries no close
+       * button; the bodies differ, the frame does not.
        */
       function popupFrame(props) {
         const { t } = props
@@ -5362,18 +5701,6 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
             role: 'dialog',
             'aria-label': t('annotationsTitle'),
           },
-          h(
-            'button',
-            {
-              key: 'close',
-              type: 'button',
-              className: 'dsh-nudge-popup-close',
-              title: `${t('dismissAnnotation')} (Esc)`,
-              'aria-label': t('dismissAnnotation'),
-              onClick: props.onClose,
-            },
-            '×',
-          ),
           ...(props.children ?? []),
         )
       }
@@ -5405,29 +5732,88 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
         })
       }
 
+      /** Copy the captured passage; the icon reports the result in place. */
+      const copyIcon = h(
+        'svg',
+        { width: 14, height: 14, viewBox: '0 0 16 16', fill: 'none', 'aria-hidden': true },
+        h('rect', {
+          x: 5.4,
+          y: 5.4,
+          width: 7.4,
+          height: 7.4,
+          rx: 1.6,
+          stroke: 'currentColor',
+          strokeWidth: 1.3,
+        }),
+        h('path', {
+          d: 'M10.6 5.4V4.2A1.6 1.6 0 0 0 9 2.6H4.2A1.6 1.6 0 0 0 2.6 4.2V9c0 .9.7 1.6 1.6 1.6h1.2',
+          stroke: 'currentColor',
+          strokeWidth: 1.3,
+          strokeLinecap: 'round',
+        }),
+      )
+      const copiedIcon = h(
+        'svg',
+        { width: 14, height: 14, viewBox: '0 0 16 16', fill: 'none', 'aria-hidden': true },
+        h('path', {
+          d: 'm3.4 8.4 3 3 6.2-6.4',
+          stroke: 'currentColor',
+          strokeWidth: 1.6,
+          strokeLinecap: 'round',
+          strokeLinejoin: 'round',
+        }),
+      )
+      const copyFailedIcon = h(
+        'svg',
+        { width: 14, height: 14, viewBox: '0 0 16 16', fill: 'none', 'aria-hidden': true },
+        h('path', {
+          d: 'M4.4 4.4l7.2 7.2M11.6 4.4l-7.2 7.2',
+          stroke: 'currentColor',
+          strokeWidth: 1.6,
+          strokeLinecap: 'round',
+        }),
+      )
+
       /**
-       * The selection card: the note field, the two verdicts, save and copy.
-       * It deliberately does not repeat the quoted passage; the highlight is
-       * where the passage lives.
+       * The selection card: the note field (with the copy icon on its right),
+       * the answer shortcut, save and the two verdicts. It deliberately does
+       * not repeat the quoted passage; the highlight is where the passage
+       * lives.
        */
       function CaptureCard(props) {
         const { t } = props
+        const copy = props.copy ?? ''
         return popupFrame({
           key: props.key,
           t,
           style: props.style,
-          onClose: props.onDismiss,
           children: [
-            noteField({
-              t,
-              inputRef: props.inputRef,
-              rows: 1,
-              className: 'dsh-nudge-annotation-input',
-              value: props.note,
-              onChange: props.onNote,
-              onSubmit: props.onSubmit,
-              onDismiss: props.onDismiss,
-            }),
+            h(
+              'div',
+              { key: 'field', className: 'dsh-nudge-popup-field' },
+              noteField({
+                t,
+                inputRef: props.inputRef,
+                rows: 1,
+                className: 'dsh-nudge-annotation-input',
+                value: props.note,
+                onChange: props.onNote,
+                onSubmit: props.onSubmit,
+                onDismiss: props.onDismiss,
+              }),
+              h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'dsh-nudge-popup-copy',
+                  title: copy === 'done' ? t('copiedShort') : copy === 'failed' ? t('copyFailedShort') : t('copyHint'),
+                  'aria-label': t('copyHint'),
+                  'data-copied': copy === '' ? undefined : copy,
+                  onClick: props.onCopy,
+                },
+                copy === 'done' ? copiedIcon : copy === 'failed' ? copyFailedIcon : copyIcon,
+              ),
+            ),
             h(
               'div',
               { key: 'actions', className: 'dsh-nudge-popup-row' },
@@ -5435,23 +5821,12 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
                 'button',
                 {
                   type: 'button',
-                  className: 'dsh-nudge-popup-quick agree',
-                  title: t('agree'),
-                  'aria-label': t('agree'),
-                  onClick: props.onAgree,
+                  className: 'dsh-nudge-popup-answer',
+                  title: t('asAnswerHint'),
+                  'aria-label': t('asAnswerHint'),
+                  onClick: props.onAnswer,
                 },
-                h('span', { className: 'emoji', 'aria-hidden': true }, '👍'),
-              ),
-              h(
-                'button',
-                {
-                  type: 'button',
-                  className: 'dsh-nudge-popup-quick',
-                  title: t('disagree'),
-                  'aria-label': t('disagree'),
-                  onClick: props.onDisagree,
-                },
-                h('span', { className: 'emoji', 'aria-hidden': true }, '👎'),
+                t('asAnswer'),
               ),
               h(
                 'button',
@@ -5467,12 +5842,23 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
                 'button',
                 {
                   type: 'button',
-                  className: 'dsh-nudge-popup-copy',
-                  title: t('copyHint'),
-                  'data-copied': props.copied ? 'true' : undefined,
-                  onClick: props.onCopy,
+                  className: 'dsh-nudge-popup-quick',
+                  title: t('agreeThis'),
+                  'aria-label': t('agreeThis'),
+                  onClick: props.onAgree,
                 },
-                props.copyLabel,
+                t('agreeThis'),
+              ),
+              h(
+                'button',
+                {
+                  type: 'button',
+                  className: 'dsh-nudge-popup-quick',
+                  title: t('disagreeThis'),
+                  'aria-label': t('disagreeThis'),
+                  onClick: props.onDisagree,
+                },
+                t('disagreeThis'),
               ),
             ),
           ],
@@ -5491,7 +5877,6 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
           t,
           style: props.style,
           className: 'dsh-nudge-edit-popup',
-          onClose: props.onDismiss,
           children: [
             h('div', { key: 'quote', className: 'dsh-nudge-annotation-quote dsh-nudge-edit-quote' }, props.quote),
             noteField({
@@ -6197,12 +6582,6 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
             copyFlashTimer.current = window.setTimeout(() => setCopyFlash(''), 1400)
           })
         }
-        const copyLabel =
-          copyFlash === 'done'
-            ? t('copiedShort')
-            : copyFlash === 'failed'
-              ? t('copyFailedShort')
-              : t('copyQuote')
         const popup =
           state.quick && draft !== null && state.annotationCardHidden !== true
             ? CaptureCard({
@@ -6211,12 +6590,12 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
                 style: runtime.popupPosition(),
                 note: state.annotationNote,
                 inputRef: popupInputRef,
-                copied: copyFlash === 'done',
-                copyLabel,
+                copy: copyFlash,
                 onNote: (value) => runtime.setAnnotationNote(value),
                 onSubmit: () => runtime.addAnnotation(),
                 onDismiss: () => runtime.dismissAnnotationDraft(),
                 onCopy: copyQuote,
+                onAnswer: () => runtime.markAsAnswer(),
                 onAgree: () => runtime.quickReply('agree'),
                 onDisagree: () => runtime.quickReply('disagree'),
               })
@@ -7187,6 +7566,7 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
         }
 
         const enabled = preset.enabled !== false
+        const placed = enabled || preset.pinned === true
 
         /**
          * Live reorder while the pointer travels: the dragged row trades slots
@@ -7289,17 +7669,37 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
               'button',
               {
                 type: 'button',
-                className: `dsh-nudge-preset-state${enabled ? ' on' : ''}`,
-                title: enabled ? t('presetEnabledHint') : t('presetDisabledHint'),
+                className: `dsh-nudge-preset-place${enabled ? ' on' : ''}`,
+                'data-place': 'window',
+                title: enabled ? t('placeWindowHint') : t('placeWindowOffHint'),
                 role: 'switch',
                 'aria-checked': enabled ? 'true' : 'false',
-                'aria-label': enabled ? t('presetEnabledHint') : t('presetDisabledHint'),
+                'aria-label': t('placeWindow'),
                 onClick: () => {
                   runtime.togglePresetEnabled(preset.id)
                   onError('')
                 },
               },
-              enabled ? t('presetEnabled') : t('presetDisabled'),
+              h('span', { className: 'dsh-nudge-place-long' }, t('placeWindow')),
+              h('span', { className: 'dsh-nudge-place-short', 'aria-hidden': 'true' }, t('placeWindowShort')),
+            ),
+            h(
+              'button',
+              {
+                type: 'button',
+                className: `dsh-nudge-preset-place${preset.pinned === true ? ' on' : ''}`,
+                'data-place': 'input',
+                title: t('placeInputHint'),
+                role: 'switch',
+                'aria-checked': preset.pinned === true ? 'true' : 'false',
+                'aria-label': t('placeInput'),
+                onClick: () => {
+                  runtime.setPresetPinned(preset.id, preset.pinned !== true)
+                  onError('')
+                },
+              },
+              h('span', { className: 'dsh-nudge-place-long' }, t('placeInput')),
+              h('span', { className: 'dsh-nudge-place-short', 'aria-hidden': 'true' }, t('placeInputShort')),
             ),
             h(
               'button',
@@ -7337,7 +7737,7 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
 
         const body =
           open && !editing
-            ? h('div', { className: 'dsh-nudge-preset-body' }, preset.text)
+            ? h('div', { className: 'dsh-nudge-preset-body' }, h('div', { className: 'dsh-nudge-preset-text' }, preset.text))
             : null
 
         const editor = editing
@@ -7385,7 +7785,7 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
         return h(
           'div',
           {
-            className: `dsh-nudge-preset-row${editing ? ' editing' : ''}${enabled ? '' : ' disabled'}`,
+            className: `dsh-nudge-preset-row${editing ? ' editing' : ''}${placed ? '' : ' disabled'}`,
             'data-preset-id': preset.id,
             'data-open': open ? 'true' : 'false',
             onDragOver: dragOverRow,
@@ -8367,6 +8767,116 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
     }
 
     // ---------------------------------------------------------------------
+    // input bar
+    // ---------------------------------------------------------------------
+
+    /** How many pinned prompts the bar shows before it folds the rest. */
+    const MAX_BAR_PROMPTS = 4
+
+    /**
+     * Style for the pinned prompts. It rides the entry itself: the bar lives in
+     * the shell's input row, outside the window's own stylesheet.
+     */
+    const INPUT_BAR_CSS = `
+.dsh-nudge-input-bar{display:inline-flex;align-items:center;gap:4px;min-width:0}
+.dsh-nudge-bar-chip{max-width:9em;height:24px;padding:0 8px;border:1px solid var(--dsw-alias-border-l1,rgba(127,127,127,.25));border-radius:999px;background:transparent;color:var(--dsw-alias-label-secondary,#5a5a66);font:inherit;font-size:12px;line-height:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer}
+.dsh-nudge-bar-chip:hover{background:var(--dn-hover,rgba(127,127,127,.12));color:var(--dsw-alias-label-primary,#1a1a1a)}
+.dsh-nudge-bar-chip:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#5686fe);outline-offset:2px}
+.dsh-nudge-bar-more{position:relative;display:inline-flex}
+.dsh-nudge-bar-more .dsh-nudge-bar-menu{display:none}
+.dsh-nudge-bar-more:hover .dsh-nudge-bar-menu,.dsh-nudge-bar-more:focus-within .dsh-nudge-bar-menu{display:flex}
+.dsh-nudge-bar-menu{position:absolute;left:0;bottom:calc(100% + 6px);z-index:60;flex-direction:column;min-width:132px;max-height:240px;overflow:auto;padding:4px;border:1px solid var(--dsw-alias-border-l1,rgba(127,127,127,.25));border-radius:10px;background:var(--dsw-alias-bg-layer-1,#fff);box-shadow:0 10px 30px rgba(0,0,0,.16)}
+.dsh-nudge-bar-menu-item{height:28px;padding:0 8px;border:0;border-radius:6px;background:transparent;color:var(--dsw-alias-label-primary,#1a1a1a);font:inherit;font-size:12px;line-height:1;text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer}
+.dsh-nudge-bar-menu-item:hover{background:var(--dn-hover,rgba(127,127,127,.12))}
+`
+
+    /**
+     * Pinned prompts on the composer's own left row. A click appends the prompt
+     * to the draft on a new line; the bar never sends and never moves the window.
+     * @param runtime - the window runtime.
+     * @returns the slot component.
+     */
+    function makeInputBar(runtime) {
+      const useSyncExternalStore =
+        React.useSyncExternalStore ??
+        function useSyncExternalStoreFallback(subscribe, getSnapshot) {
+          return getSnapshot()
+        }
+      return function NudgeInputBar() {
+        const state = useSyncExternalStore(runtime.subscribe, runtime.getSnapshot, runtime.getSnapshot)
+        const presets = Array.isArray(state.presets) ? state.presets : []
+        const pinned = presets.filter((preset) => preset.pinned === true)
+        if (pinned.length === 0) return null
+        const shown = pinned.slice(0, MAX_BAR_PROMPTS)
+        const rest = pinned.slice(MAX_BAR_PROMPTS)
+        // Keeping the press from moving focus keeps the caret and the native
+        // selection in the composer while the click lands.
+        const keepFocus = (event) => {
+          if (event && typeof event.preventDefault === 'function') event.preventDefault()
+        }
+        const chip = (preset) =>
+          h(
+            'button',
+            {
+              key: preset.id,
+              type: 'button',
+              className: 'dsh-nudge-bar-chip',
+              title: preset.text,
+              onMouseDown: keepFocus,
+              // detail is 2 on the second press of a double click: send the
+              // draft the first press already composed instead of appending twice.
+              onClick: (event) => {
+                if (Number(event?.detail) >= 2) runtime.sendDraft(preset.id)
+                else runtime.appendPrompt(preset.id)
+              },
+            },
+            preset.label,
+          )
+        return h(
+          'div',
+          { className: 'dsh-nudge-input-bar' },
+          h('style', { key: 'dsh-nudge-bar-css' }, INPUT_BAR_CSS),
+          ...shown.map(chip),
+          rest.length === 0
+            ? null
+            : h(
+                'span',
+                { key: 'more', className: 'dsh-nudge-bar-more' },
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    className: 'dsh-nudge-bar-chip',
+                    'aria-haspopup': 'menu',
+                    'aria-label': runtime.text('morePrompts'),
+                    onMouseDown: keepFocus,
+                  },
+                  runtime.text('morePrompts'),
+                ),
+                h(
+                  'div',
+                  { className: 'dsh-nudge-bar-menu', role: 'menu' },
+                  ...rest.map((preset) =>
+                    h(
+                      'button',
+                      {
+                        key: preset.id,
+                        type: 'button',
+                        role: 'menuitem',
+                        className: 'dsh-nudge-bar-menu-item',
+                        title: preset.text,
+                        onClick: () => runtime.insertPreset(preset.id),
+                      },
+                      preset.label,
+                    ),
+                  ),
+                ),
+              ),
+        )
+      }
+    }
+
+    // ---------------------------------------------------------------------
     // module
     // ---------------------------------------------------------------------
 
@@ -8428,6 +8938,17 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
             ctx.slots.register({ name: COMPOSER_SLOT, id: ENTRY, order: 70 }, ComposerBridge),
           ),
         'dsh-nudge: composer bridge',
+      )
+
+      // The pinned prompts ride the input bar's own left row, next to the
+      // attach mark and the permission chip (dsh-vim uses the same seat).
+      const InputBar = makeInputBar(runtime)
+      ctx.effect(
+        () =>
+          ctx.slots.inject(INPUT_BAR_SLOT, () =>
+            ctx.slots.register({ name: INPUT_BAR_SLOT, id: ENTRY, order: 60 }, InputBar),
+          ),
+        'dsh-nudge: input bar',
       )
 
       // Debug/test handle: scripts/check-client.mjs drives this without a renderer.
