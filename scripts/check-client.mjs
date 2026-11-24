@@ -71,13 +71,17 @@ function expandTree(node) {
   check('overlay slot injected', booted.injects.includes('shell.overlay'), true)
   check('settings slot injected', booted.injects.includes('settings.section'), true)
   check('composer slot injected', booted.injects.includes('conversation.input.overlay'), true)
-  check('three slot entries', booted.registrations.length, 3)
+  check('four slot entries', booted.registrations.length, 4)
+  check('input bar slot injected', booted.injects.includes('conversation.input.left'), true)
   const overlay = booted.registrations.find((item) => item.entry.name === 'shell.overlay')
   const settings = booted.registrations.find((item) => item.entry.name === 'settings.section')
   const bridge = booted.registrations.find((item) => item.entry.name === 'conversation.input.overlay')
+  const inputBar = booted.registrations.find((item) => item.entry.name === 'conversation.input.left')
   check('overlay entry id', overlay?.entry.id, 'dsh-nudge')
   check('settings entry id', settings?.entry.id, 'dsh-nudge')
   check('composer bridge entry id', bridge?.entry.id, 'dsh-nudge')
+  check('input bar entry id', inputBar?.entry.id, 'dsh-nudge')
+  check('input bar renders nothing while nothing is pinned', inputBar?.Component?.({}), null)
   check('composer bridge renders no DOM', bridge?.Component?.({}), null)
   check('settings label is lazy and localized', typeof settings?.entry.label, 'function')
   includes('settings label text', settings?.entry.label?.(), '状态')
@@ -747,7 +751,13 @@ function expandTree(node) {
   const settings = booted.registrations.find((item) => item.entry.name === 'settings.section').Component
   const tree = () => expandTree(settings())
   check('every preset starts enabled', runtime.getSnapshot().presets.every((preset) => preset.enabled !== false), true)
-  check('the settings row offers a state switch', (findAllByClass(tree(), 'dsh-nudge-preset-state') ?? []).length, 3)
+  const places = findAllByClass(tree(), 'dsh-nudge-preset-place') ?? []
+  check('the settings row offers two place switches', places.length, 6)
+  check(
+    'the places are the window and the input',
+    places.map((node) => node.props?.['data-place']).join(','),
+    'window,input,window,input,window,input',
+  )
 
   const target = runtime.getSnapshot().presets[1].id
   runtime.setPreset(target)
@@ -2457,6 +2467,101 @@ function countedFlowItem(key, text, counter) {
 }
 
 // --- turbo mode: no primary button, double-click runs a prompt ----------
+
+
+{
+  // Pinned prompts ride the composer's own left row: one click appends the
+  // prompt to the draft on a new line; the floating window is not involved.
+  const booted = await boot({})
+  const first = booted.runtime.getSnapshot().presets[0]
+  check('input bar: pinning accepted', booted.runtime.setPresetPinned(first.id, true), true)
+  check('input bar: pin state stored', booted.runtime.getSnapshot().presets[0].pinned, true)
+
+  const entry = booted.registrations.find((item) => item.entry.name === 'conversation.input.left')
+  check('input bar: the slot entry is registered', Boolean(entry), true)
+  const bar = entry.Component()
+  const chips = findAllByClass(bar, 'dsh-nudge-bar-chip')
+  check('input bar: the pinned prompt is a chip', chips[0]?.children?.[0], first.label)
+
+  const writes = []
+  booted.runtime.attachComposer({ readDraft: () => '已有内容', setDraft: (value) => writes.push(value) })
+  chips[0]?.props?.onClick?.()
+  check('input bar: one click appends on a new line', writes[0], '已有内容\n' + first.text)
+
+  check('input bar: the window place does not gate the bar', booted.runtime.setPresetEnabled(first.id, false), true)
+  check('input bar: a window-off prompt stays in the bar', Boolean(findByClass(entry.Component(), 'dsh-nudge-bar-chip')), true)
+  check('input bar: unpinning accepted', booted.runtime.setPresetPinned(first.id, false), true)
+  check('input bar: with both places off nothing renders', entry.Component(), null)
+  check('input bar: window place back on', booted.runtime.setPresetEnabled(first.id, true), true)
+
+  // Five pinned prompts: four chips plus the folded rest.
+  for (const label of ['临时甲', '临时乙']) {
+    const added = booted.runtime.addPreset(label, '内容' + label)
+    if (added.ok) booted.runtime.setPresetPinned(added.id, true)
+  }
+  for (const preset of booted.runtime.getSnapshot().presets.slice(0, 5)) {
+    booted.runtime.setPresetPinned(preset.id, true)
+  }
+  const pinned = booted.runtime.getSnapshot().presets.filter((item) => item.pinned === true)
+  const full = entry.Component()
+  check('input bar: four chips plus the more button', (findAllByClass(full, 'dsh-nudge-bar-chip') ?? []).length, 5)
+  check(
+    'input bar: the rest fold into a menu',
+    (findAllByClass(full, 'dsh-nudge-bar-menu-item') ?? []).length,
+    pinned.length - 4,
+  )
+}
+
+{
+  const booted = await boot({})
+  const settings = booted.registrations.find((item) => item.entry.name === 'settings.section').Component
+  const id = booted.runtime.getSnapshot().presets[0].id
+  booted.runtime.togglePresetOpen(id)
+  const tree = expandTree(settings())
+  const row = findByProp(tree, 'data-preset-id', id)
+  const place = (findAllByClass(row, 'dsh-nudge-preset-place') ?? []).find(
+    (item) => item.props?.['data-place'] === 'input',
+  )
+  check('settings: the row offers an input-place switch', Boolean(place), true)
+  place?.props?.onClick?.()
+  check('settings: the switch pins the preset', booted.runtime.getSnapshot().presets[0].pinned, true)
+  const sheet = String(findAllByTag(tree, 'style')?.[0]?.children?.[0] ?? '')
+  check('settings: narrow rows keep the places as glyphs', sheet.includes('@container (max-width:520px)'), true)
+}
+
+
+{
+  // One press appends; the second press of a double click sends the composed
+  // draft and clears it. The pair counts as one send, not an insert plus one.
+  const booted = await boot({})
+  booted.sessionsList.set({ ids: ['A'], byId: { A: { title: '会话 A', retainedBy: { mainView: 1 } } } })
+  await tick()
+  const preset = booted.runtime.getSnapshot().presets[0]
+  booted.runtime.setPresetPinned(preset.id, true)
+  let draft = '已有内容'
+  booted.runtime.attachComposer({
+    readDraft: () => draft,
+    setDraft: (value) => {
+      draft = value
+    },
+  })
+  const entry = booted.registrations.find((item) => item.entry.name === 'conversation.input.left')
+  const chip = findAllByClass(entry.Component(), 'dsh-nudge-bar-chip')[0]
+  chip?.props?.onClick?.({ detail: 1 })
+  check('bar: one press appends', draft, '已有内容\n' + preset.text)
+  chip?.props?.onClick?.({ detail: 2 })
+  check(
+    'bar: two presses send the whole draft',
+    booted.calls.prompt[0]?.request?.content?.[0]?.text,
+    '已有内容\n' + preset.text,
+  )
+  check('bar: the draft is cleared after sending', draft, '')
+  await sleep(320)
+  const stats = JSON.parse(booted.localStorage.getItem('dsh-nudge:stats') ?? '{}')
+  const today = Object.keys(stats.days ?? {}).sort().at(-1)
+  check('bar: the pair counts one send', stats.days?.[today]?.send, 1)
+  check('bar: the pair counts no insert', stats.days?.[today]?.insert, undefined)
+}
 
 {
   const booted = await boot({})

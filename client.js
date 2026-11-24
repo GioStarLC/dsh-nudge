@@ -32,6 +32,11 @@ window.__ModuleLoader__.load({
      * the draft without touching the editor DOM.
      */
     const COMPOSER_SLOT = 'conversation.input.overlay'
+    /**
+     * The composer's own left row: the seat shared by the attach mark, the
+     * permission chip and the pinned prompts.
+     */
+    const INPUT_BAR_SLOT = 'conversation.input.left'
     const ENTRY = 'dsh-nudge'
     const UI_KEY = 'dsh-nudge:ui'
     const DELIVERY_KEY = 'dsh-nudge:delivery'
@@ -302,10 +307,14 @@ window.__ModuleLoader__.load({
       resetPresets: '恢复默认',
       deletePreset: '删除',
       presetCount: '共 {n} 条',
-      presetEnabled: '已启用',
-      presetDisabled: '已停用',
-      presetEnabledHint: '已启用：显示在窗口的快捷输入里',
-      presetDisabledHint: '已停用：保留在设置里，不在窗口显示',
+      placeWindow: '悬浮窗',
+      placeWindowShort: '窗',
+      placeWindowHint: '显示在悬浮窗的快捷输入里',
+      placeWindowOffHint: '不在悬浮窗里显示；仍可放到输入框下面',
+      placeInput: '输入框',
+      placeInputShort: '框',
+      placeInputHint: '显示在输入框下面那一行，点一下写进输入框',
+      morePrompts: '更多',
       presetTextRequired: '内容不能为空。',
       expandAllPresets: '全部展开',
       collapseAllPresets: '全部折叠',
@@ -478,10 +487,14 @@ window.__ModuleLoader__.load({
       resetPresets: 'Reset defaults',
       deletePreset: 'Delete',
       presetCount: '{n} total',
-      presetEnabled: 'Enabled',
-      presetDisabled: 'Disabled',
-      presetEnabledHint: 'Enabled: shown in the window quick input',
-      presetDisabledHint: 'Disabled: kept in settings, hidden from the window',
+      placeWindow: 'Window',
+      placeWindowShort: 'W',
+      placeWindowHint: 'Shown among the window’s quick inputs',
+      placeWindowOffHint: 'Hidden from the window; can still sit under the input',
+      placeInput: 'Input',
+      placeInputShort: 'I',
+      placeInputHint: 'Shown on the row under the input; one click writes it into the box',
+      morePrompts: 'More',
       presetTextRequired: 'The text cannot be empty.',
       expandAllPresets: 'Expand all',
       collapseAllPresets: 'Collapse all',
@@ -1346,6 +1359,7 @@ window.__ModuleLoader__.load({
         label: lang === 'zh' ? preset.labelZh : preset.labelEn,
         text: preset.text,
         enabled: true,
+        pinned: false,
       }))
     }
 
@@ -1389,6 +1403,7 @@ window.__ModuleLoader__.load({
           label: rawLabel.length > 0 ? rawLabel : text.slice(0, 8),
           text,
           enabled: item.enabled !== false,
+          pinned: item.pinned === true,
         })
       }
       return list
@@ -2224,6 +2239,12 @@ window.__ModuleLoader__.load({
        * for the current draft; the plugin never touches the editor DOM.
        */
       let composer
+      /**
+       * A bar press counts its insert only when no second press follows: the
+       * pair is one send, not an insert plus a send.
+       */
+      let barInsertTimer
+      let barInsertId = ''
 
       /** The focused composer editor element, when the caret is inside it. */
       function composerNode() {
@@ -2286,13 +2307,13 @@ window.__ModuleLoader__.load({
        * The caret ends up past the written text; existing content is kept and
        * separated by one newline (a blank draft gets no leading newline).
        */
-      function insertPreset() {
+      function insertPreset(id, count = true) {
         const handle = composer
         if (handle === undefined || typeof handle.setDraft !== 'function') {
           setState({ note: text('insertUnavailable'), error: '' })
           return false
         }
-        const preset = activePreset()
+        const preset = id === undefined ? activePreset() : presetOf(state.presets, id)
         if (!preset) return false
         let draft = ''
         try {
@@ -2313,7 +2334,70 @@ window.__ModuleLoader__.load({
           return false
         }
         setState({ note: '', error: '' })
-        countStat('insert', preset.id)
+        if (count === true) countStat('insert', preset.id)
+        return true
+      }
+
+      /**
+       * A single press on a pinned prompt: append it now, and count the insert
+       * only if the press is not followed by the second half of a double click.
+       */
+      function appendPrompt(id) {
+        if (barInsertTimer !== undefined) {
+          clearTimeout(barInsertTimer)
+          barInsertTimer = undefined
+          if (barInsertId !== '') countStat('insert', barInsertId)
+          barInsertId = ''
+        }
+        if (!insertPreset(id, false)) return false
+        barInsertId = id
+        barInsertTimer = setTimeout(() => {
+          barInsertTimer = undefined
+          const pending = barInsertId
+          barInsertId = ''
+          if (pending !== '') countStat('insert', pending)
+        }, 260)
+        return true
+      }
+
+      /**
+       * A double press on a pinned prompt: send the draft the first press
+       * composed. That press's insert count is dropped, so the pair counts as
+       * one send; a failed send keeps the draft as it was.
+       */
+      function sendDraft(id) {
+        const handle = composer
+        if (handle === undefined || typeof handle.setDraft !== 'function') {
+          setState({ note: text('insertUnavailable'), error: '' })
+          return false
+        }
+        if (barInsertTimer !== undefined) {
+          clearTimeout(barInsertTimer)
+          barInsertTimer = undefined
+          barInsertId = ''
+        }
+        const preset = presetOf(state.presets, id)
+        let draft = ''
+        try {
+          draft = handle.readDraft?.() ?? ''
+        } catch {
+          draft = ''
+        }
+        if (typeof draft !== 'string') draft = ''
+        const body = preset?.text ?? ''
+        // The first press writes through the shell's input store; if that write
+        // has not reached the reader yet, compose it here so the send is whole.
+        if (body !== '' && !draft.replace(/\s+$/, '').endsWith(body.trim())) {
+          draft = draft.trim() === '' ? body : `${draft}${draft.endsWith('\n') ? '' : '\n'}${body}`
+        }
+        if (draft.trim() === '') return false
+        if (!deliver(draft)) return false
+        try {
+          handle.setDraft('')
+        } catch {
+          /* the text stays if the shell refuses the clear */
+        }
+        countStat('send', id)
         return true
       }
 
@@ -4112,7 +4196,9 @@ window.__ModuleLoader__.load({
             : current.label
         commitPresets(
           state.presets.map((preset) =>
-            preset.id === id ? { id, label, text: value, enabled: preset.enabled !== false } : preset,
+            preset.id === id
+              ? { ...preset, id, label, text: value, enabled: preset.enabled !== false }
+              : preset,
           ),
           state.presetId,
         )
@@ -4143,6 +4229,22 @@ window.__ModuleLoader__.load({
         if ((current.enabled !== false) === enabled) return false
         commitPresets(
           state.presets.map((preset) => (preset.id === id ? { ...preset, enabled } : preset)),
+          state.presetId,
+        )
+        return true
+      }
+
+      /**
+       * Pin or unpin one preset on the composer's own left row. Disabled
+       * presets can stay pinned in the record but never render there.
+       */
+      function setPresetPinned(id, value) {
+        const current = presetOf(state.presets, id)
+        if (current === undefined) return false
+        const pinned = value === true
+        if ((current.pinned === true) === pinned) return false
+        commitPresets(
+          state.presets.map((preset) => (preset.id === id ? { ...preset, pinned } : preset)),
           state.presetId,
         )
         return true
@@ -5044,6 +5146,11 @@ window.__ModuleLoader__.load({
         } catch {
           /* no document */
         }
+        if (barInsertTimer !== undefined) {
+          clearTimeout(barInsertTimer)
+          barInsertTimer = undefined
+          barInsertId = ''
+        }
         if (selectionTimer !== undefined) clearTimeout(selectionTimer)
         if (attentionTimer !== undefined) clearTimeout(attentionTimer)
         if (repaintTimer !== undefined) clearTimeout(repaintTimer)
@@ -5071,6 +5178,12 @@ window.__ModuleLoader__.load({
         ask,
         /** Turbo double-click: append when a draft exists, else send. */
         runPreset,
+        /** Append one prompt to the composer draft, on its own line. */
+        insertPreset,
+        /** One press on a bar chip: append, counting the insert unless a second press follows. */
+        appendPrompt,
+        /** Two presses on a bar chip: send the composed draft, clear it on success. */
+        sendDraft,
         setDelivery,
         effectiveDelivery,
         setTurbo,
@@ -5090,6 +5203,8 @@ window.__ModuleLoader__.load({
         /** Enable / disable one prompt without deleting it. */
         setPresetEnabled,
         togglePresetEnabled,
+        /** Pin / unpin one prompt on the composer's own row. */
+        setPresetPinned,
         /** In-window "new prompt" form (title + body). */
         startNudgeDraft,
         cancelNudgeDraft,
@@ -5392,6 +5507,16 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
 .dsh-nudge-toggle-title{font-size:12px;font-weight:600;line-height:1.4;color:var(--dsw-alias-label-primary,#1a1a1a)}
 .dsh-nudge-toggle-desc{font-size:12px;line-height:1.5;color:var(--dsw-alias-label-secondary,#5a5a66)}
 .dsh-nudge-preset-row{display:flex;flex-direction:column;gap:8px;padding:12px;border-radius:12px;border:1px solid var(--dn-line);background:color-mix(in srgb,var(--dsw-alias-label-primary,#1a1a1a) 3%,transparent)}
+/* The prompt list reads as one list, not a stack of cards: rows share the
+   fold's surface and only a hairline separates them. Scoped to preset rows so
+   the idle-line list keeps its own cards. */
+.dsh-nudge-preset-row[data-preset-id]{gap:4px;padding:7px 9px;border:0;border-radius:0;background:transparent;container-type:inline-size}
+.dsh-nudge-preset-row[data-preset-id] + .dsh-nudge-preset-row[data-preset-id]{border-top:1px solid var(--dn-line)}
+/* Row actions are quiet until hovered: two state pills already carry the row's
+   weight, so the pencil and the bin do not need boxes of their own. */
+.dsh-nudge-preset-row[data-preset-id] .dsh-nudge-preset-tools .dsh-nudge-btn.icon{border-color:transparent;background:transparent;color:var(--dsw-alias-label-secondary,#8a8a8a)}
+.dsh-nudge-preset-row[data-preset-id] .dsh-nudge-preset-tools .dsh-nudge-btn.icon:hover{background:var(--dn-hover);color:var(--dsw-alias-label-primary,#1a1a1a)}
+.dsh-nudge-preset-row[data-preset-id] .dsh-nudge-preset-tools .dsh-nudge-btn.icon.danger{color:var(--dsw-alias-state-error-primary,#c8433c)}
 .dsh-nudge-preset-line{display:flex;align-items:center;gap:8px}
 .dsh-nudge-preset-row input{flex:1 1 auto;min-width:0;height:32px;box-sizing:border-box;border:1px solid var(--dn-line);border-radius:9px;background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);font:inherit;font-size:12px;padding:0 10px;transition:border-color .15s ease,box-shadow .15s ease}
 .dsh-nudge-preset-row textarea{width:100%;box-sizing:border-box;min-height:56px;field-sizing:content;max-height:min(320px,40vh);overflow-y:auto;border:1px solid var(--dn-line);border-radius:9px;background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);font:inherit;font-size:12px;line-height:1.55;padding:8px 10px;transition:border-color .15s ease,box-shadow .15s ease}
@@ -5469,7 +5594,7 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
 .dsh-nudge-preset-grip{cursor:grab;padding:2px;border-radius:6px;color:var(--dsw-alias-label-secondary,#8a8a8a);font-size:13px;line-height:1;user-select:none}
 .dsh-nudge-preset-grip:active{cursor:grabbing}
 .dsh-nudge-preset-grip:focus-visible{outline:2px solid var(--dn-accent-line);outline-offset:1px}
-.dsh-nudge-preset-toggle{flex:1 1 auto;min-width:0;display:flex;align-items:center;gap:6px;padding:4px 6px;border:0;border-radius:8px;background:transparent;color:inherit;font:inherit;font-size:12px;text-align:left;cursor:pointer}
+.dsh-nudge-preset-toggle{flex:0 1 auto;min-width:0;margin-right:auto;display:flex;align-items:center;gap:6px;padding:4px 6px;border:0;border-radius:8px;background:transparent;color:inherit;font:inherit;font-size:12px;text-align:left;cursor:pointer}
 .dsh-nudge-preset-toggle:hover{background:var(--dn-hover)}
 .dsh-nudge-preset-toggle:focus-visible{outline:2px solid var(--dn-accent-line);outline-offset:1px}
 .dsh-nudge-preset-toggle svg{flex:0 0 auto;color:var(--dsw-alias-label-secondary,#8a8a8a)}
@@ -5482,11 +5607,16 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
 .dsh-nudge-preset-row.dragging{opacity:.65;border-color:var(--dn-accent-line);box-shadow:0 6px 18px rgba(0,0,0,.08)}
 .dsh-nudge-preset-row.disabled{opacity:.72}
 .dsh-nudge-preset-row.disabled .dsh-nudge-preset-name{color:var(--dsw-alias-label-secondary,#8a8a8a);font-weight:500}
-.dsh-nudge-preset-state{flex:0 0 auto;height:22px;padding:0 8px;border-radius:999px;border:1px solid var(--dn-line);background:transparent;color:var(--dsw-alias-label-secondary,#8a8a8a);font:inherit;font-size:11px;line-height:1;cursor:pointer;white-space:nowrap;transition:background .15s ease,color .15s ease,border-color .15s ease}
-.dsh-nudge-preset-state:hover{background:var(--dn-hover)}
-.dsh-nudge-preset-state.on{background:var(--dn-accent-soft);border-color:var(--dn-accent-line);color:var(--dn-accent)}
-.dsh-nudge-preset-state:focus-visible{outline:2px solid var(--dn-accent-line);outline-offset:1px}
+/* Two places one prompt can live: the window's prompt row and the row under
+   the input box. Same pill, same height; filled means "shown there". */
+.dsh-nudge-preset-place{flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;height:24px;padding:0 9px;border-radius:999px;border:1px solid var(--dn-line);background:transparent;color:var(--dsw-alias-label-secondary,#8a8a8a);font:inherit;font-size:11.5px;line-height:1;white-space:nowrap;cursor:pointer;transition:background .15s ease,color .15s ease,border-color .15s ease}
+.dsh-nudge-preset-place:hover{background:var(--dn-hover)}
+.dsh-nudge-preset-place.on{background:var(--dn-accent-soft);border-color:var(--dn-accent-line);color:var(--dn-accent)}
+.dsh-nudge-preset-place:focus-visible{outline:2px solid var(--dn-accent-line);outline-offset:1px}
+.dsh-nudge-place-short{display:none}
+@container (max-width:520px){.dsh-nudge-place-long{display:none}.dsh-nudge-place-short{display:inline}}
 .dsh-nudge-preset-body{margin:0 6px 2px 30px;padding:8px 10px;border-radius:9px;background:color-mix(in srgb,var(--dsw-alias-label-primary,#1a1a1a) 4%,transparent);color:var(--dsw-alias-label-secondary,#555);font-size:12px;line-height:1.6;white-space:pre-wrap;word-break:break-word;max-height:min(280px,36vh);overflow-y:auto}
+.dsh-nudge-preset-text{white-space:pre-wrap;word-break:break-word}
 .dsh-nudge-preset-editor{display:flex;flex-direction:column;gap:8px;padding:2px 6px 2px 30px}
 .dsh-nudge-preset-editor input{flex:0 0 auto}
 .dsh-nudge-preset-empty{padding:14px;border:1px dashed var(--dn-line);border-radius:12px;color:var(--dsw-alias-label-secondary,#8a8a8a);font-size:12px;line-height:1.6;text-align:center}
@@ -7384,6 +7514,7 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
         }
 
         const enabled = preset.enabled !== false
+        const placed = enabled || preset.pinned === true
 
         /**
          * Live reorder while the pointer travels: the dragged row trades slots
@@ -7486,17 +7617,37 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
               'button',
               {
                 type: 'button',
-                className: `dsh-nudge-preset-state${enabled ? ' on' : ''}`,
-                title: enabled ? t('presetEnabledHint') : t('presetDisabledHint'),
+                className: `dsh-nudge-preset-place${enabled ? ' on' : ''}`,
+                'data-place': 'window',
+                title: enabled ? t('placeWindowHint') : t('placeWindowOffHint'),
                 role: 'switch',
                 'aria-checked': enabled ? 'true' : 'false',
-                'aria-label': enabled ? t('presetEnabledHint') : t('presetDisabledHint'),
+                'aria-label': t('placeWindow'),
                 onClick: () => {
                   runtime.togglePresetEnabled(preset.id)
                   onError('')
                 },
               },
-              enabled ? t('presetEnabled') : t('presetDisabled'),
+              h('span', { className: 'dsh-nudge-place-long' }, t('placeWindow')),
+              h('span', { className: 'dsh-nudge-place-short', 'aria-hidden': 'true' }, t('placeWindowShort')),
+            ),
+            h(
+              'button',
+              {
+                type: 'button',
+                className: `dsh-nudge-preset-place${preset.pinned === true ? ' on' : ''}`,
+                'data-place': 'input',
+                title: t('placeInputHint'),
+                role: 'switch',
+                'aria-checked': preset.pinned === true ? 'true' : 'false',
+                'aria-label': t('placeInput'),
+                onClick: () => {
+                  runtime.setPresetPinned(preset.id, preset.pinned !== true)
+                  onError('')
+                },
+              },
+              h('span', { className: 'dsh-nudge-place-long' }, t('placeInput')),
+              h('span', { className: 'dsh-nudge-place-short', 'aria-hidden': 'true' }, t('placeInputShort')),
             ),
             h(
               'button',
@@ -7534,7 +7685,7 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
 
         const body =
           open && !editing
-            ? h('div', { className: 'dsh-nudge-preset-body' }, preset.text)
+            ? h('div', { className: 'dsh-nudge-preset-body' }, h('div', { className: 'dsh-nudge-preset-text' }, preset.text))
             : null
 
         const editor = editing
@@ -7582,7 +7733,7 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
         return h(
           'div',
           {
-            className: `dsh-nudge-preset-row${editing ? ' editing' : ''}${enabled ? '' : ' disabled'}`,
+            className: `dsh-nudge-preset-row${editing ? ' editing' : ''}${placed ? '' : ' disabled'}`,
             'data-preset-id': preset.id,
             'data-open': open ? 'true' : 'false',
             onDragOver: dragOverRow,
@@ -8553,6 +8704,116 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
     }
 
     // ---------------------------------------------------------------------
+    // input bar
+    // ---------------------------------------------------------------------
+
+    /** How many pinned prompts the bar shows before it folds the rest. */
+    const MAX_BAR_PROMPTS = 4
+
+    /**
+     * Style for the pinned prompts. It rides the entry itself: the bar lives in
+     * the shell's input row, outside the window's own stylesheet.
+     */
+    const INPUT_BAR_CSS = `
+.dsh-nudge-input-bar{display:inline-flex;align-items:center;gap:4px;min-width:0}
+.dsh-nudge-bar-chip{max-width:9em;height:24px;padding:0 8px;border:1px solid var(--dsw-alias-border-l1,rgba(127,127,127,.25));border-radius:999px;background:transparent;color:var(--dsw-alias-label-secondary,#5a5a66);font:inherit;font-size:12px;line-height:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer}
+.dsh-nudge-bar-chip:hover{background:var(--dn-hover,rgba(127,127,127,.12));color:var(--dsw-alias-label-primary,#1a1a1a)}
+.dsh-nudge-bar-chip:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#5686fe);outline-offset:2px}
+.dsh-nudge-bar-more{position:relative;display:inline-flex}
+.dsh-nudge-bar-more .dsh-nudge-bar-menu{display:none}
+.dsh-nudge-bar-more:hover .dsh-nudge-bar-menu,.dsh-nudge-bar-more:focus-within .dsh-nudge-bar-menu{display:flex}
+.dsh-nudge-bar-menu{position:absolute;left:0;bottom:calc(100% + 6px);z-index:60;flex-direction:column;min-width:132px;max-height:240px;overflow:auto;padding:4px;border:1px solid var(--dsw-alias-border-l1,rgba(127,127,127,.25));border-radius:10px;background:var(--dsw-alias-bg-layer-1,#fff);box-shadow:0 10px 30px rgba(0,0,0,.16)}
+.dsh-nudge-bar-menu-item{height:28px;padding:0 8px;border:0;border-radius:6px;background:transparent;color:var(--dsw-alias-label-primary,#1a1a1a);font:inherit;font-size:12px;line-height:1;text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer}
+.dsh-nudge-bar-menu-item:hover{background:var(--dn-hover,rgba(127,127,127,.12))}
+`
+
+    /**
+     * Pinned prompts on the composer's own left row. A click appends the prompt
+     * to the draft on a new line; the bar never sends and never moves the window.
+     * @param runtime - the window runtime.
+     * @returns the slot component.
+     */
+    function makeInputBar(runtime) {
+      const useSyncExternalStore =
+        React.useSyncExternalStore ??
+        function useSyncExternalStoreFallback(subscribe, getSnapshot) {
+          return getSnapshot()
+        }
+      return function NudgeInputBar() {
+        const state = useSyncExternalStore(runtime.subscribe, runtime.getSnapshot, runtime.getSnapshot)
+        const presets = Array.isArray(state.presets) ? state.presets : []
+        const pinned = presets.filter((preset) => preset.pinned === true)
+        if (pinned.length === 0) return null
+        const shown = pinned.slice(0, MAX_BAR_PROMPTS)
+        const rest = pinned.slice(MAX_BAR_PROMPTS)
+        // Keeping the press from moving focus keeps the caret and the native
+        // selection in the composer while the click lands.
+        const keepFocus = (event) => {
+          if (event && typeof event.preventDefault === 'function') event.preventDefault()
+        }
+        const chip = (preset) =>
+          h(
+            'button',
+            {
+              key: preset.id,
+              type: 'button',
+              className: 'dsh-nudge-bar-chip',
+              title: preset.text,
+              onMouseDown: keepFocus,
+              // detail is 2 on the second press of a double click: send the
+              // draft the first press already composed instead of appending twice.
+              onClick: (event) => {
+                if (Number(event?.detail) >= 2) runtime.sendDraft(preset.id)
+                else runtime.appendPrompt(preset.id)
+              },
+            },
+            preset.label,
+          )
+        return h(
+          'div',
+          { className: 'dsh-nudge-input-bar' },
+          h('style', { key: 'dsh-nudge-bar-css' }, INPUT_BAR_CSS),
+          ...shown.map(chip),
+          rest.length === 0
+            ? null
+            : h(
+                'span',
+                { key: 'more', className: 'dsh-nudge-bar-more' },
+                h(
+                  'button',
+                  {
+                    type: 'button',
+                    className: 'dsh-nudge-bar-chip',
+                    'aria-haspopup': 'menu',
+                    'aria-label': runtime.text('morePrompts'),
+                    onMouseDown: keepFocus,
+                  },
+                  runtime.text('morePrompts'),
+                ),
+                h(
+                  'div',
+                  { className: 'dsh-nudge-bar-menu', role: 'menu' },
+                  ...rest.map((preset) =>
+                    h(
+                      'button',
+                      {
+                        key: preset.id,
+                        type: 'button',
+                        role: 'menuitem',
+                        className: 'dsh-nudge-bar-menu-item',
+                        title: preset.text,
+                        onClick: () => runtime.insertPreset(preset.id),
+                      },
+                      preset.label,
+                    ),
+                  ),
+                ),
+              ),
+        )
+      }
+    }
+
+    // ---------------------------------------------------------------------
     // module
     // ---------------------------------------------------------------------
 
@@ -8614,6 +8875,17 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
             ctx.slots.register({ name: COMPOSER_SLOT, id: ENTRY, order: 70 }, ComposerBridge),
           ),
         'dsh-nudge: composer bridge',
+      )
+
+      // The pinned prompts ride the input bar's own left row, next to the
+      // attach mark and the permission chip (dsh-vim uses the same seat).
+      const InputBar = makeInputBar(runtime)
+      ctx.effect(
+        () =>
+          ctx.slots.inject(INPUT_BAR_SLOT, () =>
+            ctx.slots.register({ name: INPUT_BAR_SLOT, id: ENTRY, order: 60 }, InputBar),
+          ),
+        'dsh-nudge: input bar',
       )
 
       // Debug/test handle: scripts/check-client.mjs drives this without a renderer.
