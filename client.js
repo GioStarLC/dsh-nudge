@@ -8501,49 +8501,13 @@ function createDelivery({ ctx, getState, setState, text }) {
       }
 
 /**
- * The floating window's render tree.
+ * The in-window prompt row: the chips, the drag geometry and the settle motion.
  *
- * The pill, the card, the modules and the overlays that hang off it.
+ * The row is a pure function of its props; the drag helpers are pure functions
+ * of the nodes and boxes their caller passes in.
  *
  * Built into `client.js` by `scripts/build.mjs`; edit this file, not the bundle.
  */
-
-    /**
-     * Build the React view over one runtime.
-     * @param runtime - window runtime.
-     * @returns the slot component.
-     */
-    function makeView(runtime) {
-      /** The same form the shell section renders, reused by the in-window panel. */
-      const SettingsForm = makeSettingsView(runtime);
-
-      /**
-       * Write the dragged window's position straight onto its node.
-       *
-       * A drag is a pointer sample every 4–16 ms. Taking each one through the
-       * store re-rendered the whole card — the annotation tray and the prompt
-       * row included — for a position only the root element shows. The render
-       * keeps owning `left`/`top`; this write exists only between the press and
-       * the drop, and the drop commits the same numbers through the store, so
-       * the first render after it paints the value the pointer already shows.
-       */
-      function paintDrag(node, point) {
-        const style = node?.style;
-        if (!style) return
-        style.left = `${point.x}px`;
-        style.top = `${point.y}px`;
-      }
-
-      const useSyncExternalStore =
-        React.useSyncExternalStore ??
-        function useSyncExternalStoreFallback(subscribe, getSnapshot) {
-          const [value, setValue] = React.useState(getSnapshot);
-          React.useEffect(() => {
-            setValue(getSnapshot());
-            return subscribe(() => setValue(getSnapshot()))
-          }, [subscribe, getSnapshot]);
-          return value
-        };
 
       /** Whether this browser wants the chip motion (reduced motion users do not). */
       function chipMotionOn() {
@@ -8832,6 +8796,51 @@ function createDelivery({ ctx, getState, setState, text }) {
               : null,
         )
       }
+
+/**
+ * The floating window's render tree.
+ *
+ * The pill, the card, the modules and the overlays that hang off it.
+ *
+ * Built into `client.js` by `scripts/build.mjs`; edit this file, not the bundle.
+ */
+
+    /**
+     * Build the React view over one runtime.
+     * @param runtime - window runtime.
+     * @returns the slot component.
+     */
+    function makeView(runtime) {
+      /** The same form the shell section renders, reused by the in-window panel. */
+      const SettingsForm = makeSettingsView(runtime);
+
+      /**
+       * Write the dragged window's position straight onto its node.
+       *
+       * A drag is a pointer sample every 4–16 ms. Taking each one through the
+       * store re-rendered the whole card — the annotation tray and the prompt
+       * row included — for a position only the root element shows. The render
+       * keeps owning `left`/`top`; this write exists only between the press and
+       * the drop, and the drop commits the same numbers through the store, so
+       * the first render after it paints the value the pointer already shows.
+       */
+      function paintDrag(node, point) {
+        const style = node?.style;
+        if (!style) return
+        style.left = `${point.x}px`;
+        style.top = `${point.y}px`;
+      }
+
+      const useSyncExternalStore =
+        React.useSyncExternalStore ??
+        function useSyncExternalStoreFallback(subscribe, getSnapshot) {
+          const [value, setValue] = React.useState(getSnapshot);
+          React.useEffect(() => {
+            setValue(getSnapshot());
+            return subscribe(() => setValue(getSnapshot()))
+          }, [subscribe, getSnapshot]);
+          return value
+        };
 
       return function NudgeWindow() {
         const state = useSyncExternalStore(runtime.subscribe, runtime.getSnapshot, runtime.getSnapshot);
