@@ -11,6 +11,7 @@
  */
 import { MAX_TIP_LENGTH, MAX_TIPS, STATS_DAYS } from '../src/client/constants.js'
 import { createComposerInsertion } from '../src/client/composer-insert.js'
+import { createPopup } from '../src/client/popup.js'
 import { createPresetActions } from '../src/client/preset-actions.js'
 import { createTipActions } from '../src/client/tip-actions.js'
 import { occurrencesOf, rectDistance } from '../src/client/dom.js'
@@ -402,6 +403,55 @@ check(
   api.resetTips()
   check('tips: reset clears the stored list', cleared.includes('tips'), true)
   check('tips: reset restores the built-ins', state.tips.length > 1, true)
+}
+
+
+// --- popup placement: the pointer, the box and the edge ------------------
+
+{
+  const state = { annotationDraft: null, annotationEditingId: null }
+  const api = createPopup({
+    getState: () => state,
+    setState: (patch) => Object.assign(state, patch),
+    closeAnnotationSurface: () => true,
+    cancelPendingCapture: () => {},
+  })
+
+  check(
+    'popup: a pointer just outside the box still counts as near',
+    api.pointerNearRect({ x: 120, y: 50 }, { left: 0, top: 0, right: 100, bottom: 100 }),
+    true,
+  )
+  check(
+    'popup: a pointer far past the slack is not near',
+    api.pointerNearRect({ x: 300, y: 50 }, { left: 0, top: 0, right: 100, bottom: 100 }),
+    false,
+  )
+  check('popup: no pointer never matches a box', api.pointerNearRect(null, { left: 0, top: 0, right: 1, bottom: 1 }), false)
+
+  // The card is placed with the viewport in hand; a stub stands in for the page.
+  const previousWindow = globalThis.window
+  globalThis.window = { innerWidth: 800, innerHeight: 600 }
+  try {
+    state.annotationDraft = {
+      pointer: { x: 400, y: 300 },
+      rect: { left: 380, top: 290, right: 420, bottom: 310, width: 40, height: 20 },
+    }
+    const above = api.popupPosition()
+    check('popup: a pointer far enough down opens the card upward', above.transform, 'translateY(-100%)')
+    check('popup: the first button is centred on the release point', above.left, '356px')
+
+    state.annotationDraft = { pointer: { x: 400, y: 60 }, rect: null }
+    const fallback = api.popupPosition()
+    check('popup: a pointer too high falls back to the parked card', fallback.transform, 'none')
+
+    state.annotationDraft = null
+    const parked = api.popupPosition()
+    check('popup: with no draft the card parks at the top right', parked.left, '452px')
+  } finally {
+    if (previousWindow === undefined) delete globalThis.window
+    else globalThis.window = previousWindow
+  }
 }
 
 console.log(`\nunit checks: ${checks - failures} passed, ${failures} failed`)
