@@ -18,6 +18,7 @@ import { createHostSync } from '../src/client/host-sync.js'
 import { createPopup } from '../src/client/popup.js'
 import { createPresetActions } from '../src/client/preset-actions.js'
 import { createQuoteWriting } from '../src/client/quote-writing.js'
+import { createSettingsNav } from '../src/client/settings-nav.js'
 import { createTipActions } from '../src/client/tip-actions.js'
 import { occurrencesOf, rectDistance } from '../src/client/dom.js'
 import { chipSlotAt, clamp, isPoint, rectValue } from '../src/client/geometry.js'
@@ -660,6 +661,41 @@ check(
     (api.countStat('insert', '__proto__'), Object.prototype.hasOwnProperty.call(state.stats.days[today].presets, '__proto__')),
     false,
   )
+}
+
+
+// --- settings navigation: the gear, the resize and the diagnostics --------
+
+{
+  const state = { settingsOpen: true, collapsed: false, pos: { x: 700, y: 500 } }
+  let dismissed = 0
+  const api = createSettingsNav({
+    getState: () => state,
+    setState: (patch) => Object.assign(state, patch),
+    text: (key) => key,
+    ctx: {},
+    onPopupDismiss: () => {
+      dismissed += 1
+    },
+  })
+  const previousWindow = globalThis.window
+  globalThis.window = { innerWidth: 800, innerHeight: 600 }
+  try {
+    check('settings nav: the chunk is not loaded yet', api.probeSettings().pending, true)
+
+    api.closeSettings()
+    check('settings nav: closing leaves the settings form', state.settingsOpen, false)
+
+    api.onResize()
+    check('settings nav: a resize dismisses the card', dismissed, 1)
+    check('settings nav: the window stays inside the viewport', state.pos.x <= 800 && state.pos.y <= 600, true)
+
+    check('settings nav: writing a diag without a page is harmless', api.recordAnchorMiss('原文'), undefined)
+    check('settings nav: hiding the page is harmless', api.onPageHide(), undefined)
+  } finally {
+    if (previousWindow === undefined) delete globalThis.window
+    else globalThis.window = previousWindow
+  }
 }
 
 console.log(`\nunit checks: ${checks - failures} passed, ${failures} failed`)

@@ -18,6 +18,7 @@ import { createPopup } from './popup.js'
 import { createPresetActions } from './preset-actions.js'
 import { createQuoteWriting } from './quote-writing.js'
 import { createSelectionExtension } from './selection-extend.js'
+import { createSettingsNav } from './settings-nav.js'
 import { createTipActions } from './tip-actions.js'
 import { anchorFromQuote, anchorFromRange, locateAnchor, packedMapOf, packedText, passagesOfRange, rangeFromPacked, sameRanges } from './dom.js'
 import { chipSlotAt, clampPoint, dockPosition, isPoint, rectValue, snapToEdge, viewport } from './geometry.js'
@@ -216,7 +217,7 @@ import { builtinTips, normalizeTipList, tidyTip } from './tips.js'
         persistSetting,
         repaintHighlights: () => highlights.repaintHighlights(),
         sessionId: () => (resolveTarget(ctx) ?? state.target)?.sessionId,
-        recordAnchorMiss,
+        recordAnchorMiss: (quote) => settingsNav.recordAnchorMiss(quote),
       })
       const {
         tidyQuote,
@@ -314,7 +315,7 @@ import { builtinTips, normalizeTipList, tidyTip } from './tips.js'
         notify,
         cancelAnnotationEdit,
         copyDraftQuote,
-        closeSettings,
+        closeSettings: () => settingsNav.closeSettings(),
       })
       const {
         extending,
@@ -531,167 +532,33 @@ import { builtinTips, normalizeTipList, tidyTip } from './tips.js'
       // --- settings navigation --------------------------------------------
 
       /**
-       * Append one sample to a diagnostic list in the persisted UI record.
-       *
-       * The shell's open seams report nothing when they fail — `invoke` returns
-       * void, a blocked command returns silently, a click on the wrong button is
-       * accepted — so the only place a failure can be observed is the running
-       * page. The samples land in `nudge-store.json`, next to the other settings.
+       * The gear's route into the shell settings, the resize/page hooks and the
+       * diagnostic samples. The module owns the chunk driver; the runtime hands
+       * it the context and the popup dismissal.
        */
-      function recordUiDiag(name, entry) {
-        const ui = readJson(UI_KEY) ?? {}
-        const list = Array.isArray(ui[name]) ? ui[name].slice(-DIAG_SAMPLES) : []
-        list.push({ at: Date.now(), ...entry })
-        ui[name] = list
-        storage()?.setItem(UI_KEY, JSON.stringify(ui))
-      }
-
-      /** One settings-navigation sample. */
-      function recordSettingsDiag(entry) {
-        try {
-          recordUiDiag('settingsDiag', entry)
-        } catch {
-          /* diagnostics are best-effort and never block the gear */
-        }
-      }
-
-
-      /**
-       * Why a passage could not be anchored, as one sample.
-       *
-       * `flows` counts the anchor elements on the page, `hits` how many of them
-       * carry the passage, and `inBody` whether the text is on the page at all:
-       * together they separate "the transcript re-rendered" from "the passage
-       * lives outside every flow item" without a debugger on the running app.
-       */
-      function recordAnchorMiss(quote) {
-        try {
-          const packed = packedText(quote)
-          const flows = document.querySelectorAll?.(ANCHOR_SELECTOR) ?? []
-          let hits = 0
-          for (const element of flows) {
-            if (packedMapOf(element).packed.indexOf(packed) !== -1) hits += 1
-          }
-          const body = packedText(document.body?.textContent ?? '')
-          recordUiDiag('anchorDiag', {
-            event: 'no-anchor',
-            length: packed.length,
-            flows: flows.length,
-            hits,
-            inBody: packed !== '' && body.indexOf(packed) !== -1,
-          })
-        } catch {
-          /* diagnostics are best-effort and never block the note */
-        }
-      }
-
-      /**
-       * The Settings jump driver lives in a package-local chunk
-       * (`client.settings-jump.js`), fetched on the first press of the gear.
-       *
-       * The chunk is the reusable unit: it knows the shell's seams and nothing
-       * about this plugin, so a second jump target is a second instance with a
-       * different `sectionTitle` (and its own `onDiag` / `onFallback`) — the
-       * routing, the receipts and the escalation order come for free.
-       */
-      let settingsJump
-      let settingsJumpLoad
-
-      /** Fetch (once) and wire the driver; a failed fetch is retried by the next press. */
-      function loadSettingsJump() {
-        if (settingsJump !== undefined) return Promise.resolve(settingsJump)
-        if (settingsJumpLoad !== undefined) return settingsJumpLoad
-        const fail = (error) => {
-          settingsJumpLoad = undefined
-          console.warn('[dsh-nudge] settings jump chunk unavailable', error)
-          return undefined
-        }
-        try {
-          if (typeof require?.async !== 'function') throw new Error('this shell has no chunk loader')
-          settingsJumpLoad = require
-            .async('./client.settings-jump.js')
-            .then((chunk) => {
-              settingsJump = chunk.createSettingsJump({
-                getShortcuts: () => ctx.get?.('shortcuts'),
-                getSlots: () => ctx.slots,
-                sectionTitle: () => text('settingsTitle'),
-                onDiag: (entry) => recordSettingsDiag(entry),
-                onFallback: () => setState({ settingsOpen: true }),
-              })
-              return settingsJump
-            })
-            .catch(fail)
-        } catch (error) {
-          return Promise.resolve(fail(error))
-        }
-        return settingsJumpLoad
-      }
-
-      /**
-       * Open Settings on this plugin's section.
-       *
-       * Resolves whether one of the shell's routes acted. When the chunk itself
-       * cannot load — an install copy shipped without the file, or a shell whose
-       * loader has no chunk support — the in-window form opens instead, so the
-       * gear is never dead.
-       */
-      async function openSettings() {
-        const jump = await loadSettingsJump()
-        if (jump === undefined) {
-          recordSettingsDiag({ event: 'chunk', error: 'unavailable' })
-          setState({ settingsOpen: true })
-          return false
-        }
-        return jump.open()
-      }
-
-      /** Drop a pending verification (dispose, or a second press of the gear). */
-      function stopSettingsWait() {
-        if (settingsJump !== undefined) settingsJump.cancel()
-      }
-
-      /** What the running page says about the shell's settings seams (diagnostics). */
-      function probeSettings() {
-        return settingsJump === undefined ? { pending: true } : settingsJump.probe()
-      }
-
-      /** Record the seam sample once the chunk has arrived (mount-time probe). */
-      function probeSettingsSeams() {
-        loadSettingsJump().then((jump) => {
-          recordSettingsDiag(
-            jump === undefined
-              ? { event: 'mount', error: 'chunk-unavailable' }
-              : { event: 'mount', ...jump.probe() },
-          )
-        })
-      }
-
-      /** Leave the in-window settings form and return to the normal body. */
-      function closeSettings() {
-        if (state.settingsOpen) setState({ settingsOpen: false })
-      }
-
-      /** Keep the window inside the viewport after a resize; the card closes. */
-      function onResize() {
-        setState({ pos: clampPoint(state.pos, state.collapsed) })
-        onPopupDismiss()
-      }
-
-      /**
-       * Leaving the page writes the pending settings now. The mirror waits
-       * `STORE_SYNC_MS` for a burst of edits to settle, and a window closed in
-       * that gap would otherwise drop the last change — on the very restart the
-       * Host record exists for. It is best effort: a page torn down at once may
-       * still cut the request short.
-       */
-      function onPageHide() {
-        flushSettingsMirror()
-      }
-
-      /** A page that goes to the background may never come back: write now. */
-      function onVisibilityChange() {
-        if (typeof document !== 'undefined' && document.visibilityState === 'hidden') flushSettingsMirror()
-      }
+      const settingsNav = createSettingsNav({
+        getState: () => state,
+        setState,
+        text,
+        ctx,
+        onPopupDismiss,
+      })
+      const {
+        settingsJump,
+        settingsJumpLoad,
+        recordUiDiag,
+        recordSettingsDiag,
+        recordAnchorMiss,
+        loadSettingsJump,
+        openSettings,
+        stopSettingsWait,
+        probeSettings,
+        probeSettingsSeams,
+        closeSettings,
+        onResize,
+        onPageHide,
+        onVisibilityChange,
+      } = settingsNav
 
       // --- world subscriptions -------------------------------------------
 
