@@ -7109,55 +7109,10 @@ function createDelivery({ ctx, getState, setState, text }) {
       }
 
 /**
- * The Settings section's render tree.
- *
- * Counters, prompts, idle lines, switches and the appearance row.
+ * The glyphs and path data the settings rows share.
  *
  * Built into `client.js` by `scripts/build.mjs`; edit this file, not the bundle.
  */
-
-    /**
-     * Build the plugin's settings section: edit, add, delete and reset the probe
-     * presets. This is the only place a preset is authored; the floating window
-     * is just a flat picker over the same list.
-     * @param runtime - the window runtime (same store the window reads).
-     * @returns the settings-slot component.
-     */
-    function makeSettingsView(runtime) {
-      const useSyncExternalStore =
-        React.useSyncExternalStore ??
-        function useSyncExternalStoreFallback(subscribe, getSnapshot) {
-          const [value, setValue] = React.useState(getSnapshot);
-          React.useEffect(() => {
-            setValue(getSnapshot());
-            return subscribe(() => setValue(getSnapshot()))
-          }, [subscribe, getSnapshot]);
-          return value
-        };
-
-      /**
-       * One labelled checkbox row, shared by every boolean setting.
-       * Built eagerly (a plain element, not a component) so the settings tree
-       * stays directly inspectable by the checks.
-       */
-      function toggleRow(props) {
-        const { title, desc, checked, onChange } = props;
-        return h(
-          'label',
-          { className: 'dsh-nudge-toggle', title: desc, 'data-setting': props.key },
-          h('input', {
-            type: 'checkbox',
-            checked: checked === true,
-            onChange: (event) => onChange(event.target.checked),
-          }),
-          h(
-            'span',
-            { className: 'dsh-nudge-toggle-text' },
-            h('span', { className: 'dsh-nudge-toggle-title' }, title),
-            h('span', { className: 'dsh-nudge-toggle-desc' }, desc),
-          ),
-        )
-      }
 
       /** A small 16px stroke icon, matching the window's own icons. */
       function presetIcon(pathData) {
@@ -7183,6 +7138,19 @@ function createDelivery({ ctx, getState, setState, text }) {
       const CHEVRON_DOWN = 'M4 6.5l4 4 4-4';
       const TRASH_PATH = 'M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.6 8h5.8l.6-8';
 
+/**
+ * One preset row: name, expander, the two places, edit/delete and drag.
+ *
+ * Built into `client.js` by `scripts/build.mjs`; edit this file, not the bundle.
+ */
+
+    /**
+     * Build the row over one runtime.
+     *
+     * @param runtime - the settings runtime.
+     * @returns the row component.
+     */
+    function makePresetRow(runtime) {
       /** The preset being dragged, shared by the drag handlers of one list. */
       let draggingId = null;
       /** Index of the idle line being dragged, or null. */
@@ -7449,6 +7417,25 @@ function createDelivery({ ctx, getState, setState, text }) {
         )
       }
 
+      return PresetRow
+    }
+
+/**
+ * One idle line: the text as a row, an editor behind the pencil, drag order.
+ *
+ * Built into `client.js` by `scripts/build.mjs`; edit this file, not the bundle.
+ */
+
+    /**
+     * Build the row over one runtime.
+     *
+     * @param runtime - the settings runtime.
+     * @returns the row component.
+     */
+    function makeTipRow(runtime) {
+      /** Index of the idle line being dragged, or null. */
+      let draggingTip = null;
+
       /**
        * One idle line: the text as a row, an editor behind the pencil icon,
        * and drag (or ↑ ↓ on the handle) for order. No body of its own.
@@ -7596,6 +7583,63 @@ function createDelivery({ ctx, getState, setState, text }) {
           { className: 'dsh-nudge-preset-row dsh-nudge-tip-row', 'data-tip-index': index },
           summary,
           editor,
+        )
+      }
+
+      return TipRow
+    }
+
+/**
+ * The Settings section's render tree.
+ *
+ * Counters, prompts, idle lines, switches and the appearance row.
+ *
+ * Built into `client.js` by `scripts/build.mjs`; edit this file, not the bundle.
+ */
+
+    /**
+     * Build the plugin's settings section: edit, add, delete and reset the probe
+     * presets. This is the only place a preset is authored; the floating window
+     * is just a flat picker over the same list.
+     * @param runtime - the window runtime (same store the window reads).
+     * @returns the settings-slot component.
+     */
+    function makeSettingsView(runtime) {
+      const useSyncExternalStore =
+        React.useSyncExternalStore ??
+        function useSyncExternalStoreFallback(subscribe, getSnapshot) {
+          const [value, setValue] = React.useState(getSnapshot);
+          React.useEffect(() => {
+            setValue(getSnapshot());
+            return subscribe(() => setValue(getSnapshot()))
+          }, [subscribe, getSnapshot]);
+          return value
+        };
+
+      /**
+       * One labelled checkbox row, shared by every boolean setting.
+       * Built eagerly (a plain element, not a component) so the settings tree
+       * stays directly inspectable by the checks.
+       */
+      const PresetRow = makePresetRow(runtime);
+      const TipRow = makeTipRow(runtime);
+
+      function toggleRow(props) {
+        const { title, desc, checked, onChange } = props;
+        return h(
+          'label',
+          { className: 'dsh-nudge-toggle', title: desc, 'data-setting': props.key },
+          h('input', {
+            type: 'checkbox',
+            checked: checked === true,
+            onChange: (event) => onChange(event.target.checked),
+          }),
+          h(
+            'span',
+            { className: 'dsh-nudge-toggle-text' },
+            h('span', { className: 'dsh-nudge-toggle-title' }, title),
+            h('span', { className: 'dsh-nudge-toggle-desc' }, desc),
+          ),
         )
       }
 
