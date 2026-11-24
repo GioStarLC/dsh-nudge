@@ -18,6 +18,7 @@ import {
 } from './constants.js'
 import { anchorFromQuote, anchorFromRange, packedText, passagesOfRange } from './dom.js'
 import { rectValue, viewport } from './geometry.js'
+import { annotationBlock, annotationNoteLine, blockBreak, quoteMarkdown, tidyQuote } from './annotation-text.js'
 import { saveNotesOfSession } from './notes.js'
 import { frameLabelKey, isFrameWidth } from './settings.js'
 
@@ -33,36 +34,10 @@ import { frameLabelKey, isFrameWidth } from './settings.js'
 
       // --- annotations ----------------------------------------------------
 
+      /** The text helpers take the label; the callers of this module don't. */
+      const noteLine = (item) => annotationNoteLine(item, text('answerLabel'))
+      const markdownBlock = (item) => annotationBlock(item, text('answerLabel'))
 
-      /** Trim only the trailing whitespace a selection picks up. */
-      function tidyQuote(value) {
-        return String(value ?? '').replace(/\s+$/, '')
-      }
-
-      /**
-       * One passage as the Markdown blockquote the shell serializes a quote
-       * node to; text copied out of the composer keeps this form.
-       */
-      function quoteMarkdown(value) {
-        const lines = tidyQuote(value).split('\n')
-        return lines.map((line) => (line === '' ? '>' : `> ${line}`)).join('\n')
-      }
-
-      /** The answer line under a passage, or '' when the passage stands alone. */
-      function annotationNoteLine(item) {
-        const note = typeof item.note === 'string' ? item.note.trim() : ''
-        return note === '' ? '' : `${text('answerLabel')}${note}`
-      }
-
-      /**
-       * One annotation as the Markdown block it becomes when it is sent: the
-       * quote on its own lines, the answer on the line right below it.
-       */
-      function annotationBlock(item) {
-        const quoted = quoteMarkdown(item.quote)
-        const note = annotationNoteLine(item)
-        return note === '' ? quoted : `${quoted}\n${note}`
-      }
 
       /** The annotations still waiting to be written into a message. */
       function pendingAnnotations() {
@@ -114,19 +89,7 @@ import { frameLabelKey, isFrameWidth } from './settings.js'
       /** One write or send batch as one message body, notes two blank lines apart. */
       function annotationsText(list) {
         const items = Array.isArray(list) ? list : pendingAnnotations()
-        return items.map(annotationBlock).join('\n\n\n')
-      }
-
-      /**
-       * The break a Markdown block needs in front of it: two blank lines, so a
-       * note reads as a block of its own in the draft instead of running on from
-       * whatever it is appended to. A draft already ending with them gets no more.
-       */
-      function blockBreak(before) {
-        if (before === '') return ''
-        if (before.endsWith('\n\n\n')) return ''
-        if (before.endsWith('\n\n')) return '\n'
-        return before.endsWith('\n') ? '\n\n' : '\n\n\n'
+        return items.map(markdownBlock).join('\n\n\n')
       }
 
       /** Whether a node belongs to a text field rather than the transcript. */
@@ -639,8 +602,8 @@ import { frameLabelKey, isFrameWidth } from './settings.js'
       return {
         tidyQuote,
         quoteMarkdown,
-        annotationNoteLine,
-        annotationBlock,
+        annotationNoteLine: noteLine,
+        annotationBlock: markdownBlock,
         pendingAnnotations,
         settleAnnotation,
         closeAnnotationSurface,

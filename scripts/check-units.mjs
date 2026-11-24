@@ -10,6 +10,7 @@
  * Run: node scripts/check-units.mjs
  */
 import { MAX_TIP_LENGTH, MAX_TIPS, STATS_DAYS } from '../src/client/constants.js'
+import { annotationBlock, blockBreak, quoteMarkdown, tidyQuote } from '../src/client/annotation-text.js'
 import { createAnnotations } from '../src/client/annotations.js'
 import { createCardPlacement } from '../src/client/card-placement.js'
 import { createComposerInsertion } from '../src/client/composer-insert.js'
@@ -768,6 +769,15 @@ check(
     false,
   )
 }
+
+
+// --- annotation text as a unit: no runtime, just formatting ---------------
+
+check('text: the quote keeps leading space, drops the tail', tidyQuote('  甲  '), '  甲')
+check('text: an answer line takes the label it is given', annotationBlock({ quote: '甲', note: '对' }, '答：'), '> 甲\n答：对')
+check('text: a bare quote has no answer line', annotationBlock({ quote: '甲', note: '' }, '答：'), '> 甲')
+check('text: a block break opens three lines', blockBreak('正文'), '\n\n\n')
+check('text: a quote marks blank lines too', quoteMarkdown('甲\n\n乙'), '> 甲\n>\n> 乙')
 
 console.log(`\nunit checks: ${checks - failures} passed, ${failures} failed`)
 if (failures > 0) process.exit(1)
