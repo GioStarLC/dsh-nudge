@@ -12,7 +12,18 @@ src/client/view.js              悬浮窗渲染树；settings-view.js 是设置�
 src/client/composer.js          输入区桥；其余模块按职责拆分（设置、存储、词表、几何、CSS…）
 src/client/delivery.js          投递与等待：probe 进对话、事件窗口关联、超时与回执
 src/client/view-parts.js        视图叶子组件：批注卡片、就地编辑、批注栏、快捷输入表单
+src/client/view-chips.js        窗口内的快捷输入行：chip 渲染、拖动几何与落点动画
 src/client/input-bar.js         输入框左下角那一行：钉住的快捷输入、更多菜单
+src/client/annotations.js       批注状态机：选区、草稿、就地编辑、定为答案；annotation-text.js 是纯文本层
+src/client/highlights.js        高亮与锚点恢复：重绘合并、答案拆分绘制、转录订阅
+src/client/selection-extend.js  Shift 拖动扩大选区；quote-writing.js 是写入/发送批次
+src/client/popup.js             批注卡片定位与外部点击收起
+src/client/composer-insert.js   输入区写入：草稿拼接、双击计时
+src/client/preset-actions.js    快捷输入列表的增删改、位置与导入导出
+src/client/tip-actions.js       闲置文案列表与轮换
+src/client/card-placement.js    窗口停靠、折叠与 UI 记录
+src/client/host-sync.js         宿主记录回灌、存储重载与每日计数
+src/client/settings-nav.js      设置跳转、页面事件与诊断；settings-preset-row.js / settings-tip-row.js 是设置页的行
 src/client/stats-board.js       设置页看板：今日拆分、15 天趋势、快捷输入 Top 3
 src/types/client.d.ts           ctx / 服务 / 运行时状态的形状（全局声明，JSDoc 引用）
 src/types/react.d.ts            本插件用到的 React 面：createElement 与六个 hook
@@ -84,7 +95,7 @@ uv run --with "graphifyy[mcp]==0.9.57" graphify update "$PWD"
 
 ## 查代码：grep 定位符号，graphify 看结构
 
-浏览器半部按职责拆在 `src/client/` 下，但 `runtime.js`（约 2.9k 行）与 `view.js`、`settings-view.js`（各一千多行）仍是最大的三个文件。grep 能定位符号，答不出"这块功能散在哪、改这里会波及谁"；这类问题用图（`graphify_*`），逐符号定位用 grep。
+浏览器半部按职责拆在 `src/client/` 下：`runtime.js` 是组合根（约 750 行），`view.js`（约 1.1k 行）与 `annotations.js`（约 650 行）是剩下的两个较大的文件。grep 能定位符号，答不出"这块功能散在哪、改这里会波及谁"；这类问题用图（`graphify_*`），逐符号定位用 grep。
 
 - **什么时候上图。** "某功能散在哪些函数/模块""谁调用 X、X 又调了谁""改这里波及谁""两条链路怎么串起来"→ 先读 `GRAPH_REPORT.md`（见上），要精确边和行号再 `query_graph`（BFS 铺面、DFS 追线）、`god_nodes`、`get_neighbors`、`shortest_path`。只找定义、精确字符串、改文案、单点符号 → `grep`/读源码，一次就中，别绕路。**别用仓库级宽 grep 开场**（`"批注|annotation"` 一把梭）；查询词用代码里的词，不是界面的中文词。
 - **调用一律带 `project_path`**（仓库根绝对路径）。不传时用的是 MCP 启动时缓存的 project root；`npm run check:graph` 守的就是这个不变量。
