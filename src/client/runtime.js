@@ -13,6 +13,7 @@ import { createCardPlacement } from './card-placement.js'
 import { createComposerInsertion } from './composer-insert.js'
 import { createDelivery } from './delivery.js'
 import { createHighlights } from './highlights.js'
+import { createHostSync } from './host-sync.js'
 import { createPopup } from './popup.js'
 import { createPresetActions } from './preset-actions.js'
 import { createQuoteWriting } from './quote-writing.js'
@@ -179,7 +180,7 @@ import { builtinTips, normalizeTipList, tidyTip } from './tips.js'
         getState: () => state,
         setState,
         text,
-        countStat,
+        countStat: (field, id) => hostSync.countStat(field, id),
         deliver,
         activePreset,
         onFocus: () => {
@@ -211,7 +212,7 @@ import { builtinTips, normalizeTipList, tidyTip } from './tips.js'
         getState: () => state,
         setState,
         text,
-        countStat,
+        countStat: (field, id) => hostSync.countStat(field, id),
         persistSetting,
         repaintHighlights: () => highlights.repaintHighlights(),
         sessionId: () => (resolveTarget(ctx) ?? state.target)?.sessionId,
@@ -341,7 +342,7 @@ import { builtinTips, normalizeTipList, tidyTip } from './tips.js'
         tidyQuote,
         annotationNoteLine,
         blockBreak,
-        countStat,
+        countStat: (field, id) => hostSync.countStat(field, id),
         deliver,
         composerHandle,
         commitAnnotations,
@@ -510,93 +511,22 @@ import { builtinTips, normalizeTipList, tidyTip } from './tips.js'
       // --- durable settings (Host half) -----------------------------------
 
       /**
-       * Read the Host half's durable record once per launch — and only then let
-       * the mirror write. The two are ordered here and nowhere else: a POST
-       * replaces the whole file, so writing before the read would erase the
-       * very settings a restart is supposed to come back from.
-       * @returns true when a restored record changed the state.
+       * The Host record, the page reload and the counters. The runtime owns the
+       * state; the two anchor resets come in as callbacks so this module does
+       * not reach into the neighbouring layers.
        */
-      function hydrateFromHost() {
-        return loadStoreFromHost()
-          .then((remote) => {
-            const adopted = adoptRemoteRecord(remote)
-            markSettingsRead()
-            return adopted
-          })
-          .catch(() => {
-            // No Host half (preview page, plain harness): the page is the copy.
-            markSettingsRead()
-            return false
-          })
-      }
-
-      /**
-       * Adopt the fields of a record the page does not hold — per field, so a
-       * page that already wrote its own geometry still gets the presets, and a
-       * page that holds everything keeps its own copy (the user just changed
-       * it) while the mirror refreshes the record from it.
-       */
-      function adoptRemoteRecord(remote) {
-        if (remote === null || remote === undefined || typeof remote !== 'object') return false
-        const pageHeldSomething = hasStoredSettings(settingsSnapshot())
-        const adopted = adoptFromHost(() => applySettingsStore(remote, { merge: true }))
-        if (!adopted) return false
-        reloadFromStorage()
-        // A page that held nothing is now exactly the record. A page that held
-        // some fields holds the union, so the record is brought up to date.
-        if (pageHeldSomething) markSettingsDirty()
-        else markSettingsSynced()
-        return true
-      }
-
-      /** Re-derive every persisted preference from the page storage. */
-      function reloadFromStorage() {
-        const saved = readJson(UI_KEY) ?? {}
-        // The tray comes back from storage; the marks a write left behind in a
-        // draft do not, because the draft they pointed at may be gone too.
-        resetAnchorRecovery()
-        // A reloaded window starts folded from its stored spot: no card anchor
-        // outlives the page it was folded on.
-        resetCardAnchor()
-        setState({
-          ...readSettings({ lang: state.lang, sessionId: state.target?.sessionId }),
-          tipIndex: 0,
-          // The restore follows the same launch rule as the first paint.
-          collapsed: true,
-          pos: isPoint(saved.pos) ? snapToEdge(saved.pos, true) : dockPosition(true),
-        })
-      }
-
-      /**
-       * Bump one of today's counters. The local calendar day is the bucket:
-       * a click after midnight starts a fresh row, and the store keeps the
-       * newest `STATS_DAYS` rows only. A preset send/write also bumps that
-       * preset's own count so the settings board can rank the top prompts.
-       */
-      function countStat(field, presetId) {
-        if (!STAT_FIELDS.includes(field)) return false
-        const key = dayKey()
-        const days = { ...state.stats.days }
-        const today = { ...(days[key] ?? {}) }
-        today[field] = (today[field] ?? 0) + 1
-        if (
-          typeof presetId === 'string' &&
-          presetId.length > 0 &&
-          presetId.length <= MAX_STAT_PRESET_ID &&
-          presetId !== '__proto__' &&
-          presetId !== 'constructor' &&
-          presetId !== 'prototype'
-        ) {
-          const presets = { ...(today.presets ?? {}) }
-          presets[presetId] = (presets[presetId] ?? 0) + 1
-          today.presets = presets
-        }
-        days[key] = today
-        const next = normalizeStats({ days })
-        persistSetting('stats', next)
-        setState({ stats: next })
-        return true
-      }
+      const hostSync = createHostSync({
+        getState: () => state,
+        setState,
+        resetAnchorRecovery,
+        resetCardAnchor,
+      })
+      const {
+        hydrateFromHost,
+        adoptRemoteRecord,
+        reloadFromStorage,
+        countStat,
+      } = hostSync
 
       // --- settings navigation --------------------------------------------
 

@@ -14,6 +14,7 @@ import { createAnnotations } from '../src/client/annotations.js'
 import { createCardPlacement } from '../src/client/card-placement.js'
 import { createComposerInsertion } from '../src/client/composer-insert.js'
 import { createHighlights } from '../src/client/highlights.js'
+import { createHostSync } from '../src/client/host-sync.js'
 import { createPopup } from '../src/client/popup.js'
 import { createPresetActions } from '../src/client/preset-actions.js'
 import { createQuoteWriting } from '../src/client/quote-writing.js'
@@ -629,6 +630,36 @@ check(
     if (previousWindow === undefined) delete globalThis.window
     else globalThis.window = previousWindow
   }
+}
+
+
+// --- counters: the daily bucket and the preset ranking -------------------
+
+{
+  const state = { stats: { days: {} }, lang: 'zh', target: undefined }
+  const persisted = []
+  const api = createHostSync({
+    getState: () => state,
+    setState: (patch) => Object.assign(state, patch),
+    resetAnchorRecovery: () => {},
+    resetCardAnchor: () => {},
+    // host-sync imports its storage helpers directly; the page is absent here,
+    // so the writes below only need the counter wiring, not a store.
+  })
+  const today = dayKey()
+
+  check('counters: an unknown field is refused', api.countStat('bogus'), false)
+  check('counters: an insert is counted', api.countStat('insert', 'p1'), true)
+  check('counters: the day gets its bucket', typeof state.stats.days[today], 'object')
+  check('counters: the field is one', state.stats.days[today].insert, 1)
+  check('counters: the preset is ranked', state.stats.days[today].presets.p1, 1)
+  check('counters: a second insert adds up', (api.countStat('insert', 'p1'), state.stats.days[today].insert), 2)
+  check('counters: a send lands in its own field', (api.countStat('send'), state.stats.days[today].send), 1)
+  check(
+    'counters: a prototype name is not ranked',
+    (api.countStat('insert', '__proto__'), Object.prototype.hasOwnProperty.call(state.stats.days[today].presets, '__proto__')),
+    false,
+  )
 }
 
 console.log(`\nunit checks: ${checks - failures} passed, ${failures} failed`)
