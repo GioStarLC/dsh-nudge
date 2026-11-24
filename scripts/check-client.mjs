@@ -1604,6 +1604,50 @@ function flowItemStub(key, text, children = []) {
   return element
 }
 
+/**
+ * One synthetic passage: a block element (P, LI, …) inside a flow item, with a
+ * single text node. `closest` answers the anchor selector with the flow item
+ * and a passage selector with the block itself.
+ */
+function passageStub(tagName, text) {
+  const block = {
+    nodeType: 1,
+    tagName,
+    hidden: false,
+    childNodes: [],
+    parentElement: null,
+    contains: (other) => other === block || other === textNode,
+  }
+  const textNode = { nodeType: 3, data: text, textContent: text, parentElement: block }
+  block.childNodes.push(textNode)
+  block.closest = (selector) =>
+    selector === '[data-chat-anchor-key]'
+      ? block.parentElement
+      : selector.includes('figcaption')
+        ? block
+        : null
+  return { block, textNode }
+}
+
+/** One flow item made of passages, for whole-paragraph expansion. */
+function passageFlowStub(key, passages) {
+  const element = {
+    nodeType: 1,
+    tagName: 'DIV',
+    hidden: false,
+    childNodes: [],
+    getAttribute: (name) => (name === 'data-chat-anchor-key' ? key : null),
+    matches: (selector) => selector === '[data-chat-anchor-key]',
+    contains: (other) => other === element || passages.some((item) => item.block.contains(other)),
+    closest: (selector) => (selector === '[data-chat-anchor-key]' ? element : null),
+  }
+  for (const item of passages) {
+    item.block.parentElement = element
+    element.childNodes.push(item.block)
+  }
+  return element
+}
+
 {
   const booted = await boot({})
   booted.sandbox.getSelection = selectionStub('原文内容', { nodeType: 1, closest: () => null })
@@ -1658,6 +1702,113 @@ function flowItemStub(key, text, children = []) {
   booted.runtime.attachComposer({ readDraft: () => '', setDraft: (value) => (written = value) })
   check('quick reply: write accepted', booted.runtime.writeAnnotations(), true)
   check('quick reply: composed message carries verdict + remark', written.includes('我的回答：同意，但第三点要改'), true)
+}
+
+{
+  // 「作为答案」: the mark covers the whole paragraph the selection sits in, the
+  // selected words become the note, and marking the same passage again replaces
+  // the earlier note instead of stacking a second identical highlight.
+  const booted = await boot({})
+  booted.sandbox.document.createRange = () => ({
+    setStart() {},
+    setEnd() {},
+    getBoundingClientRect: () => ({ left: 100, top: 300, right: 320, bottom: 320 }),
+  })
+  const first = passageStub('P', '第一段完整内容')
+  const second = passageStub('P', '第二段完整内容')
+  const flow = passageFlowStub('turn-9', [first, second])
+  booted.sandbox.document.querySelectorAll = (selector) =>
+    selector === '[data-chat-anchor-key]' ? [flow] : []
+  let selected = '第一段'
+  const range = {
+    commonAncestorContainer: first.block,
+    startContainer: first.textNode,
+    startOffset: 0,
+    endContainer: first.textNode,
+    endOffset: 3,
+    collapsed: false,
+    getBoundingClientRect: () => ({ left: 100, top: 300, right: 220, bottom: 320 }),
+    intersectsNode: (node) => node === first.textNode,
+  }
+  booted.sandbox.getSelection = () => ({
+    rangeCount: 1,
+    isCollapsed: false,
+    toString: () => selected,
+    anchorNode: first.textNode,
+    anchorOffset: 0,
+    focusNode: first.textNode,
+    focusOffset: selected.length,
+    getRangeAt: () => range,
+    removeAllRanges() {},
+  })
+  check('answer: captured', booted.runtime.captureSelection(), true)
+  check('answer: accepted', booted.runtime.markAsAnswer(), true)
+  const firstNote = booted.runtime.getSnapshot().annotations[0]
+  check('answer: the highlight covers the whole passage', firstNote.quote, '第一段完整内容')
+  check('answer: the selection is the note', firstNote.note, '第一段')
+  check('answer: the passage is anchored', firstNote.anchor?.key, 'turn-9')
+
+  selected = '第二段完整'
+  range.intersectsNode = (node) => node === second.textNode
+  check('answer: a second passage is captured', booted.runtime.captureSelection(), true)
+  check('answer: a second passage is accepted', booted.runtime.markAsAnswer(), true)
+  const tray = booted.runtime.getSnapshot().annotations
+  check('answer: another passage stacks', tray.length, 2)
+  check('answer: the second passage is highlighted', tray[1].quote, '第二段完整内容')
+
+  selected = '第二段'
+  check('answer: the same passage is captured again', booted.runtime.captureSelection(), true)
+  check('answer: the same passage is accepted again', booted.runtime.markAsAnswer(), true)
+  const replaced = booted.runtime.getSnapshot().annotations
+  check('answer: the same passage is replaced, not stacked', replaced.length, 2)
+  check('answer: the newer note wins', replaced[1].note, '第二段')
+}
+
+{
+  // A selection crossing paragraphs marks every passage it touches, joined in
+  // document order, and the selection itself stays the note.
+  const booted = await boot({})
+  booted.sandbox.document.createRange = () => ({
+    setStart() {},
+    setEnd() {},
+    getBoundingClientRect: () => ({ left: 100, top: 300, right: 320, bottom: 360 }),
+  })
+  const first = passageStub('P', '第一段完整内容')
+  const second = passageStub('P', '第二段完整内容')
+  const flow = passageFlowStub('turn-10', [first, second])
+  booted.sandbox.document.querySelectorAll = (selector) =>
+    selector === '[data-chat-anchor-key]' ? [flow] : []
+  const selected = '第一段...第二段'
+  const range = {
+    commonAncestorContainer: flow,
+    startContainer: first.textNode,
+    startOffset: 0,
+    endContainer: second.textNode,
+    endOffset: 3,
+    collapsed: false,
+    getBoundingClientRect: () => ({ left: 100, top: 300, right: 320, bottom: 360 }),
+    intersectsNode: (node) => node === first.textNode || node === second.textNode,
+  }
+  booted.sandbox.getSelection = () => ({
+    rangeCount: 1,
+    isCollapsed: false,
+    toString: () => selected,
+    anchorNode: first.textNode,
+    anchorOffset: 0,
+    focusNode: second.textNode,
+    focusOffset: 3,
+    getRangeAt: () => range,
+    removeAllRanges() {},
+  })
+  check('answer: a cross-paragraph selection is captured', booted.runtime.captureSelection(), true)
+  check('answer: a cross-paragraph selection is accepted', booted.runtime.markAsAnswer(), true)
+  const note = booted.runtime.getSnapshot().annotations[0]
+  check(
+    'answer: every touched passage is highlighted in order',
+    note.quote,
+    '第一段完整内容\n\n第二段完整内容',
+  )
+  check('answer: the cross-paragraph note keeps the selection', note.note, selected)
 }
 
 {
@@ -2088,9 +2239,9 @@ function countedFlowItem(key, text, counter) {
     null,
   )
   check(
-    'annotation: card carries its own close button',
-    Boolean(findByClass(popup, 'dsh-nudge-popup-close')),
-    true,
+    'annotation: the card carries no close button',
+    findByClass(popup, 'dsh-nudge-popup-close'),
+    null,
   )
   check(
     'annotation: card keeps the single quick-action row',
@@ -2099,21 +2250,37 @@ function countedFlowItem(key, text, counter) {
   )
   const quicks = findAllByClass(popup, 'dsh-nudge-popup-quick') ?? []
   check(
-    'annotation: the verdict buttons are icon-only',
-    quicks[0]?.children?.length === 1 && quicks[1]?.children?.length === 1,
-    true,
+    'annotation: the verdicts are words, not emoji',
+    quicks.map((item) => item?.children?.[0]).join('|'),
+    '同意|不同意',
   )
+  check('annotation: the card paints no emoji', findByClass(popup, 'emoji'), null)
   check(
-    'annotation: icon-only verdicts stay labelled',
+    'annotation: the verdicts stay labelled',
     quicks[0]?.props?.['aria-label'],
     '同意',
   )
   check(
     'annotation: card offers save and copy',
-    Boolean(findByClass(popup, 'dsh-nudge-popup-save')) &&
-      Boolean(findByClass(popup, 'dsh-nudge-popup-copy')),
+    findByClass(popup, 'dsh-nudge-popup-save')?.children?.[0],
+    '添加批注',
+  )
+  check(
+    'annotation: card offers copying',
+    Boolean(findByClass(popup, 'dsh-nudge-popup-copy')),
     true,
   )
+  const answerButton = findByClass(popup, 'dsh-nudge-popup-answer')
+  check('annotation: card offers the answer action', answerButton?.children?.[0], '作为答案')
+  check(
+    'annotation: the answer action explains itself',
+    answerButton?.props?.title,
+    '把它作为答案：高亮整段，选中的文字作为批注',
+  )
+  check('annotation: the card carries five actions', (findAllByTag(popup, 'button') ?? []).length, 5)
+  const popupSheet = String(findAllByTag(tree, 'style')?.[0]?.children?.[0] ?? '')
+  const fillRule = (popupSheet.match(/\.dsh-nudge-popup-row-fill>button\{[^}]*\}/) ?? [''])[0]
+  check('annotation: the action row splits the width evenly', fillRule.includes('flex:1 1 0'), true)
   check(
     'annotation: copy reports its own result',
     await booted.runtime.copyDraftQuote(),
@@ -2147,6 +2314,7 @@ function countedFlowItem(key, text, counter) {
   let tree = View()
   let popup = findByClass(tree, 'dsh-nudge-edit-popup')
   check('edit: the bubble opens over the passage', Boolean(popup), true)
+  check('edit: the bubble carries no close button', findByClass(popup, 'dsh-nudge-popup-close'), null)
   check('edit: the window leaves its tray folded', findByClass(tree, 'dsh-nudge-annotation-tray'), null)
   check('edit: the passage is quoted', findByClass(popup, 'dsh-nudge-edit-quote')?.children?.[0], '要改的那段原文')
   check('edit: the field holds the stored note', findByClass(popup, 'dsh-nudge-edit-input')?.props?.value, '原来的批注')

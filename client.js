@@ -203,6 +203,8 @@ window.__ModuleLoader__.load({
     highlightHint: '点对话里的高亮，可以改批注或取消高亮。',
       annotationsOffHint: '快速批注已关闭；打开批注栏的开关才能从选中文字添加批注。',
       addAnnotation: '添加批注',
+      asAnswer: '作为答案',
+      asAnswerHint: '把它作为答案：高亮整段，选中的文字作为批注',
       dismissAnnotation: '取消',
       deleteAnnotation: '取消高亮',
       editNoteHint: 'Enter 保存 · Shift+Enter 换行 · Esc 取消',
@@ -375,6 +377,8 @@ window.__ModuleLoader__.load({
     highlightHint: 'Click a highlight in the conversation to edit its note or remove the mark.',
       annotationsOffHint: 'Quick notes are off; turn them on in the note header to add notes from a selection.',
       addAnnotation: 'Add note',
+      asAnswer: 'As answer',
+      asAnswerHint: 'Use it as the answer: highlight the whole passage, keep the selection as the note',
       dismissAnnotation: 'Cancel',
       deleteAnnotation: 'Remove highlight',
       editNoteHint: 'Enter saves · Shift+Enter starts a new line · Esc cancels',
@@ -584,6 +588,93 @@ window.__ModuleLoader__.load({
       }
       walk(root)
       return { packed, map }
+    }
+
+    /**
+     * Tags whose text reads as one passage. A selection inside one of these is
+     * promoted to the whole block, so the highlight covers the paragraph the
+     * words sit in rather than the words alone.
+     */
+    const PASSAGE_TAGS = {
+      P: true,
+      LI: true,
+      H1: true,
+      H2: true,
+      H3: true,
+      H4: true,
+      H5: true,
+      H6: true,
+      BLOCKQUOTE: true,
+      PRE: true,
+      TD: true,
+      TH: true,
+      DT: true,
+      DD: true,
+      FIGCAPTION: true,
+    }
+
+    /** Whether a range touches one node; a node that cannot be asked is skipped. */
+    function rangeTouches(range, node) {
+      try {
+        return typeof range.intersectsNode === 'function' && range.intersectsNode(node) === true
+      } catch {
+        return false
+      }
+    }
+
+    /** The innermost passage tag between a node and its flow item. */
+    function passageBlockOf(node, flowItem) {
+      let element = elementOfNode(node)
+      while (element !== null && element !== flowItem) {
+        if (PASSAGE_TAGS[String(element.tagName ?? '').toUpperCase()] === true) return element
+        element = element.parentElement ?? null
+      }
+      return flowItem
+    }
+
+    /** The text one block carries, with only its trailing whitespace dropped. */
+    function blockTextOf(block) {
+      let text = ''
+      const walk = (node) => {
+        for (const child of node.childNodes ?? []) {
+          if (child.nodeType === 3) text += child.data ?? ''
+          else if (child.nodeType === 1 && !isHiddenElement(child)) walk(child)
+        }
+      }
+      walk(block)
+      return text.replace(/\s+$/, '')
+    }
+
+    /**
+     * The whole passages a selection touches, in document order.
+     *
+     * A selection inside a paragraph names that paragraph; one crossing several
+     * names all of them. The innermost block wins, so a list item wrapping a
+     * paragraph contributes its words once, and a flow item that carries no
+     * block of its own stands for its whole text.
+     */
+    function passagesOfRange(range) {
+      const elements = document.querySelectorAll?.(ANCHOR_SELECTOR) ?? []
+      const blocks = []
+      for (const element of elements) {
+        const walk = (node) => {
+          for (const child of node.childNodes ?? []) {
+            if (child.nodeType === 3) {
+              if (!rangeTouches(range, child)) continue
+              const block = passageBlockOf(child, element)
+              if (!blocks.includes(block)) blocks.push(block)
+            } else if (child.nodeType === 1 && !isHiddenElement(child)) {
+              walk(child)
+            }
+          }
+        }
+        walk(element)
+      }
+      const innermost = blocks.filter(
+        (block) => !blocks.some((other) => other !== block && block.contains?.(other) === true),
+      )
+      const texts = innermost.map(blockTextOf).filter((text) => text.trim() !== '')
+      return texts.length === 0 ? '' : texts.join('\n\n')
     }
 
     /** A DOM Range covering [start, end) of a packed map, or null. */
@@ -2699,6 +2790,53 @@ window.__ModuleLoader__.load({
         clearNativeSelection(draft.quote)
         // Only the text clears. A note landing never opens or resizes the tray:
         // the window keeps its shape while several passages are annotated.
+        commitAnnotations(next, { note: '', error: '' })
+        countStat('annotation')
+        return true
+      }
+
+      /**
+       * Commit the captured passage as an answer.
+       *
+       * The highlight covers the whole paragraph(s) the selection sits in, and
+       * the selected words become the note itself — the note says "this is the
+       * answer" without the user retyping it.
+       */
+      function markAsAnswer() {
+        const draft = state.annotationDraft
+        if (!draft || typeof draft.quote !== 'string' || draft.quote.trim() === '') return false
+        let quote = draft.quote
+        if (draft.range != null) {
+          try {
+            quote = passagesOfRange(draft.range) || draft.quote
+          } catch {
+            quote = draft.quote
+          }
+        }
+        let anchor = null
+        if (draft.range != null) {
+          try {
+            anchor = anchorFromRange(draft.range, quote)
+          } catch {
+            anchor = null
+          }
+        }
+        if (anchor === null) anchor = anchorFromQuote(quote)
+        if (anchor === null) recordAnchorMiss(quote)
+        const annotation = {
+          id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+          quote,
+          note: draft.quote,
+          anchor,
+        }
+        // One answer per passage: marking the same block again replaces the
+        // earlier note instead of stacking an identical highlight.
+        const packed = packedText(quote)
+        const next = [
+          ...state.annotations.filter((item) => packedText(item.quote) !== packed),
+          annotation,
+        ]
+        clearNativeSelection(draft.quote)
         commitAnnotations(next, { note: '', error: '' })
         countStat('annotation')
         return true
@@ -4942,6 +5080,7 @@ window.__ModuleLoader__.load({
         showTip,
         hideTip,
         addAnnotation,
+        markAsAnswer,
         quickReply,
         copyDraftQuote,
         startEditAnnotation,
@@ -4983,7 +5122,7 @@ window.__ModuleLoader__.load({
     }
 
     const CSS = `
-.dsh-nudge-card,.dsh-nudge-pill,.dsh-nudge-settings,.dsh-nudge-popup{--dn-accent:color-mix(in srgb,var(--dsw-static-deepseek-450,#5686fe) 78%,var(--dsw-alias-label-primary,#1a1a1a) 22%);--dn-accent-soft:color-mix(in srgb,var(--dsw-static-deepseek-450,#5686fe) 14%,transparent);--dn-accent-line:color-mix(in srgb,var(--dsw-static-deepseek-450,#5686fe) 38%,transparent);--dn-accent-edge:color-mix(in srgb,var(--dsw-static-deepseek-450,#5686fe) 62%,transparent);--dn-line:var(--dsw-alias-border-l1,rgba(127,127,127,.25));--dn-line-strong:color-mix(in srgb,var(--dsw-alias-label-primary,#1a1a1a) 28%,transparent);--dn-hover:color-mix(in srgb,var(--dsw-alias-label-primary,#1a1a1a) 6%,transparent);--dn-agree:#2e7d32;--dn-note:#8b5cf6;--dn-frame:1px}
+.dsh-nudge-card,.dsh-nudge-pill,.dsh-nudge-settings,.dsh-nudge-popup{--dn-accent:color-mix(in srgb,var(--dsw-static-deepseek-450,#5686fe) 78%,var(--dsw-alias-label-primary,#1a1a1a) 22%);--dn-accent-soft:color-mix(in srgb,var(--dsw-static-deepseek-450,#5686fe) 14%,transparent);--dn-accent-line:color-mix(in srgb,var(--dsw-static-deepseek-450,#5686fe) 38%,transparent);--dn-accent-edge:color-mix(in srgb,var(--dsw-static-deepseek-450,#5686fe) 62%,transparent);--dn-line:var(--dsw-alias-border-l1,rgba(127,127,127,.25));--dn-line-strong:color-mix(in srgb,var(--dsw-alias-label-primary,#1a1a1a) 28%,transparent);--dn-hover:color-mix(in srgb,var(--dsw-alias-label-primary,#1a1a1a) 6%,transparent);--dn-note:#8b5cf6;--dn-frame:1px}
 .dsh-nudge-card{position:fixed;z-index:${Z_INDEX};width:min(304px,calc(100vw - 24px));display:flex;flex-direction:column;border-radius:16px;border:var(--dn-frame) solid var(--dn-accent-edge);background:var(--dsw-alias-bg-layer-1,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);box-shadow:0 1px 2px rgba(15,23,42,.04),0 18px 44px -22px rgba(15,23,42,.3);font:13px/1.55 ui-sans-serif,system-ui,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;overflow:hidden;pointer-events:auto;animation:dsh-nudge-in .18s ease-out}
 @keyframes dsh-nudge-in{from{opacity:0;transform:translateY(-5px) scale(.985)}to{opacity:1;transform:none}}
 .dsh-nudge-title{display:flex;align-items:center;gap:8px;padding:12px 12px 10px 14px;cursor:grab;user-select:none;touch-action:none;border-bottom:1px solid var(--dn-line)}
@@ -5058,7 +5197,9 @@ window.__ModuleLoader__.load({
 .dsh-nudge-ask:focus-visible{outline:2px solid var(--dn-accent-line);outline-offset:2px}
 .dsh-nudge-annotation-quote{font-size:11.5px;line-height:1.5;color:var(--dsw-alias-label-secondary,#5a5a66);white-space:pre-wrap;word-break:break-word;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
 .dsh-nudge-annotation-hint{font-size:11px;line-height:1.5;color:var(--dsw-alias-label-secondary,#5a5a66)}
-.dsh-nudge-popup{position:fixed;z-index:${Z_INDEX + 1};box-sizing:border-box;width:280px;max-width:calc(100vw - 16px);display:flex;flex-direction:column;gap:8px;padding:10px;border-radius:12px;border:1px solid var(--dn-line);background:var(--dsw-alias-bg-layer-1,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);box-shadow:0 10px 30px rgba(0,0,0,.16),0 2px 8px rgba(0,0,0,.08);font:13px/1.45 ui-sans-serif,system-ui,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;pointer-events:auto;opacity:.72;transition:opacity .22s ease;animation:dsh-nudge-popup-in .12s cubic-bezier(.16,1,.3,1)}
+/* 340 is also the width popupPosition()/placeOverRect() lay the card out with:
+   change one and the card drifts off its anchor and past the viewport edge. */
+.dsh-nudge-popup{position:fixed;z-index:${Z_INDEX + 1};box-sizing:border-box;width:340px;max-width:calc(100vw - 16px);display:flex;flex-direction:column;gap:8px;padding:10px;border-radius:12px;border:1px solid var(--dn-line);background:var(--dsw-alias-bg-layer-1,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);box-shadow:0 10px 30px rgba(0,0,0,.16),0 2px 8px rgba(0,0,0,.08);font:13px/1.45 ui-sans-serif,system-ui,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;pointer-events:auto;opacity:.72;transition:opacity .22s ease;animation:dsh-nudge-popup-in .12s cubic-bezier(.16,1,.3,1)}
 .dsh-nudge-popup:hover,.dsh-nudge-popup:focus-within{opacity:1}
 /* The end state stays open on purpose: the card takes the focus in the frame
    it mounts, so :focus-within makes its resting opacity 1 — a fixed
@@ -5067,8 +5208,6 @@ window.__ModuleLoader__.load({
    an upward-opening card. */
 @keyframes dsh-nudge-popup-in{from{opacity:0;scale:.97}}
 @media (prefers-reduced-motion:reduce){.dsh-nudge-popup{animation:none;transition:none}}
-.dsh-nudge-popup-close{position:absolute;top:6px;right:6px;width:22px;height:22px;padding:0;border:0;border-radius:6px;background:transparent;color:var(--dsw-alias-label-secondary,#5a5a66);font:inherit;font-size:16px;line-height:20px;cursor:pointer}
-.dsh-nudge-popup-close:hover{background:var(--dn-hover);color:var(--dsw-alias-label-primary,#1a1a1a)}
 .dsh-nudge-settings-panel{display:flex;flex-direction:column;gap:10px;padding:12px;flex:1 1 auto;min-height:0;max-height:min(520px,72vh);overflow:auto}
 .dsh-nudge-settings-head{display:flex;align-items:center;gap:8px}
 .dsh-nudge-settings-name{font:inherit;font-size:12px;font-weight:600;color:var(--dsw-alias-label-primary,#1a1a1a)}
@@ -5078,15 +5217,14 @@ window.__ModuleLoader__.load({
 .dsh-nudge-popup-row button:focus-visible{outline:2px solid var(--dn-accent-line);outline-offset:2px}
 .dsh-nudge-popup-mic{display:inline-flex;align-items:center;gap:5px;height:26px;padding:0 9px;border:1px solid var(--dn-line);border-radius:999px;background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-secondary,#5a5a66);font:inherit;font-size:11px;line-height:1;cursor:pointer}
 .dsh-nudge-popup-mic-hint{font-size:11px;line-height:1.4;color:var(--dsw-alias-label-secondary,#5a5a66)}
-.dsh-nudge-popup-quick{display:inline-flex;align-items:center;justify-content:center;gap:5px;min-width:0;padding:0 6px}
-.dsh-nudge-popup-quick .emoji{font-size:15px;line-height:1}
-.dsh-nudge-popup-quick:hover{background:var(--dn-hover)}
-.dsh-nudge-popup-quick.agree{border-color:var(--dn-agree);background:var(--dn-agree);color:#fff;font-weight:600}
-.dsh-nudge-popup-quick.agree:hover{filter:brightness(.94)}
-.dsh-nudge-popup-row .dsh-nudge-popup-save{border-color:var(--dn-accent-line);background:var(--dn-accent-soft);color:var(--dn-accent);font-weight:600}
-.dsh-nudge-popup-row .dsh-nudge-popup-save:hover{background:color-mix(in srgb,var(--dn-accent) 20%,transparent)}
-.dsh-nudge-popup-row .dsh-nudge-popup-copy{color:var(--dn-accent)}
-.dsh-nudge-popup-copy[data-copied="true"]{border-color:var(--dn-accent-line);background:var(--dn-accent-soft)}
+/* One action style for the whole card: same height, radius and type, and only
+   one primary. The capture row splits the width evenly, so the buttons end on
+   the same edges as the field above them instead of trailing off to the right. */
+.dsh-nudge-popup-row-fill>button{flex:1 1 0;min-width:0;padding:0 4px;text-align:center;overflow:hidden;text-overflow:ellipsis}
+.dsh-nudge-popup-row .dsh-nudge-popup-quick:hover,.dsh-nudge-popup-row .dsh-nudge-popup-answer:hover{background:var(--dn-hover)}
+.dsh-nudge-popup-row .dsh-nudge-popup-save{border-color:var(--dn-accent);background:var(--dn-accent);color:var(--dsw-alias-label-primary-inverted,#fff);font-weight:600}
+.dsh-nudge-popup-row .dsh-nudge-popup-save:hover{filter:brightness(1.06)}
+.dsh-nudge-popup-copy[data-copied="true"]{border-color:var(--dn-accent-line);background:var(--dn-accent-soft);color:var(--dn-accent)}
 .dsh-nudge-popup-hint{display:flex;justify-content:space-between;gap:8px;font-size:11px;line-height:1.5;color:var(--dsw-alias-label-secondary,#5a5a66)}
 .dsh-nudge-popup-hint kbd{font:inherit;padding:0 3px;border:1px solid var(--dn-line);border-radius:4px;background:color-mix(in srgb,var(--dsw-alias-label-primary,#1a1a1a) 4%,transparent)}
 /* The in-place note editor: the capture card's shape, hung off the passage.
@@ -5562,18 +5700,6 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
                   role: 'dialog',
                   'aria-label': t('annotationsTitle'),
                 },
-                h(
-                  'button',
-                  {
-                    key: 'close',
-                    type: 'button',
-                    className: 'dsh-nudge-popup-close',
-                    title: `${t('dismissAnnotation')} (Esc)`,
-                    'aria-label': t('dismissAnnotation'),
-                    onClick: () => runtime.dismissAnnotationDraft(),
-                  },
-                  '×',
-                ),
                 h('textarea', {
                   key: 'note',
                   ref: popupInputRef,
@@ -5599,17 +5725,17 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
                 }),
                 h(
                   'div',
-                  { key: 'actions', className: 'dsh-nudge-popup-row' },
+                  { key: 'actions', className: 'dsh-nudge-popup-row dsh-nudge-popup-row-fill' },
                   h(
                     'button',
                     {
                       type: 'button',
-                      className: 'dsh-nudge-popup-quick agree',
+                      className: 'dsh-nudge-popup-quick',
                       title: t('agree'),
                       'aria-label': t('agree'),
                       onClick: () => runtime.quickReply('agree'),
                     },
-                    h('span', { className: 'emoji', 'aria-hidden': true }, '👍'),
+                    t('agree'),
                   ),
                   h(
                     'button',
@@ -5620,17 +5746,7 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
                       'aria-label': t('disagree'),
                       onClick: () => runtime.quickReply('disagree'),
                     },
-                    h('span', { className: 'emoji', 'aria-hidden': true }, '👎'),
-                  ),
-                  h(
-                    'button',
-                    {
-                      type: 'button',
-                      className: 'dsh-nudge-popup-save',
-                      title: `${t('addAnnotation')} (Enter)`,
-                      onClick: () => runtime.addAnnotation(),
-                    },
-                    t('addAnnotation'),
+                    t('disagree'),
                   ),
                   h(
                     'button',
@@ -5642,6 +5758,27 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
                       onClick: copyQuote,
                     },
                     copyLabel,
+                  ),
+                  h(
+                    'button',
+                    {
+                      type: 'button',
+                      className: 'dsh-nudge-popup-answer',
+                      title: t('asAnswerHint'),
+                      'aria-label': t('asAnswerHint'),
+                      onClick: () => runtime.markAsAnswer(),
+                    },
+                    t('asAnswer'),
+                  ),
+                  h(
+                    'button',
+                    {
+                      type: 'button',
+                      className: 'dsh-nudge-popup-save',
+                      title: `${t('addAnnotation')} (Enter)`,
+                      onClick: () => runtime.addAnnotation(),
+                    },
+                    t('addAnnotation'),
                   ),
                 ),
               )
@@ -5667,18 +5804,6 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
                   role: 'dialog',
                   'aria-label': t('annotationsTitle'),
                 },
-                h(
-                  'button',
-                  {
-                    key: 'close',
-                    type: 'button',
-                    className: 'dsh-nudge-popup-close',
-                    title: `${t('dismissAnnotation')} (Esc)`,
-                    'aria-label': t('dismissAnnotation'),
-                    onClick: () => runtime.cancelAnnotationEdit(),
-                  },
-                  '×',
-                ),
                 h(
                   'div',
                   { key: 'quote', className: 'dsh-nudge-annotation-quote dsh-nudge-edit-quote' },
