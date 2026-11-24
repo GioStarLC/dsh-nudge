@@ -198,12 +198,12 @@ window.__ModuleLoader__.load({
       switchOff: '关',
       answerLabel: '我的回答：',
       annotationsTitle: '批注',
-      annotationPlaceholder: '对这段内容说点什么…',
+      annotationPlaceholder: '填写批注，可留空…',
       annotationsHint: '选中对话里的文字，选区旁会弹出批注卡片；批注汇总在这里。',
     highlightHint: '点对话里的高亮，可以改批注或取消高亮。',
       annotationsOffHint: '快速批注已关闭；打开批注栏的开关才能从选中文字添加批注。',
       addAnnotation: '添加批注',
-      asAnswer: '作为答案',
+      asAnswer: '定为答案',
       asAnswerHint: '把它作为答案：高亮整段，选中的文字作为批注',
       dismissAnnotation: '取消',
       deleteAnnotation: '取消高亮',
@@ -251,8 +251,10 @@ window.__ModuleLoader__.load({
       collapseNudge: '收起快捷输入',
       expandNudge: '展开快捷输入',
       agree: '同意',
+      agreeThis: '同意这段',
       disagree: '不同意',
-      copyQuote: '复制',
+      disagreeThis: '不同意这段',
+      copyQuote: '复制原文',
       copied: '引用已复制到剪贴板。',
       copyFailed: '复制失败，请手动选中后复制。',
       copiedShort: '已复制',
@@ -372,13 +374,13 @@ window.__ModuleLoader__.load({
       switchOff: 'off',
       answerLabel: 'My answer: ',
       annotationsTitle: 'Notes',
-      annotationPlaceholder: 'Say something about this passage…',
+      annotationPlaceholder: 'Write a note, or leave it empty…',
       annotationsHint: 'Select text in the conversation and a note card opens beside it; notes are collected here.',
     highlightHint: 'Click a highlight in the conversation to edit its note or remove the mark.',
       annotationsOffHint: 'Quick notes are off; turn them on in the note header to add notes from a selection.',
       addAnnotation: 'Add note',
-      asAnswer: 'As answer',
-      asAnswerHint: 'Use it as the answer: highlight the whole passage, keep the selection as the note',
+      asAnswer: 'Mark as answer',
+      asAnswerHint: 'Mark it as the answer: highlight the whole passage, keep the selection as the note',
       dismissAnnotation: 'Cancel',
       deleteAnnotation: 'Remove highlight',
       editNoteHint: 'Enter saves · Shift+Enter starts a new line · Esc cancels',
@@ -425,8 +427,10 @@ window.__ModuleLoader__.load({
       collapseNudge: 'Collapse quick input',
       expandNudge: 'Expand quick input',
       agree: 'Agree',
+      agreeThis: 'Agree with this',
       disagree: 'Disagree',
-      copyQuote: 'Copy',
+      disagreeThis: 'Disagree with this',
+      copyQuote: 'Copy text',
       copied: 'The passage was copied to the clipboard.',
       copyFailed: 'Could not copy; select and copy it manually.',
       copiedShort: 'Copied',
@@ -5218,13 +5222,20 @@ window.__ModuleLoader__.load({
 .dsh-nudge-popup-mic{display:inline-flex;align-items:center;gap:5px;height:26px;padding:0 9px;border:1px solid var(--dn-line);border-radius:999px;background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-secondary,#5a5a66);font:inherit;font-size:11px;line-height:1;cursor:pointer}
 .dsh-nudge-popup-mic-hint{font-size:11px;line-height:1.4;color:var(--dsw-alias-label-secondary,#5a5a66)}
 /* One action style for the whole card: same height, radius and type, and only
-   one primary. The capture row splits the width evenly, so the buttons end on
-   the same edges as the field above them instead of trailing off to the right. */
-.dsh-nudge-popup-row-fill>button{flex:1 1 0;min-width:0;padding:0 4px;text-align:center;overflow:hidden;text-overflow:ellipsis}
-.dsh-nudge-popup-row .dsh-nudge-popup-quick:hover,.dsh-nudge-popup-row .dsh-nudge-popup-answer:hover{background:var(--dn-hover)}
+   one primary. The actions size themselves by their words, so the longer
+   verdict labels stay readable; copying is a utility and sits with the field. */
+.dsh-nudge-popup-field{display:flex;align-items:flex-start;gap:6px}
+.dsh-nudge-popup-field .dsh-nudge-annotation-input{flex:1 1 auto;min-width:0}
+.dsh-nudge-popup-copy{flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;width:34px;height:34px;padding:0;border:1px solid var(--dn-line);border-radius:8px;background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-secondary,#5a5a66);cursor:pointer;transition:color .12s ease,background-color .12s ease,border-color .12s ease}
+.dsh-nudge-popup-copy:hover{color:var(--dn-accent);background:var(--dn-hover)}
+.dsh-nudge-popup-copy:focus-visible{outline:2px solid var(--dn-accent-line);outline-offset:2px}
+.dsh-nudge-popup-copy[data-copied="done"]{color:var(--dn-accent);border-color:var(--dn-accent-line);background:var(--dn-accent-soft)}
+.dsh-nudge-popup-copy[data-copied="failed"]{color:var(--dsw-alias-state-error-primary,#c8433c);border-color:color-mix(in srgb,var(--dsw-alias-state-error-primary,#c8433c) 45%,transparent)}
+.dsh-nudge-popup-row .dsh-nudge-popup-quick:hover{background:var(--dn-hover)}
+.dsh-nudge-popup-row .dsh-nudge-popup-answer{border-color:var(--dn-accent-line);background:var(--dn-accent-soft);color:var(--dn-accent)}
+.dsh-nudge-popup-row .dsh-nudge-popup-answer:hover{background:color-mix(in srgb,var(--dn-accent) 20%,transparent)}
 .dsh-nudge-popup-row .dsh-nudge-popup-save{border-color:var(--dn-accent);background:var(--dn-accent);color:var(--dsw-alias-label-primary-inverted,#fff);font-weight:600}
 .dsh-nudge-popup-row .dsh-nudge-popup-save:hover{filter:brightness(1.06)}
-.dsh-nudge-popup-copy[data-copied="true"]{border-color:var(--dn-accent-line);background:var(--dn-accent-soft);color:var(--dn-accent)}
 .dsh-nudge-popup-hint{display:flex;justify-content:space-between;gap:8px;font-size:11px;line-height:1.5;color:var(--dsw-alias-label-secondary,#5a5a66)}
 .dsh-nudge-popup-hint kbd{font:inherit;padding:0 3px;border:1px solid var(--dn-line);border-radius:4px;background:color-mix(in srgb,var(--dsw-alias-label-primary,#1a1a1a) 4%,transparent)}
 /* The in-place note editor: the capture card's shape, hung off the passage.
@@ -5683,12 +5694,47 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
             copyFlashTimer.current = window.setTimeout(() => setCopyFlash(''), 1400)
           })
         }
-        const copyLabel =
-          copyFlash === 'done'
-            ? t('copiedShort')
-            : copyFlash === 'failed'
-              ? t('copyFailedShort')
-              : t('copyQuote')
+        /** Copy the captured passage; the icon reports the result in place. */
+        const copyIcon = h(
+          'svg',
+          { width: 14, height: 14, viewBox: '0 0 16 16', fill: 'none', 'aria-hidden': true },
+          h('rect', {
+            x: 5.4,
+            y: 5.4,
+            width: 7.4,
+            height: 7.4,
+            rx: 1.6,
+            stroke: 'currentColor',
+            strokeWidth: 1.3,
+          }),
+          h('path', {
+            d: 'M10.6 5.4V4.2A1.6 1.6 0 0 0 9 2.6H4.2A1.6 1.6 0 0 0 2.6 4.2V9c0 .9.7 1.6 1.6 1.6h1.2',
+            stroke: 'currentColor',
+            strokeWidth: 1.3,
+            strokeLinecap: 'round',
+          }),
+        )
+        const copiedIcon = h(
+          'svg',
+          { width: 14, height: 14, viewBox: '0 0 16 16', fill: 'none', 'aria-hidden': true },
+          h('path', {
+            d: 'm3.4 8.4 3 3 6.2-6.4',
+            stroke: 'currentColor',
+            strokeWidth: 1.6,
+            strokeLinecap: 'round',
+            strokeLinejoin: 'round',
+          }),
+        )
+        const copyFailedIcon = h(
+          'svg',
+          { width: 14, height: 14, viewBox: '0 0 16 16', fill: 'none', 'aria-hidden': true },
+          h('path', {
+            d: 'M4.4 4.4l7.2 7.2M11.6 4.4l-7.2 7.2',
+            stroke: 'currentColor',
+            strokeWidth: 1.6,
+            strokeLinecap: 'round',
+          }),
+        )
         const popup =
           state.quick && draft !== null && state.annotationCardHidden !== true
             ? h(
@@ -5700,64 +5746,72 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
                   role: 'dialog',
                   'aria-label': t('annotationsTitle'),
                 },
-                h('textarea', {
-                  key: 'note',
-                  ref: popupInputRef,
-                  rows: 1,
-                  className: 'dsh-nudge-annotation-input',
-                  value: state.annotationNote,
-                  placeholder: t('annotationPlaceholder'),
-                  'aria-label': t('annotationPlaceholder'),
-                  // Typing must never be interrupted: the note field owns the
-                  // caret, so the transcript selection is left alone here.
-                  onChange: (event) => {
-                    runtime.setAnnotationNote(event.target.value)
-                  },
-                  onKeyDown: (event) => {
-                    if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
-                      event.preventDefault()
-                      runtime.addAnnotation()
-                    } else if (event.key === 'Escape') {
-                      event.preventDefault()
-                      runtime.dismissAnnotationDraft()
-                    }
-                  },
-                }),
                 h(
                   'div',
-                  { key: 'actions', className: 'dsh-nudge-popup-row dsh-nudge-popup-row-fill' },
-                  h(
-                    'button',
-                    {
-                      type: 'button',
-                      className: 'dsh-nudge-popup-quick',
-                      title: t('agree'),
-                      'aria-label': t('agree'),
-                      onClick: () => runtime.quickReply('agree'),
+                  { key: 'field', className: 'dsh-nudge-popup-field' },
+                  h('textarea', {
+                    key: 'note',
+                    ref: popupInputRef,
+                    rows: 1,
+                    className: 'dsh-nudge-annotation-input',
+                    value: state.annotationNote,
+                    placeholder: t('annotationPlaceholder'),
+                    'aria-label': t('annotationPlaceholder'),
+                    // Typing must never be interrupted: the note field owns the
+                    // caret, so the transcript selection is left alone here.
+                    onChange: (event) => {
+                      runtime.setAnnotationNote(event.target.value)
                     },
-                    t('agree'),
-                  ),
-                  h(
-                    'button',
-                    {
-                      type: 'button',
-                      className: 'dsh-nudge-popup-quick',
-                      title: t('disagree'),
-                      'aria-label': t('disagree'),
-                      onClick: () => runtime.quickReply('disagree'),
+                    onKeyDown: (event) => {
+                      if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+                        event.preventDefault()
+                        runtime.addAnnotation()
+                      } else if (event.key === 'Escape') {
+                        event.preventDefault()
+                        runtime.dismissAnnotationDraft()
+                      }
                     },
-                    t('disagree'),
-                  ),
+                  }),
                   h(
                     'button',
                     {
                       type: 'button',
                       className: 'dsh-nudge-popup-copy',
-                      title: t('copyHint'),
-                      'data-copied': copyFlash === 'done' ? 'true' : undefined,
+                      title:
+                        copyFlash === 'done'
+                          ? t('copiedShort')
+                          : copyFlash === 'failed'
+                            ? t('copyFailedShort')
+                            : t('copyHint'),
+                      'aria-label': t('copyHint'),
+                      'data-copied': copyFlash === '' ? undefined : copyFlash,
                       onClick: copyQuote,
                     },
-                    copyLabel,
+                    copyFlash === 'done' ? copiedIcon : copyFlash === 'failed' ? copyFailedIcon : copyIcon,
+                  ),
+                ),
+                h('div', { key: 'actions', className: 'dsh-nudge-popup-row' },
+                  h(
+                    'button',
+                    {
+                      type: 'button',
+                      className: 'dsh-nudge-popup-quick',
+                      title: t('agreeThis'),
+                      'aria-label': t('agreeThis'),
+                      onClick: () => runtime.quickReply('agree'),
+                    },
+                    t('agreeThis'),
+                  ),
+                  h(
+                    'button',
+                    {
+                      type: 'button',
+                      className: 'dsh-nudge-popup-quick',
+                      title: t('disagreeThis'),
+                      'aria-label': t('disagreeThis'),
+                      onClick: () => runtime.quickReply('disagree'),
+                    },
+                    t('disagreeThis'),
                   ),
                   h(
                     'button',

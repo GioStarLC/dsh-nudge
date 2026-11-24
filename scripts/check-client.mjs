@@ -2252,35 +2252,41 @@ function countedFlowItem(key, text, counter) {
   check(
     'annotation: the verdicts are words, not emoji',
     quicks.map((item) => item?.children?.[0]).join('|'),
-    '同意|不同意',
+    '同意这段|不同意这段',
   )
   check('annotation: the card paints no emoji', findByClass(popup, 'emoji'), null)
   check(
-    'annotation: the verdicts stay labelled',
+    'annotation: the verdicts name the passage they judge',
     quicks[0]?.props?.['aria-label'],
-    '同意',
+    '同意这段',
   )
   check(
-    'annotation: card offers save and copy',
+    'annotation: card offers the primary action',
     findByClass(popup, 'dsh-nudge-popup-save')?.children?.[0],
     '添加批注',
   )
+  const field = findByClass(popup, 'dsh-nudge-popup-field')
+  const copyButton = findByClass(field, 'dsh-nudge-popup-copy')
   check(
-    'annotation: card offers copying',
-    Boolean(findByClass(popup, 'dsh-nudge-popup-copy')),
-    true,
+    'annotation: copying sits with the field, not the actions',
+    copyButton?.props?.['aria-label'],
+    '复制选中的原文',
+  )
+  check('annotation: copying is one icon, not a label', copyButton?.children?.[0]?.type, 'svg')
+  const actions = findByClass(popup, 'dsh-nudge-popup-row')
+  check(
+    'annotation: the action row holds only outcomes',
+    findAllByClass(actions, 'dsh-nudge-popup-copy').length,
+    0,
   )
   const answerButton = findByClass(popup, 'dsh-nudge-popup-answer')
-  check('annotation: card offers the answer action', answerButton?.children?.[0], '作为答案')
+  check('annotation: card offers the answer action', answerButton?.children?.[0], '定为答案')
   check(
     'annotation: the answer action explains itself',
     answerButton?.props?.title,
     '把它作为答案：高亮整段，选中的文字作为批注',
   )
   check('annotation: the card carries five actions', (findAllByTag(popup, 'button') ?? []).length, 5)
-  const popupSheet = String(findAllByTag(tree, 'style')?.[0]?.children?.[0] ?? '')
-  const fillRule = (popupSheet.match(/\.dsh-nudge-popup-row-fill>button\{[^}]*\}/) ?? [''])[0]
-  check('annotation: the action row splits the width evenly', fillRule.includes('flex:1 1 0'), true)
   check(
     'annotation: copy reports its own result',
     await booted.runtime.copyDraftQuote(),
