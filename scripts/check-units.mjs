@@ -31,6 +31,7 @@ import {
 } from '../src/client/presets.js'
 import { deliveryModeOf, isFrameWidth } from '../src/client/settings.js'
 import { dayKey, normalizeStats, recentDayKeys } from '../src/client/stats.js'
+import { createWorld } from '../src/client/world.js'
 import { builtinTips, normalizeTipList, tidyTip } from '../src/client/tips.js'
 
 let failures = 0
@@ -696,6 +697,76 @@ check(
     if (previousWindow === undefined) delete globalThis.window
     else globalThis.window = previousWindow
   }
+}
+
+
+// --- world: the conversation switch and the flow check -------------------
+
+{
+  const state = {}
+  const settled = []
+  const ctx = {
+    get(name) {
+      if (name === 'sessions') {
+        return {
+          list: {
+            getSnapshot: () => ({ ids: ['A'], byId: { A: { title: '会话甲', retainedBy: { mainView: 1 } } } }),
+            subscribe: () => () => {},
+          },
+        }
+      }
+      if (name === 'uiSession') {
+        return { sessionStatus: { getSnapshot: () => new Map(), subscribe: () => () => {} } }
+      }
+      return undefined
+    },
+  }
+  const noop = () => {}
+  const api = createWorld({
+    setState: (patch) => Object.assign(state, patch),
+    ctx,
+    delivery: { isWaiting: () => false, onStatusChange: noop },
+    endWaiting: noop,
+    settleAnnotation: (patch) => settled.push(patch),
+    resetAnchorRecovery: noop,
+    onResize: noop,
+    onPageHide: noop,
+    onVisibilityChange: noop,
+    syncComposerFocus: noop,
+    onPointerGestureDown: noop,
+    onPointerGestureUp: noop,
+    captureSelectionLater: noop,
+    onSelectionKeyup: noop,
+    onSelectionChange: noop,
+    onTranscriptClick: noop,
+    onExtendPointerDown: noop,
+    onExtendPointerMove: noop,
+    onExtendPointerUp: noop,
+    onOuterPointerDown: noop,
+    onPopupKeydown: noop,
+    scheduleRepaint: noop,
+    onPopupDismiss: noop,
+  })
+
+  api.refreshWorld()
+  check('world: the first refresh settles on the conversation', settled.length, 1)
+  check('world: the settled target is the retained one', settled[0].target.sessionId, 'A')
+
+  api.refreshWorld()
+  check('world: the same conversation only updates facts', state.target.sessionId, 'A')
+  check('world: settling happens once per switch', settled.length, 1)
+
+  check('world: a re-keyed row counts as a flow change', api.flowAnchorsChanged([{ type: 'attributes' }]), true)
+  check(
+    'world: a nested flow item counts',
+    api.flowAnchorsChanged([{ addedNodes: [{ nodeType: 1, matches: () => true, querySelector: () => null }] }]),
+    true,
+  )
+  check(
+    'world: an unrelated node is not a flow change',
+    api.flowAnchorsChanged([{ addedNodes: [{ nodeType: 1, matches: () => false, querySelector: () => null }] }]),
+    false,
+  )
 }
 
 console.log(`\nunit checks: ${checks - failures} passed, ${failures} failed`)
