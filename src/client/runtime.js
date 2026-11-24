@@ -780,8 +780,6 @@ import { builtinTips, normalizeTipList, tidyTip } from './tips.js'
 
       // --- idle lines ------------------------------------------------------
 
-      // --- idle lines ------------------------------------------------------
-
       /**
        * The idle lines and their rotation. The module owns the list; the store
        * and the settings writer stay here, injected.
