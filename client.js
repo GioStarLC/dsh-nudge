@@ -6167,9 +6167,17 @@ function createDelivery({ ctx, getState, setState, text }) {
     }
 
 /**
- * The window state machine.
+ * The window runtime: state, wiring and the public action surface.
  *
- * Delivery, the wait for an answer, annotations, settings, counters and the debug surface.
+ * This module is the composition root. Every feature lives in its own module
+ * (the map is in AGENTS.md); what stays here is the state object, the order in
+ * which the modules are built, and the object the view and the slots call.
+ *
+ * Build order matters: a module only receives what is already constructed. A
+ * few collaborators are passed as lazy arrows — countStat, repaintHighlights,
+ * recordAnchorMiss, flowAnchorsChanged, closeSettings — because their owner is
+ * built later in this function. Call them at event time, never while building,
+ * and keep any new lazy name on this list.
  *
  * Built into `client.js` by `scripts/build.mjs`; edit this file, not the bundle.
  */

@@ -107,6 +107,7 @@ uv run --with "graphifyy[mcp]==0.9.57" graphify update "$PWD"
 
 ## 约定
 
+- **`runtime.js` 是唯一装配点**：模块按依赖顺序构建，早期模块对后建模块用懒回调（清单在它的头注释里）。改顺序、加模块或把懒回调改成直传前，先确认构造期不会调用到未初始化的常量。
 - **边界有名字，内部靠推断**：`src/types/client.d.ts` 用全局 interface 命名 `ctx`、各服务和运行时状态；模块在入口处用 JSDoc 标注参数与返回，内部不再重复。`tsc --checkJs`（`strict: false`）会核对属性名、参数个数和可空性，但不会要求全量注解。DSH 发布与安装版本匹配的 client 类型时，替换这个文件即可，调用点已经带好了注解。新增 `ctx.get('...')` 之前先在 `DshContextServices` 里登记形状。
 - **`src/` 是源码，`client.js` / `client.settings-jump.js` 是提交的产物**：`npm run build` 用 rollup 把 `src/client/` 打成一个 CommonJS 包，再由 `scripts/build.mjs` 套上 `window.__ModuleLoader__.load({ id, factory(require) })`；源码里 `import 'react'`，产物里是 loader 的 `require('react')`。产物必须和源码一起提交，改了 src 不构建 `check` 会红。选 rollup 而不是 esbuild，是因为它只改 import/export，模板字符串里的 `\n`、注释和排版都原样保留——产物仍可逐行对照源码（见脚本头注释）。chunk 契约不变：与 `client.js` 同目录、名字匹配 `client.<name>.js`、注册为 `<owner id>/client.<name>.js`、导出纯函数（无 React、无插件状态），源码在 `src/client.settings-jump.js`。
 - **设置有两份**：`localStorage` 的 `dsh-nudge:*` 是同步缓存；`index.js` 落在 profile 目录的 `nudge-store.json` 是跨重启、跨端口的真副本（`DSH_HOME` 可覆盖）。client 侧每个设置项都在 `src/client/settings.js` 的 `SETTINGS` 表里登记（存储键 / 解码 / 编码 / 线上名 / 回灌），启动态、回灌和镜像负载都从这张表派生，所以新增一项 = 表里加一行 + 界面 + Host 白名单（`STORE_KEYS` 与 `pickStore`）。`scripts/check-client.mjs` 会核对这两张表，漏写 host 侧会红。镜像有两步不可省：只在读到记录之后才写（`mirrorReady`），刚回灌的记录不回写。

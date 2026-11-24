@@ -1,12 +1,20 @@
 /**
- * The window state machine.
+ * The window runtime: state, wiring and the public action surface.
  *
- * Delivery, the wait for an answer, annotations, settings, counters and the debug surface.
+ * This module is the composition root. Every feature lives in its own module
+ * (the map is in AGENTS.md); what stays here is the state object, the order in
+ * which the modules are built, and the object the view and the slots call.
+ *
+ * Build order matters: a module only receives what is already constructed. A
+ * few collaborators are passed as lazy arrows — countStat, repaintHighlights,
+ * recordAnchorMiss, flowAnchorsChanged, closeSettings — because their owner is
+ * built later in this function. Call them at event time, never while building,
+ * and keep any new lazy name on this list.
  *
  * Built into `client.js` by `scripts/build.mjs`; edit this file, not the bundle.
  */
-import { ANCHOR_SELECTOR, ANSWER_HIGHLIGHT, EDITABLE_SELECTOR, IDLE_ANNOTATION, IDLE_NUDGE_EDIT, MODAL_SELECTOR, CAPTURE_HIGHLIGHT, CONTEXT_CHARS, DEFAULT_DELIVERY, DEFAULT_PRESET, DIAG_SAMPLES, FLASH_HOLD_MS, HIGHLIGHT_NAME, MAX_STAT_PRESET_ID, MAX_TIPS, MISS_RESCAN_MS, PILL_SIZE, SELF_SELECTOR, UI_KEY } from './constants.js'
-import { readLang, resolveTarget, statusOf } from './context.js'
+import { ANSWER_HIGHLIGHT, IDLE_ANNOTATION, IDLE_NUDGE_EDIT, CAPTURE_HIGHLIGHT, DEFAULT_DELIVERY, HIGHLIGHT_NAME, UI_KEY } from './constants.js'
+import { readLang, resolveTarget } from './context.js'
 import { CSS } from './css.js'
 import { createAnnotations } from './annotations.js'
 import { createCardPlacement } from './card-placement.js'
@@ -21,15 +29,11 @@ import { createSelectionExtension } from './selection-extend.js'
 import { createSettingsNav } from './settings-nav.js'
 import { createTipActions } from './tip-actions.js'
 import { createWorld } from './world.js'
-import { anchorFromQuote, anchorFromRange, locateAnchor, packedMapOf, packedText, passagesOfRange, rangeFromPacked, sameRanges } from './dom.js'
-import { chipSlotAt, clampPoint, dockPosition, isPoint, rectValue, snapToEdge, viewport } from './geometry.js'
+import { chipSlotAt, dockPosition, isPoint, snapToEdge } from './geometry.js'
 import { EN, ZH } from './locale.js'
-import { notesOfSession, saveNotesOfSession } from './notes.js'
-import { builtinPresets, mintPresetId, normalizePresetList, presetOf } from './presets.js'
-import { SETTINGS, adoptFromHost, applySettingsStore, clearSetting, commitSettingsToHost, flushSettingsMirror, frameLabelKey, hasStoredSettings, isDelivery, isFrameWidth, loadStoreFromHost, markSettingsDirty, markSettingsRead, markSettingsSynced, persistSetting, readSettings, settingsSnapshot } from './settings.js'
-import { STAT_FIELDS, dayKey, normalizeStats } from './stats.js'
-import { readJson, storage, writeJson } from './storage.js'
-import { builtinTips, normalizeTipList, tidyTip } from './tips.js'
+import { presetOf } from './presets.js'
+import { SETTINGS, applySettingsStore, clearSetting, commitSettingsToHost, flushSettingsMirror, isDelivery, persistSetting, readSettings, settingsSnapshot } from './settings.js'
+import { readJson } from './storage.js'
 
     /**
      * Build the window runtime.
