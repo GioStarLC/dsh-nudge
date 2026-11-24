@@ -11,6 +11,7 @@
  */
 import { MAX_TIP_LENGTH, MAX_TIPS, STATS_DAYS } from '../src/client/constants.js'
 import { createComposerInsertion } from '../src/client/composer-insert.js'
+import { createPresetActions } from '../src/client/preset-actions.js'
 import { occurrencesOf, rectDistance } from '../src/client/dom.js'
 import { chipSlotAt, clamp, isPoint, rectValue } from '../src/client/geometry.js'
 import {
@@ -282,6 +283,66 @@ check(
   })(), false)
   insertion.detachComposer(undefined)
   insertion.dispose()
+}
+
+
+// --- preset actions: the list, its places and the paste reader -----------
+
+{
+  const state = {
+    lang: 'zh',
+    presets: [
+      { id: 'a', label: '甲', text: '甲', enabled: true, pinned: false },
+      { id: 'b', label: '乙', text: '乙', enabled: false, pinned: false },
+    ],
+    presetId: 'a',
+    presetOpen: [],
+    presetEditingId: null,
+  }
+  const persisted = []
+  const cleared = []
+  const api = createPresetActions({
+    getState: () => state,
+    setState: (patch) => Object.assign(state, patch),
+    text: (key) => key,
+    persistSetting: (name, value) => persisted.push([name, value]),
+    clearSetting: (name) => cleared.push(name),
+  })
+
+  check('presets: pinning an unknown id is refused', api.setPresetPinned('nope', true), false)
+  check('presets: pinning flips the flag', api.setPresetPinned('a', true), true)
+  check('presets: the pin is written down', persisted.some(([name]) => name === 'presets'), true)
+  check('presets: pinning the same value twice is a no-op', api.setPresetPinned('a', true), false)
+  check('presets: unpinning is accepted', api.setPresetPinned('a', false), true)
+
+  api.commitPresets(
+    [
+      { id: 'x', label: '丙', text: '丙', enabled: false },
+      { id: 'y', label: '丁', text: '丁', enabled: true },
+    ],
+    'x',
+  )
+  check('presets: a disabled pick falls back to the first enabled', state.presetId, 'y')
+  same(
+    'presets: the stored list keeps the shape the window reads',
+    state.presets.map((preset) => [preset.id, preset.enabled, preset.pinned]),
+    [
+      ['x', false, false],
+      ['y', true, false],
+    ],
+  )
+
+  const imported = api.importPresets('新的一条')
+  check('presets: a pasted line is accepted', imported.ok, true)
+  check('presets: the pasted line is counted', imported.added, 1)
+  check('presets: the pasted line joins the list', state.presets.length, 3)
+
+  const duplicate = api.importPresets('丙')
+  check('presets: a body already in the list is skipped', duplicate.added, 0)
+  check('presets: the skipped body is reported', duplicate.skipped, 1)
+
+  check('presets: an empty paste is refused', api.importPresets('   ').error, 'importEmpty')
+  check('presets: no preset sends the editor away', api.cancelPresetEdit(), false)
 }
 
 console.log(`\nunit checks: ${checks - failures} passed, ${failures} failed`)

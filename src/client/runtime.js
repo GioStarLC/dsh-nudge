@@ -5,11 +5,12 @@
  *
  * Built into `client.js` by `scripts/build.mjs`; edit this file, not the bundle.
  */
-import { ANCHOR_SELECTOR, ANSWER_HIGHLIGHT, CAPTURE_HIGHLIGHT, CONTEXT_CHARS, DEFAULT_DELIVERY, DEFAULT_PRESET, DIAG_SAMPLES, FLASH_HOLD_MS, HIGHLIGHT_NAME, MAX_STAT_PRESET_ID, MAX_TIPS, MISS_RESCAN_MS, PILL_SIZE, SELF_SELECTOR, UI_KEY } from './constants.js'
+import { ANCHOR_SELECTOR, ANSWER_HIGHLIGHT, IDLE_NUDGE_EDIT, CAPTURE_HIGHLIGHT, CONTEXT_CHARS, DEFAULT_DELIVERY, DEFAULT_PRESET, DIAG_SAMPLES, FLASH_HOLD_MS, HIGHLIGHT_NAME, MAX_STAT_PRESET_ID, MAX_TIPS, MISS_RESCAN_MS, PILL_SIZE, SELF_SELECTOR, UI_KEY } from './constants.js'
 import { readLang, resolveTarget, statusOf } from './context.js'
 import { CSS } from './css.js'
 import { createComposerInsertion } from './composer-insert.js'
 import { createDelivery } from './delivery.js'
+import { createPresetActions } from './preset-actions.js'
 import { anchorFromQuote, anchorFromRange, locateAnchor, packedMapOf, packedText, passagesOfRange, rangeFromPacked, sameRanges } from './dom.js'
 import { chipSlotAt, clampPoint, dockPosition, isPoint, rectValue, snapToEdge, viewport } from './geometry.js'
 import { EN, ZH } from './locale.js'
@@ -52,19 +53,6 @@ import { builtinTips, normalizeTipList, tidyTip } from './tips.js'
         annotationEditingId: null,
         annotationEditRect: null,
       }
-      /**
-       * The window's direct-edit surface for the quick inputs: whether the 编辑
-       * chip is armed, which entry's form is open, and the form's fields. One
-       * object so leaving the mode clears every part of it at once.
-       */
-      const IDLE_NUDGE_EDIT = {
-        nudgeEditing: false,
-        nudgeEditId: null,
-        nudgeEditLabel: '',
-        nudgeEditText: '',
-        nudgeEditError: '',
-      }
-
       /** @type {NudgeRuntimeState} */
       let state = {
         phase: 'idle',
@@ -1853,372 +1841,51 @@ import { builtinTips, normalizeTipList, tidyTip } from './tips.js'
         return true
       }
 
-      /** Store one preset list, keeping the selection on an enabled preset. */
-      function commitPresets(next, preferredId) {
-        const list = normalizePresetList(next, state.lang)
-        persistSetting('presets', list)
-        let presetId = preferredId ?? state.presetId
-        const chosen = presetOf(list, presetId)
-        if (chosen === undefined || chosen.enabled === false) {
-          presetId = list.find((preset) => preset.enabled !== false)?.id ?? list[0]?.id ?? DEFAULT_PRESET
-        }
-        persistSetting('preset', presetId)
-        setState({ presets: list, presetId })
-      }
-
-      /** Add one user preset; returns the new id, or an error text. */
-      function addPreset(label, body) {
-        const value = typeof body === 'string' ? body.trim() : ''
-        if (value.length === 0) return { ok: false, error: text('presetTextRequired') }
-        const preset = {
-          id: mintPresetId(),
-          label: typeof label === 'string' && label.trim().length > 0 ? label.trim() : value.slice(0, 8),
-          text: value,
-          enabled: true,
-        }
-        commitPresets([...state.presets, preset], preset.id)
-        return { ok: true, id: preset.id }
-      }
-
-      /** Update one preset's label/text; empty text is refused. */
-      function updatePreset(id, patch) {
-        const current = presetOf(state.presets, id)
-        if (current === undefined) return { ok: false, error: text('presetTextRequired') }
-        const value = patch && typeof patch.text === 'string' ? patch.text.trim() : current.text
-        if (value.length === 0) return { ok: false, error: text('presetTextRequired') }
-        const label =
-          patch && typeof patch.label === 'string'
-            ? patch.label.trim().length > 0
-              ? patch.label.trim()
-              : value.slice(0, 8)
-            : current.label
-        commitPresets(
-          state.presets.map((preset) =>
-            preset.id === id
-              ? { ...preset, id, label, text: value, enabled: preset.enabled !== false }
-              : preset,
-          ),
-          state.presetId,
-        )
-        if (state.presetEditingId === id) setState({ presetEditingId: null })
-        return { ok: true }
-      }
-
-      /** Remove one preset; the list may legitimately become empty. */
-      function removePreset(id) {
-        const next = state.presets.filter((preset) => preset.id !== id)
-        if (next.length === state.presets.length) return false
-        commitPresets(next, state.presetId === id ? next[0]?.id : state.presetId)
-        setState({
-          presetEditingId: state.presetEditingId === id ? null : state.presetEditingId,
-          presetOpen: state.presetOpen.filter((open) => open !== id),
-        })
-        return true
-      }
+      // --- presets ---------------------------------------------------------
 
       /**
-       * Enable or disable one preset. Disabled presets stay in settings but
-       * leave the window's prompt row, so the row only carries live prompts.
+       * The prompt list and its two places. The module owns the persisted list
+       * and the in-window forms; the runtime keeps the store and the settings
+       * writer, both injected.
        */
-      function setPresetEnabled(id, value) {
-        const current = presetOf(state.presets, id)
-        if (current === undefined) return false
-        const enabled = value === true
-        if ((current.enabled !== false) === enabled) return false
-        commitPresets(
-          state.presets.map((preset) => (preset.id === id ? { ...preset, enabled } : preset)),
-          state.presetId,
-        )
-        return true
-      }
-
-      /**
-       * Pin or unpin one preset on the composer's own left row. Disabled
-       * presets can stay pinned in the record but never render there.
-       */
-      function setPresetPinned(id, value) {
-        const current = presetOf(state.presets, id)
-        if (current === undefined) return false
-        const pinned = value === true
-        if ((current.pinned === true) === pinned) return false
-        commitPresets(
-          state.presets.map((preset) => (preset.id === id ? { ...preset, pinned } : preset)),
-          state.presetId,
-        )
-        return true
-      }
-
-      /** Flip one preset between enabled and disabled. */
-      function togglePresetEnabled(id) {
-        const current = presetOf(state.presets, id)
-        if (current === undefined) return false
-        return setPresetEnabled(id, current.enabled === false)
-      }
-
-      /** Move one preset one slot up (`delta` -1) or down (+1); order persists. */
-      function movePreset(id, delta) {
-        const from = state.presets.findIndex((preset) => preset.id === id)
-        if (from < 0) return false
-        const step = delta < 0 ? -1 : 1
-        const to = from + step
-        if (to < 0 || to >= state.presets.length) return false
-        const next = [...state.presets]
-        const [moved] = next.splice(from, 1)
-        next.splice(to, 0, moved)
-        commitPresets(next, state.presetId)
-        return true
-      }
-
-      /** Move one preset to an absolute slot (drag and drop); order persists. */
-      function movePresetTo(id, index) {
-        const from = state.presets.findIndex((preset) => preset.id === id)
-        if (from < 0) return false
-        const target = Math.round(Number(index))
-        if (!Number.isFinite(target)) return false
-        const to = Math.max(0, Math.min(state.presets.length - 1, target))
-        if (to === from) return false
-        const next = [...state.presets]
-        const [moved] = next.splice(from, 1)
-        next.splice(to, 0, moved)
-        commitPresets(next, state.presetId)
-        return true
-      }
-
-      /**
-       * Move one preset next to another (window drag): before it, or after it.
-       * Anchoring on the neighbour rather than on an index keeps the disabled
-       * entries — which never appear in the window — in their own slots.
-       */
-      function movePresetBeside(id, anchorId, after) {
-        if (id === anchorId) return false
-        const list = state.presets
-        const from = list.findIndex((preset) => preset.id === id)
-        if (from < 0) return false
-        const next = list.filter((preset) => preset.id !== id)
-        const anchor = next.findIndex((preset) => preset.id === anchorId)
-        if (anchor < 0) return false
-        next.splice(anchor + (after === true ? 1 : 0), 0, list[from])
-        if (next.every((preset, index) => preset.id === list[index].id)) return false
-        commitPresets(next, state.presetId)
-        return true
-      }
-
-      /** Open or close one preset body in the settings list. */
-      function togglePresetOpen(id) {
-        if (presetOf(state.presets, id) === undefined) return false
-        const open = state.presetOpen.includes(id)
-          ? state.presetOpen.filter((item) => item !== id)
-          : [...state.presetOpen, id]
-        setState({ presetOpen: open })
-        return true
-      }
-
-      /** Open every preset body, or close them all. */
-      function setPresetsOpen(open) {
-        setState({ presetOpen: open ? state.presets.map((preset) => preset.id) : [] })
-        return true
-      }
-
-      /** Switch one preset into the editor (only one editor is open at a time). */
-      function startPresetEdit(id) {
-        if (presetOf(state.presets, id) === undefined) return false
-        setState({ presetEditingId: id })
-        return true
-      }
-
-      /** Leave the editor without saving. */
-      function cancelPresetEdit() {
-        if (state.presetEditingId === null) return false
-        setState({ presetEditingId: null })
-        return true
-      }
-
-      /** Open the in-window "new prompt" form (title + body). */
-      function startNudgeDraft() {
-        setState({
-          nudgeExpanded: true,
-          nudgeDraftOpen: true,
-          nudgeDraftLabel: '',
-          nudgeDraftText: '',
-          nudgeDraftError: '',
-          ...IDLE_NUDGE_EDIT,
-        })
-        return true
-      }
-
-      /** Close the in-window form without saving. */
-      function cancelNudgeDraft() {
-        if (state.nudgeDraftOpen !== true) return false
-        setState({ nudgeDraftOpen: false, nudgeDraftLabel: '', nudgeDraftText: '', nudgeDraftError: '' })
-        return true
-      }
-
-      /** Write the draft title without saving it. */
-      function setNudgeDraftLabel(value) {
-        setState({ nudgeDraftLabel: typeof value === 'string' ? value : '' })
-      }
-
-      /** Write the draft body without saving it. */
-      function setNudgeDraftText(value) {
-        setState({ nudgeDraftText: typeof value === 'string' ? value : '' })
-      }
-
-      /** Save the in-window form through the same preset store the settings use. */
-      function saveNudgeDraft() {
-        const result = addPreset(state.nudgeDraftLabel, state.nudgeDraftText)
-        if (result.ok !== true) {
-          setState({ nudgeDraftError: result.error })
-          return result
-        }
-        setState({ nudgeDraftOpen: false, nudgeDraftLabel: '', nudgeDraftText: '', nudgeDraftError: '' })
-        return result
-      }
-
-      /**
-       * Arm or leave the window's direct-edit mode. The same row that adds a
-       * quick input then lets each one be dragged and edited in place, so fixing
-       * an entry no longer means walking into the settings page.
-       */
-      function setNudgeEditing(value) {
-        const next = value === true
-        if (next === (state.nudgeEditing === true)) return false
-        setState({
-          ...IDLE_NUDGE_EDIT,
-          nudgeEditing: next,
-          nudgeExpanded: next ? true : state.nudgeExpanded,
-          nudgeDraftOpen: false,
-          nudgeDraftLabel: '',
-          nudgeDraftText: '',
-          nudgeDraftError: '',
-        })
-        return true
-      }
-
-      /** Open one quick input in the window's own editor, pre-filled. */
-      function startNudgeEdit(id) {
-        const preset = presetOf(state.presets, id)
-        if (preset === undefined || preset.enabled === false) return false
-        setState({
-          ...IDLE_NUDGE_EDIT,
-          nudgeExpanded: true,
-          nudgeEditing: true,
-          nudgeDraftOpen: false,
-          nudgeDraftLabel: '',
-          nudgeDraftText: '',
-          nudgeDraftError: '',
-          nudgeEditId: preset.id,
-          nudgeEditLabel: preset.label,
-          nudgeEditText: preset.text,
-        })
-        return true
-      }
-
-      /** Close the window's editor without saving. */
-      function cancelNudgeEdit() {
-        if (state.nudgeEditId === null) return false
-        setState({ nudgeEditId: null, nudgeEditLabel: '', nudgeEditText: '', nudgeEditError: '' })
-        return true
-      }
-
-      /** Write the editor's title without saving it. */
-      function setNudgeEditLabel(value) {
-        setState({ nudgeEditLabel: typeof value === 'string' ? value : '' })
-      }
-
-      /** Write the editor's body without saving it. */
-      function setNudgeEditText(value) {
-        setState({ nudgeEditText: typeof value === 'string' ? value : '' })
-      }
-
-      /** Save the window's editor through the same preset store the settings use. */
-      function saveNudgeEdit() {
-        if (state.nudgeEditId === null) return { ok: false, error: text('presetTextRequired') }
-        const result = updatePreset(state.nudgeEditId, {
-          label: state.nudgeEditLabel,
-          text: state.nudgeEditText,
-        })
-        if (result.ok !== true) {
-          setState({ nudgeEditError: result.error })
-          return result
-        }
-        setState({ nudgeEditId: null, nudgeEditLabel: '', nudgeEditText: '', nudgeEditError: '' })
-        return result
-      }
-
-      /** One pasted block: the first line is the label, the rest is the body. */
-      function presetFromBlock(block) {
-        const lines = block.split('\n')
-        const label = lines[0].trim()
-        const text = lines.slice(1).join('\n').trim()
-        return { label, text: text.length > 0 ? text : label }
-      }
-
-      /**
-       * Bulk-add pasted presets: blocks are separated by three or more blank
-       * lines. Mirrors `addTips` — dedupe by body and report what was skipped.
-       */
-      function importPresets(raw) {
-        const blocks = String(raw ?? '')
-          .replace(/\r\n/g, '\n')
-          .split(/\n(?:[ \t]*\n){3,}/)
-          .map((block) => block.trim())
-          .filter((block) => block.length > 0)
-        if (blocks.length === 0) return { ok: false, added: 0, skipped: 0, error: text('importEmpty') }
-        const seen = new Set(state.presets.map((preset) => preset.text))
-        const next = [...state.presets]
-        let added = 0
-        let skipped = 0
-        for (const block of blocks) {
-          const preset = presetFromBlock(block)
-          if (preset.text.length === 0 || seen.has(preset.text)) {
-            skipped += 1
-            continue
-          }
-          seen.add(preset.text)
-          next.push({ id: mintPresetId(), label: preset.label, text: preset.text, enabled: true })
-          added += 1
-        }
-        if (added === 0) {
-          return { ok: false, added, skipped, error: text('importEmpty') }
-        }
-        commitPresets(next, state.presetId)
-        return { ok: true, added, skipped }
-      }
-
-      /**
-       * Copy every configured preset to the clipboard in the same block format
-       * `importPresets` reads, so an export can be pasted back. Disabled
-       * presets are included: they are configured, just not shown in the
-       * window. The clipboard is async, so the outcome resolves.
-       */
-      function exportPresets() {
-        const count = state.presets.length
-        if (count === 0) return Promise.resolve({ ok: false, count, error: text('exportEmpty') })
-        const value = state.presets
-          .map((preset) =>
-            preset.label === preset.text ? preset.label : `${preset.label}\n${preset.text}`,
-          )
-          .join('\n\n\n\n')
-        try {
-          const clipboard = navigator.clipboard
-          if (typeof clipboard?.writeText !== 'function') {
-            return Promise.resolve({ ok: false, count, error: text('exportFailed') })
-          }
-          return Promise.resolve(clipboard.writeText(value)).then(
-            () => ({ ok: true, count }),
-            () => ({ ok: false, count, error: text('exportFailed') }),
-          )
-        } catch {
-          return Promise.resolve({ ok: false, count, error: text('exportFailed') })
-        }
-      }
-
-      /** Restore the built-in presets (and forget the settings storage). */
-      function resetPresets() {
-        clearSetting('presets')
-        commitPresets(builtinPresets(state.lang), DEFAULT_PRESET)
-        setState({ presetOpen: [], presetEditingId: null })
-      }
+      const presetActions = createPresetActions({
+        getState: () => state,
+        setState,
+        text,
+        persistSetting,
+        clearSetting,
+      })
+      const {
+        commitPresets,
+        addPreset,
+        updatePreset,
+        removePreset,
+        setPresetEnabled,
+        setPresetPinned,
+        togglePresetEnabled,
+        movePreset,
+        movePresetTo,
+        movePresetBeside,
+        togglePresetOpen,
+        setPresetsOpen,
+        startPresetEdit,
+        cancelPresetEdit,
+        startNudgeDraft,
+        cancelNudgeDraft,
+        setNudgeDraftLabel,
+        setNudgeDraftText,
+        saveNudgeDraft,
+        setNudgeEditing,
+        startNudgeEdit,
+        cancelNudgeEdit,
+        setNudgeEditLabel,
+        setNudgeEditText,
+        saveNudgeEdit,
+        presetFromBlock,
+        importPresets,
+        exportPresets,
+        resetPresets,
+      } = presetActions
 
       // --- idle lines ------------------------------------------------------
 
