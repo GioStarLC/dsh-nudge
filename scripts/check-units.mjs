@@ -15,6 +15,7 @@ import { createComposerInsertion } from '../src/client/composer-insert.js'
 import { createHighlights } from '../src/client/highlights.js'
 import { createPopup } from '../src/client/popup.js'
 import { createPresetActions } from '../src/client/preset-actions.js'
+import { createQuoteWriting } from '../src/client/quote-writing.js'
 import { createTipActions } from '../src/client/tip-actions.js'
 import { occurrencesOf, rectDistance } from '../src/client/dom.js'
 import { chipSlotAt, clamp, isPoint, rectValue } from '../src/client/geometry.js'
@@ -524,6 +525,73 @@ check(
   check('annotations: three newlines open a block', api.blockBreak('abc'), '\n\n\n')
   check('annotations: two existing newlines need one more', api.blockBreak('abc\n\n'), '\n')
   check('annotations: a block already open needs nothing', api.blockBreak('abc\n\n\n'), '')
+}
+
+
+// --- quote writing: the caret splice, the batch and the send -------------
+
+{
+  const state = {
+    annotations: [{ id: 'n1', quote: '甲', note: '是的', written: false }],
+    phase: 'idle',
+    note: '',
+    error: '',
+  }
+  const writes = []
+  const committed = []
+  const delivered = []
+  let handle = { setDraft: (value) => writes.push(value), readDraft: () => '' }
+  const api = createQuoteWriting({
+    getState: () => state,
+    setState: (patch) => Object.assign(state, patch),
+    text: (key) => key,
+    pendingAnnotations: () => state.annotations.filter((item) => item.written !== true),
+    annotationsText: (list) => list.map((item) => (item.note ? `我的回答：${item.note}` : '')).join('\n\n\n'),
+    tidyQuote: (value) => String(value ?? '').replace(/\s+$/, ''),
+    annotationNoteLine: (item) => (item.note ? `我的回答：${item.note}` : ''),
+    blockBreak: (before) => (before === '' ? '' : '\n\n\n'),
+    countStat: () => {},
+    deliver: (message) => {
+      delivered.push(message)
+      return true
+    },
+    composerHandle: () => handle,
+    commitAnnotations: (list) => {
+      committed.push(list)
+      state.annotations = list
+    },
+  })
+
+  check('writing: a handle without the caret face cannot splice', api.spliceAtCaret({}, 'x'), false)
+  check('writing: an empty value never touches the handle', api.spliceAtCaret({}, ''), true)
+  const spans = { captureInsertion: () => ({ start: 1, end: 1 }), insertText: () => true }
+  check('writing: a shell with the caret face takes the text', api.spliceAtCaret(spans, 'x'), true)
+
+  const skipped = api.writeQuotedBatch({ setDraft: () => {} }, [{ id: 'n1' }], '')
+  check('writing: no quote face means no quote attempt', skipped.attempted, false)
+  const sending = api.writeQuotedBatch(
+    { insertQuote: () => {}, insertText: () => {}, captureInsertion: () => ({ start: 0, end: 0 }), readPhase: () => 'sending' },
+    [{ id: 'n1' }],
+    '',
+  )
+  check('writing: a sending composer is left alone', sending.attempted, false)
+
+  check('writing: the batch reaches the draft', api.writeAnnotations(), true)
+  check('writing: the payload is the answer line', writes[0], '我的回答：是的')
+  check('writing: the note is marked written', state.annotations[0].written, true)
+
+  state.annotations = [{ id: 'n2', quote: '乙', note: '乙的批注', written: false }]
+  state.phase = 'waiting'
+  check('writing: nothing is sent while waiting for an answer', api.sendAnnotations(), false)
+  state.phase = 'idle'
+  check('writing: the pending batch is sent', api.sendAnnotations(), true)
+  check('writing: the sent message is the batch', delivered[0], '我的回答：乙的批注')
+  check('writing: the sent note leaves the tray', state.annotations.length, 0)
+
+  handle = undefined
+  state.annotations = [{ id: 'n3', quote: '丙', note: 'x', written: false }]
+  check('writing: without a composer the write is refused', api.writeAnnotations(), false)
+  check('writing: the refusal explains itself', state.note, 'insertUnavailable')
 }
 
 console.log(`\nunit checks: ${checks - failures} passed, ${failures} failed`)

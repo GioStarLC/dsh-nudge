@@ -4920,6 +4920,460 @@ function createDelivery({ ctx, getState, setState, text }) {
     }
 
 /**
+ * Writing the pending annotations into the composer, or sending them.
+ *
+ * The payload is a batch of Markdown blocks; the write prefers the shell's own
+ * quote preview and falls back to text. Counters and the tray update are the
+ * only side effects.
+ *
+ * Built into `client.js` by `scripts/build.mjs`; edit this file, not the bundle.
+ */
+    /**
+     * Build the batch writer over one runtime.
+     *
+     * @param deps - getState, setState, text, pendingAnnotations, annotationsText,
+     *   tidyQuote, annotationNoteLine, blockBreak, countStat, deliver,
+     *   composerHandle, commitAnnotations.
+     * @returns the write path, the send path and the caret splice they share.
+     */
+    function createQuoteWriting(deps) {
+      const {
+        getState,
+        setState,
+        text,
+        pendingAnnotations,
+        annotationsText,
+        tidyQuote,
+        annotationNoteLine,
+        blockBreak,
+        countStat,
+        deliver,
+        composerHandle,
+        commitAnnotations,
+      } = deps;
+
+      /** Put one text block in at the caret; false when the shell refused it. */
+      function spliceAtCaret(handle, value) {
+        if (value === '') return true
+        if (typeof handle.insertText !== 'function' || typeof handle.captureInsertion !== 'function') return false
+        try {
+          const span = handle.captureInsertion();
+          if (!span || typeof span.start !== 'number' || typeof span.end !== 'number') return false
+          return handle.insertText(value, span) === true
+        } catch {
+          return false
+        }
+      }
+
+      /**
+       * Write the pending annotations as the shell's own quote previews: one
+       * quote node per passage, the answer as plain text on the line below it.
+       * This is the node DSH inserts for a quoted selection, so the draft shows
+       * the quote mark instead of a run of `>` lines — and the node serializes
+       * back to the very Markdown a sent message carries.
+       *
+       * Reports how far it got and the blank-line break it already placed, so
+       * a shell that stops taking quotes mid-batch can finish the rest as text
+       * without doubling the gap. `attempted: false` means the shell has no
+       * quote face (or is not idle): the caller keeps its text path.
+       */
+      function writeQuotedBatch(handle, pending, draft) {
+        const skipped = { attempted: false, written: 0, lead: '', gap: false };
+        if (typeof handle.insertQuote !== 'function') return skipped
+        if (typeof handle.insertText !== 'function' || typeof handle.captureInsertion !== 'function') return skipped
+        // The shell only takes a quote into a plain composer; a sending or
+        // decided composer is the text path's business.
+        let phase = '';
+        try {
+          phase = handle.readPhase?.() ?? '';
+        } catch {
+          phase = '';
+        }
+        if (phase !== '' && phase !== 'plain') return skipped
+        const result = { attempted: true, written: 0, lead: '', gap: false };
+        const caret = () => {
+          try {
+            const span = handle.captureInsertion();
+            return span && typeof span.start === 'number' ? span : undefined
+          } catch {
+            return undefined
+          }
+        };
+        try {
+          const first = caret();
+          if (first === undefined) {
+            result.attempted = false;
+            return result
+          }
+          const lead = blockBreak(draft.slice(0, first.start));
+          if (lead !== '' && handle.insertText(lead, first) !== true) {
+            result.attempted = false;
+            return result
+          }
+          result.lead = lead;
+          for (let index = 0; index < pending.length; index += 1) {
+            const item = pending[index];
+            const quote = tidyQuote(item.quote);
+            if (quote.trim() === '') break
+            // A refused quote leaves the last written note where it is; the
+            // separator for this slot is what `gap` reports.
+            if (handle.insertQuote(quote) !== true) {
+              result.gap = index > 0;
+              break
+            }
+            result.written += 1;
+            const note = annotationNoteLine(item);
+            if (note !== '') {
+              const span = caret();
+              if (span === undefined || handle.insertText(`\n${note}`, span) !== true) break
+            }
+            if (index === pending.length - 1) break
+            const span = caret();
+            if (span === undefined || handle.insertText('\n\n\n', span) !== true) break
+            result.gap = true;
+          }
+        } catch {
+          return result
+        }
+        return result
+      }
+
+      /** Append every pending annotation to the composer draft. */
+      function writeAnnotations() {
+        const pending = pendingAnnotations();
+        if (pending.length === 0) return false
+        const handle = composerHandle();
+        if (handle === undefined || typeof handle.setDraft !== 'function') {
+          setState({ note: text('insertUnavailable'), error: '' });
+          return false
+        }
+        const body = annotationsText(pending);
+        if (body === '') return false
+        let draft = '';
+        try {
+          draft = handle.readDraft?.() ?? '';
+        } catch {
+          draft = '';
+        }
+        if (typeof draft !== 'string') draft = '';
+        // Preferred: the shell's quote preview per passage. Whatever it could
+        // not take stays pending; the rest of the batch is written as text.
+        const quoted = writeQuotedBatch(handle, pending, draft);
+        let writtenCount = quoted.written;
+        if (writtenCount < pending.length && writtenCount > 0) {
+          const rest = annotationsText(pending.slice(writtenCount));
+          if (spliceAtCaret(handle, (quoted.gap ? '' : '\n\n\n') + rest)) writtenCount = pending.length;
+        }
+        if (writtenCount < pending.length && writtenCount === 0) {
+          // The text path: splice at the caret first, then rebuild. `setDraft`
+          // rebuilds every paragraph and drops the caret at the end, which is
+          // exactly what a write in the middle of typing must not do; the
+          // rebuild stays as the fallback for a shell without the insertion
+          // face, or for a draft that moved. A leading break the quote path
+          // already placed is not put in twice.
+          let written = false;
+          if (typeof handle.insertText === 'function' && typeof handle.captureInsertion === 'function') {
+            try {
+              const span = handle.captureInsertion();
+              if (span && typeof span.start === 'number' && typeof span.end === 'number') {
+                const lead = quoted.lead !== '' ? '' : blockBreak(draft.slice(0, span.start));
+                written = handle.insertText(lead + body, span) === true;
+              }
+            } catch {
+              written = false;
+            }
+          }
+          if (written) {
+            writtenCount = pending.length;
+          } else {
+            const next = draft.trim() === '' ? body : `${draft}${blockBreak(draft)}${body}`;
+            try {
+              handle.setDraft(next);
+            } catch (error) {
+              console.warn('[dsh-nudge] annotation write failed', error);
+              setState({ note: text('insertUnavailable'), error: '' });
+              return false
+            }
+            writtenCount = pending.length;
+          }
+        }
+        if (writtenCount === 0) {
+          setState({ note: text('insertUnavailable'), error: '' });
+          return false
+        }
+        // The note leaves the pending set but stays in the tray and keeps its
+        // passage painted: a mark belongs to the conversation, not to the
+        // draft. Clearing the input box no longer takes it away — only
+        // deleting the note does.
+        const ids = new Set(pending.slice(0, writtenCount).map((item) => item.id));
+        const marked = getState().annotations.map((item) =>
+          ids.has(item.id) ? { ...item, written: true } : item,
+        );
+        commitAnnotations(marked, { note: '', error: '' });
+        return true
+      }
+
+      /** Send the pending annotations as one user message. */
+      function sendAnnotations() {
+        if (getState().phase === 'waiting') return false
+        const pending = pendingAnnotations();
+        if (pending.length === 0) return false
+        const body = annotationsText(pending);
+        if (body === '') return false
+        if (!deliver(body)) return false
+        // What was just sent lives in the conversation now; the notes already
+        // written into the draft keep their marks.
+        const ids = new Set(pending.map((item) => item.id));
+        const next = getState().annotations.filter((item) => !ids.has(item.id));
+        commitAnnotations(next);
+        return true
+      }
+
+      return {
+        spliceAtCaret,
+        writeQuotedBatch,
+        writeAnnotations,
+        sendAnnotations,
+      }
+    }
+
+/**
+ * Shift+drag: growing or shrinking the captured passage before it is saved.
+ *
+ * The extension works on the live DOM range the capture keeps, and the card
+ * follows it; this module owns the drag state and the caret lookup.
+ *
+ * Built into `client.js` by `scripts/build.mjs`; edit this file, not the bundle.
+ */
+
+    /**
+     * Build the extension drag over one runtime.
+     *
+     * @param deps - getState, settleAnnotation, closePopup, text.
+     * @returns the pointer handlers, the caret probe and the key gate.
+     */
+    function createSelectionExtension(deps) {
+      const {
+        getState,
+        settleAnnotation,
+        closePopup,
+        text,
+        tidyQuote,
+        notify,
+        cancelAnnotationEdit,
+        copyDraftQuote,
+        closeSettings,
+      } = deps;
+
+      /** True while a Shift+drag is extending the captured passage. */
+      let extending = false;
+      /** The leading edge the extension grows from, or null. */
+      let extendAnchor = null;
+
+      /** The caret under a viewport point, or null when the browser cannot say. */
+      function caretRangeAt(x, y) {
+        try {
+          if (typeof document.caretRangeFromPoint === 'function') {
+            return document.caretRangeFromPoint(x, y) ?? null
+          }
+          if (typeof document.caretPositionFromPoint === 'function') {
+            const position = document.caretPositionFromPoint(x, y);
+            if (!position) return null
+            const range = document.createRange();
+            range.setStart(position.offsetNode, position.offset);
+            range.collapse(true);
+            return range
+          }
+        } catch {
+          return null
+        }
+        return null
+      }
+
+      /**
+       * Grow the captured passage away from the gesture's start end to the
+       * pointer.
+       *
+       * The card holds the focus, and focusing it collapsed the native selection,
+       * so the browser's own Shift+click has no anchor left. The end the gesture
+       * started from is the anchor (it is the lower edge for an upward drag), and
+       * the pointer is turned into a caret range; the resulting selection is
+       * written back into the draft so the card follows.
+       */
+      function extendTo(x, y) {
+        const draft = getState().annotationDraft;
+        if (draft === null || extendAnchor === null) return false
+        const caret = caretRangeAt(x, y);
+        if (caret === null) return false
+        const selection = window.getSelection?.();
+        if (!selection) return false
+        try {
+          selection.removeAllRanges();
+          selection.setBaseAndExtent(
+            extendAnchor.node,
+            extendAnchor.offset,
+            caret.startContainer,
+            caret.startOffset,
+          );
+        } catch {
+          return false
+        }
+        if (selection.isCollapsed) return false
+        const range = selection.getRangeAt(0);
+        const quote = tidyQuote(selection.toString());
+        if (quote.trim() === '') return false
+        let rect = null;
+        try {
+          rect = range.getBoundingClientRect();
+        } catch {
+          rect = null;
+        }
+        if (rect !== null && rect.width === 0 && rect.height === 0) rect = null;
+        let anchor = null;
+        try {
+          anchor = anchorFromRange(range, quote);
+        } catch {
+          anchor = null;
+        }
+        // Only the draft changes: the note already typed and the editor stay.
+        settleAnnotation({
+          annotationDraft: {
+            quote,
+            anchor,
+            range,
+            // Keep the gesture's original start end: consecutive Shift+presses
+            // grow away from it, whichever direction the first drag ran.
+            anchorPoint: draft.anchorPoint,
+            rect: rect
+              ? {
+                  left: rect.left,
+                  top: rect.top,
+                  right: rect.right,
+                  bottom: rect.bottom,
+                  width: rect.width,
+                  height: rect.height,
+                }
+              : null,
+            pointer: null,
+          },
+          annotationCardHidden: false,
+        });
+        return true
+      }
+
+      /** Shift+press on the transcript keeps extending the captured passage. */
+      function onExtendPointerDown(event) {
+        if (getState().quick !== true || event?.shiftKey !== true) return
+        const draft = getState().annotationDraft;
+        if (draft === null || getState().annotationEditingId !== null) return
+        const target = event.target;
+        if (target && typeof target.closest === 'function') {
+          if (target.closest(EDITABLE_SELECTOR)) return
+          if (target.closest(MODAL_SELECTOR)) return
+          if (target.closest(SELF_SELECTOR)) return
+        }
+        let anchor = null;
+        if (draft.anchorPoint && draft.anchorPoint.node) {
+          anchor = draft.anchorPoint;
+        } else {
+          // Drafts captured before this build carry only the range.
+          try {
+            const range = draft.range && typeof draft.range.cloneRange === 'function' ? draft.range.cloneRange() : null;
+            if (range !== null) {
+              range.collapse(true);
+              anchor = { node: range.startContainer, offset: range.startOffset };
+            }
+          } catch {
+            anchor = null;
+          }
+        }
+        if (anchor === null) return
+        extendAnchor = anchor;
+        extending = true;
+        // Keep the caret in the card and stop the browser from starting a fresh
+        // selection at the press point.
+        event.preventDefault?.();
+        extendTo(event.clientX, event.clientY);
+      }
+
+      function onExtendPointerMove(event) {
+        if (!extending) return
+        if (typeof event?.buttons === 'number' && (event.buttons & 1) === 0) {
+          extending = false;
+          extendAnchor = null;
+          return
+        }
+        extendTo(event.clientX, event.clientY);
+      }
+
+      function onExtendPointerUp() {
+        extending = false;
+        extendAnchor = null;
+      }
+
+      /**
+       * True when the focused node is one of our own text fields and it holds a
+       * real (non-empty) text selection: there the browser's own copy wins.
+       */
+      function fieldHasSelection() {
+        try {
+          const active = /** @type {HTMLInputElement | HTMLTextAreaElement | null} */ (document.activeElement);
+          if (!active || typeof active.selectionStart !== 'number') return false
+          if (typeof active.closest !== 'function' || active.closest(SELF_SELECTOR) === null) return false
+          return active.selectionStart !== active.selectionEnd
+        } catch {
+          return false
+        }
+      }
+
+      /** Ctrl/Cmd+C while a card is open, with no selection inside our fields. */
+      function copyShortcutActive(event) {
+        if (getState().annotationDraft === null) return false
+        if (event.ctrlKey !== true && event.metaKey !== true) return false
+        if (event.altKey === true || event.shiftKey === true) return false
+        return typeof event.key === 'string' && event.key.toLowerCase() === 'c'
+      }
+
+      function onPopupKeydown(event) {
+        if (event?.key === 'Escape' && getState().settingsOpen) {
+          event.preventDefault();
+          closeSettings();
+          return
+        }
+        if (event?.key === 'Escape' && getState().annotationDraft !== null) {
+          event.preventDefault();
+          closePopup();
+          return
+        }
+        if (event?.key === 'Escape' && getState().annotationEditingId !== null) {
+          event.preventDefault();
+          cancelAnnotationEdit();
+          return
+        }
+        if (!copyShortcutActive(event)) return
+        if (fieldHasSelection()) return
+        // Focusing the note field drops the editor's native selection, so the
+        // browser has nothing left to copy. The card owns the passage: copy it
+        // ourselves and keep Ctrl+C working, which is the point of the card.
+        event.preventDefault();
+        copyDraftQuote().then((ok) => notify(ok ? text('copiedShort') : text('copyFailedShort')));
+      }
+
+      return {
+        extending,
+        extendAnchor,
+        caretRangeAt,
+        extendTo,
+        onExtendPointerDown,
+        onExtendPointerMove,
+        onExtendPointerUp,
+        fieldHasSelection,
+        copyShortcutActive,
+        onPopupKeydown,
+      }
+    }
+
+/**
  * The idle lines under the window: the list, its editing and its rotation.
  *
  * The list is a persisted setting; the state and the writer arrive injected,
@@ -5371,376 +5825,58 @@ function createDelivery({ ctx, getState, setState, text }) {
         onPopupDismiss,
       } = popup;
 
-      /** True while a Shift+drag is extending the captured passage. */
-      let extending = false;
-      /** The leading edge the extension grows from, or null. */
-      let extendAnchor = null;
-
-      /** The caret under a viewport point, or null when the browser cannot say. */
-      function caretRangeAt(x, y) {
-        try {
-          if (typeof document.caretRangeFromPoint === 'function') {
-            return document.caretRangeFromPoint(x, y) ?? null
-          }
-          if (typeof document.caretPositionFromPoint === 'function') {
-            const position = document.caretPositionFromPoint(x, y);
-            if (!position) return null
-            const range = document.createRange();
-            range.setStart(position.offsetNode, position.offset);
-            range.collapse(true);
-            return range
-          }
-        } catch {
-          return null
-        }
-        return null
-      }
+      /**
+       * Shift+drag to grow or shrink the captured passage. The module owns the
+       * drag state; the card follows the live range.
+       */
+      const selectionExtension = createSelectionExtension({
+        getState: () => state,
+        settleAnnotation,
+        closePopup,
+        text,
+        tidyQuote,
+        notify,
+        cancelAnnotationEdit,
+        copyDraftQuote,
+        closeSettings,
+      });
+      const {
+        extending,
+        extendAnchor,
+        caretRangeAt,
+        extendTo,
+        onExtendPointerDown,
+        onExtendPointerMove,
+        onExtendPointerUp,
+        fieldHasSelection,
+        copyShortcutActive,
+        onPopupKeydown,
+      } = selectionExtension;
 
       /**
-       * Grow the captured passage away from the gesture's start end to the
-       * pointer.
-       *
-       * The card holds the focus, and focusing it collapsed the native selection,
-       * so the browser's own Shift+click has no anchor left. The end the gesture
-       * started from is the anchor (it is the lower edge for an upward drag), and
-       * the pointer is turned into a caret range; the resulting selection is
-       * written back into the draft so the card follows.
+       * The batch write into the composer, and the send that marks the notes
+       * as written. The payload is the same Markdown block either way.
        */
-      function extendTo(x, y) {
-        const draft = state.annotationDraft;
-        if (draft === null || extendAnchor === null) return false
-        const caret = caretRangeAt(x, y);
-        if (caret === null) return false
-        const selection = window.getSelection?.();
-        if (!selection) return false
-        try {
-          selection.removeAllRanges();
-          selection.setBaseAndExtent(
-            extendAnchor.node,
-            extendAnchor.offset,
-            caret.startContainer,
-            caret.startOffset,
-          );
-        } catch {
-          return false
-        }
-        if (selection.isCollapsed) return false
-        const range = selection.getRangeAt(0);
-        const quote = tidyQuote(selection.toString());
-        if (quote.trim() === '') return false
-        let rect = null;
-        try {
-          rect = range.getBoundingClientRect();
-        } catch {
-          rect = null;
-        }
-        if (rect !== null && rect.width === 0 && rect.height === 0) rect = null;
-        let anchor = null;
-        try {
-          anchor = anchorFromRange(range, quote);
-        } catch {
-          anchor = null;
-        }
-        // Only the draft changes: the note already typed and the editor stay.
-        settleAnnotation({
-          annotationDraft: {
-            quote,
-            anchor,
-            range,
-            // Keep the gesture's original start end: consecutive Shift+presses
-            // grow away from it, whichever direction the first drag ran.
-            anchorPoint: draft.anchorPoint,
-            rect: rect
-              ? {
-                  left: rect.left,
-                  top: rect.top,
-                  right: rect.right,
-                  bottom: rect.bottom,
-                  width: rect.width,
-                  height: rect.height,
-                }
-              : null,
-            pointer: null,
-          },
-          annotationCardHidden: false,
-        });
-        return true
-      }
-
-      /** Shift+press on the transcript keeps extending the captured passage. */
-      function onExtendPointerDown(event) {
-        if (state.quick !== true || event?.shiftKey !== true) return
-        const draft = state.annotationDraft;
-        if (draft === null || state.annotationEditingId !== null) return
-        const target = event.target;
-        if (target && typeof target.closest === 'function') {
-          if (target.closest(EDITABLE_SELECTOR)) return
-          if (target.closest(MODAL_SELECTOR)) return
-          if (target.closest(SELF_SELECTOR)) return
-        }
-        let anchor = null;
-        if (draft.anchorPoint && draft.anchorPoint.node) {
-          anchor = draft.anchorPoint;
-        } else {
-          // Drafts captured before this build carry only the range.
-          try {
-            const range = draft.range && typeof draft.range.cloneRange === 'function' ? draft.range.cloneRange() : null;
-            if (range !== null) {
-              range.collapse(true);
-              anchor = { node: range.startContainer, offset: range.startOffset };
-            }
-          } catch {
-            anchor = null;
-          }
-        }
-        if (anchor === null) return
-        extendAnchor = anchor;
-        extending = true;
-        // Keep the caret in the card and stop the browser from starting a fresh
-        // selection at the press point.
-        event.preventDefault?.();
-        extendTo(event.clientX, event.clientY);
-      }
-
-      function onExtendPointerMove(event) {
-        if (!extending) return
-        if (typeof event?.buttons === 'number' && (event.buttons & 1) === 0) {
-          extending = false;
-          extendAnchor = null;
-          return
-        }
-        extendTo(event.clientX, event.clientY);
-      }
-
-      function onExtendPointerUp() {
-        extending = false;
-        extendAnchor = null;
-      }
-
-      /**
-       * True when the focused node is one of our own text fields and it holds a
-       * real (non-empty) text selection: there the browser's own copy wins.
-       */
-      function fieldHasSelection() {
-        try {
-          const active = /** @type {HTMLInputElement | HTMLTextAreaElement | null} */ (document.activeElement);
-          if (!active || typeof active.selectionStart !== 'number') return false
-          if (typeof active.closest !== 'function' || active.closest(SELF_SELECTOR) === null) return false
-          return active.selectionStart !== active.selectionEnd
-        } catch {
-          return false
-        }
-      }
-
-      /** Ctrl/Cmd+C while a card is open, with no selection inside our fields. */
-      function copyShortcutActive(event) {
-        if (state.annotationDraft === null) return false
-        if (event.ctrlKey !== true && event.metaKey !== true) return false
-        if (event.altKey === true || event.shiftKey === true) return false
-        return typeof event.key === 'string' && event.key.toLowerCase() === 'c'
-      }
-
-      function onPopupKeydown(event) {
-        if (event?.key === 'Escape' && state.settingsOpen) {
-          event.preventDefault();
-          closeSettings();
-          return
-        }
-        if (event?.key === 'Escape' && state.annotationDraft !== null) {
-          event.preventDefault();
-          closePopup();
-          return
-        }
-        if (event?.key === 'Escape' && state.annotationEditingId !== null) {
-          event.preventDefault();
-          cancelAnnotationEdit();
-          return
-        }
-        if (!copyShortcutActive(event)) return
-        if (fieldHasSelection()) return
-        // Focusing the note field drops the editor's native selection, so the
-        // browser has nothing left to copy. The card owns the passage: copy it
-        // ourselves and keep Ctrl+C working, which is the point of the card.
-        event.preventDefault();
-        copyDraftQuote().then((ok) => notify(ok ? text('copiedShort') : text('copyFailedShort')));
-      }
-
-      /** Put one text block in at the caret; false when the shell refused it. */
-      function spliceAtCaret(handle, value) {
-        if (value === '') return true
-        if (typeof handle.insertText !== 'function' || typeof handle.captureInsertion !== 'function') return false
-        try {
-          const span = handle.captureInsertion();
-          if (!span || typeof span.start !== 'number' || typeof span.end !== 'number') return false
-          return handle.insertText(value, span) === true
-        } catch {
-          return false
-        }
-      }
-
-      /**
-       * Write the pending annotations as the shell's own quote previews: one
-       * quote node per passage, the answer as plain text on the line below it.
-       * This is the node DSH inserts for a quoted selection, so the draft shows
-       * the quote mark instead of a run of `>` lines — and the node serializes
-       * back to the very Markdown a sent message carries.
-       *
-       * Reports how far it got and the blank-line break it already placed, so
-       * a shell that stops taking quotes mid-batch can finish the rest as text
-       * without doubling the gap. `attempted: false` means the shell has no
-       * quote face (or is not idle): the caller keeps its text path.
-       */
-      function writeQuotedBatch(handle, pending, draft) {
-        const skipped = { attempted: false, written: 0, lead: '', gap: false };
-        if (typeof handle.insertQuote !== 'function') return skipped
-        if (typeof handle.insertText !== 'function' || typeof handle.captureInsertion !== 'function') return skipped
-        // The shell only takes a quote into a plain composer; a sending or
-        // decided composer is the text path's business.
-        let phase = '';
-        try {
-          phase = handle.readPhase?.() ?? '';
-        } catch {
-          phase = '';
-        }
-        if (phase !== '' && phase !== 'plain') return skipped
-        const result = { attempted: true, written: 0, lead: '', gap: false };
-        const caret = () => {
-          try {
-            const span = handle.captureInsertion();
-            return span && typeof span.start === 'number' ? span : undefined
-          } catch {
-            return undefined
-          }
-        };
-        try {
-          const first = caret();
-          if (first === undefined) {
-            result.attempted = false;
-            return result
-          }
-          const lead = blockBreak(draft.slice(0, first.start));
-          if (lead !== '' && handle.insertText(lead, first) !== true) {
-            result.attempted = false;
-            return result
-          }
-          result.lead = lead;
-          for (let index = 0; index < pending.length; index += 1) {
-            const item = pending[index];
-            const quote = tidyQuote(item.quote);
-            if (quote.trim() === '') break
-            // A refused quote leaves the last written note where it is; the
-            // separator for this slot is what `gap` reports.
-            if (handle.insertQuote(quote) !== true) {
-              result.gap = index > 0;
-              break
-            }
-            result.written += 1;
-            const note = annotationNoteLine(item);
-            if (note !== '') {
-              const span = caret();
-              if (span === undefined || handle.insertText(`\n${note}`, span) !== true) break
-            }
-            if (index === pending.length - 1) break
-            const span = caret();
-            if (span === undefined || handle.insertText('\n\n\n', span) !== true) break
-            result.gap = true;
-          }
-        } catch {
-          return result
-        }
-        return result
-      }
-
-      /** Append every pending annotation to the composer draft. */
-      function writeAnnotations() {
-        const pending = pendingAnnotations();
-        if (pending.length === 0) return false
-        const handle = composerHandle();
-        if (handle === undefined || typeof handle.setDraft !== 'function') {
-          setState({ note: text('insertUnavailable'), error: '' });
-          return false
-        }
-        const body = annotationsText(pending);
-        if (body === '') return false
-        let draft = '';
-        try {
-          draft = handle.readDraft?.() ?? '';
-        } catch {
-          draft = '';
-        }
-        if (typeof draft !== 'string') draft = '';
-        // Preferred: the shell's quote preview per passage. Whatever it could
-        // not take stays pending; the rest of the batch is written as text.
-        const quoted = writeQuotedBatch(handle, pending, draft);
-        let writtenCount = quoted.written;
-        if (writtenCount < pending.length && writtenCount > 0) {
-          const rest = annotationsText(pending.slice(writtenCount));
-          if (spliceAtCaret(handle, (quoted.gap ? '' : '\n\n\n') + rest)) writtenCount = pending.length;
-        }
-        if (writtenCount < pending.length && writtenCount === 0) {
-          // The text path: splice at the caret first, then rebuild. `setDraft`
-          // rebuilds every paragraph and drops the caret at the end, which is
-          // exactly what a write in the middle of typing must not do; the
-          // rebuild stays as the fallback for a shell without the insertion
-          // face, or for a draft that moved. A leading break the quote path
-          // already placed is not put in twice.
-          let written = false;
-          if (typeof handle.insertText === 'function' && typeof handle.captureInsertion === 'function') {
-            try {
-              const span = handle.captureInsertion();
-              if (span && typeof span.start === 'number' && typeof span.end === 'number') {
-                const lead = quoted.lead !== '' ? '' : blockBreak(draft.slice(0, span.start));
-                written = handle.insertText(lead + body, span) === true;
-              }
-            } catch {
-              written = false;
-            }
-          }
-          if (written) {
-            writtenCount = pending.length;
-          } else {
-            const next = draft.trim() === '' ? body : `${draft}${blockBreak(draft)}${body}`;
-            try {
-              handle.setDraft(next);
-            } catch (error) {
-              console.warn('[dsh-nudge] annotation write failed', error);
-              setState({ note: text('insertUnavailable'), error: '' });
-              return false
-            }
-            writtenCount = pending.length;
-          }
-        }
-        if (writtenCount === 0) {
-          setState({ note: text('insertUnavailable'), error: '' });
-          return false
-        }
-        // The note leaves the pending set but stays in the tray and keeps its
-        // passage painted: a mark belongs to the conversation, not to the
-        // draft. Clearing the input box no longer takes it away — only
-        // deleting the note does.
-        const ids = new Set(pending.slice(0, writtenCount).map((item) => item.id));
-        const marked = state.annotations.map((item) =>
-          ids.has(item.id) ? { ...item, written: true } : item,
-        );
-        commitAnnotations(marked, { note: '', error: '' });
-        return true
-      }
-
-      /** Send the pending annotations as one user message. */
-      function sendAnnotations() {
-        if (state.phase === 'waiting') return false
-        const pending = pendingAnnotations();
-        if (pending.length === 0) return false
-        const body = annotationsText(pending);
-        if (body === '') return false
-        if (!deliver(body)) return false
-        // What was just sent lives in the conversation now; the notes already
-        // written into the draft keep their marks.
-        const ids = new Set(pending.map((item) => item.id));
-        const next = state.annotations.filter((item) => !ids.has(item.id));
-        commitAnnotations(next);
-        return true
-      }
+      const quoteWriting = createQuoteWriting({
+        getState: () => state,
+        setState,
+        text,
+        pendingAnnotations,
+        annotationsText,
+        tidyQuote,
+        annotationNoteLine,
+        blockBreak,
+        countStat,
+        deliver,
+        composerHandle,
+        commitAnnotations,
+      });
+      const {
+        spliceAtCaret,
+        writeQuotedBatch,
+        writeAnnotations,
+        sendAnnotations,
+      } = quoteWriting;
 
       /** The preset a send/write uses: the chosen one when it is enabled. */
       function activePreset() {
