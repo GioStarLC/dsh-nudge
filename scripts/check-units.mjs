@@ -10,6 +10,7 @@
  * Run: node scripts/check-units.mjs
  */
 import { MAX_TIP_LENGTH, MAX_TIPS, STATS_DAYS } from '../src/client/constants.js'
+import { createAnnotations } from '../src/client/annotations.js'
 import { createComposerInsertion } from '../src/client/composer-insert.js'
 import { createHighlights } from '../src/client/highlights.js'
 import { createPopup } from '../src/client/popup.js'
@@ -493,6 +494,36 @@ check(
   }
 
   check('highlights: a click while quick notes are off is ignored', api.onTranscriptClick({ target: null }) === undefined, true)
+}
+
+
+// --- annotation text: quotes, answers and block breaks -------------------
+
+{
+  const api = createAnnotations({
+    getState: () => ({ annotations: [] }),
+    setState: () => {},
+    text: (key) => (key === 'answerLabel' ? '我的回答：' : key),
+    countStat: () => {},
+    persistSetting: () => {},
+    repaintHighlights: () => {},
+    sessionId: () => undefined,
+    recordAnchorMiss: () => {},
+  })
+
+  check('annotations: trailing whitespace is dropped', api.tidyQuote('  原文  \n'), '  原文')
+  check('annotations: a non-string reads as empty', api.tidyQuote(null), '')
+  check('annotations: every quote line is marked', api.quoteMarkdown('甲\n\n乙'), '> 甲\n>\n> 乙')
+  check('annotations: a lone quote has no answer line', api.annotationBlock({ quote: '甲', note: '' }), '> 甲')
+  check(
+    'annotations: the answer sits right under its quote',
+    api.annotationBlock({ quote: '甲', note: ' 是的 ' }),
+    '> 甲\n我的回答：是的',
+  )
+  check('annotations: nothing in front of a block at the start', api.blockBreak(''), '')
+  check('annotations: three newlines open a block', api.blockBreak('abc'), '\n\n\n')
+  check('annotations: two existing newlines need one more', api.blockBreak('abc\n\n'), '\n')
+  check('annotations: a block already open needs nothing', api.blockBreak('abc\n\n\n'), '')
 }
 
 console.log(`\nunit checks: ${checks - failures} passed, ${failures} failed`)

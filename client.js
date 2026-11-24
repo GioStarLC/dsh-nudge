@@ -213,6 +213,18 @@ const h = React.createElement;
      * chip is armed, which entry's form is open, and the form's fields. One
      * object so leaving the mode clears every part of it at once.
      */
+    /**
+     * The resting annotation surface: no draft, no open editor, no typed note.
+     * Every path that closes a card returns these fields at once.
+     */
+    const IDLE_ANNOTATION = {
+      annotationDraft: null,
+      annotationCardHidden: false,
+      annotationNote: '',
+      annotationEditingId: null,
+      annotationEditRect: null,
+    };
+
     const IDLE_NUDGE_EDIT = {
       nudgeEditing: false,
       nudgeEditId: null,
@@ -1401,6 +1413,318 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
 `.trim();
 
 /**
+ * Reading the transcript: packed text and quote anchors.
+ *
+ * Selection anchors survive a repaint because they are found again by text, not by node.
+ *
+ * Built into `client.js` by `scripts/build.mjs`; edit this file, not the bundle.
+ */
+
+    /** The element a DOM node belongs to, or null. */
+    function elementOfNode(node) {
+      if (!node) return null
+      return node.nodeType === 1 ? node : (node.parentElement ?? null)
+    }
+
+    /** Tags whose text must not be projected. */
+    const NON_TEXT_TAGS = { SCRIPT: true, STYLE: true, NOSCRIPT: true, TEMPLATE: true };
+
+    /** Whether an element's subtree is invisible and must not be walked. */
+    function isHiddenElement(element) {
+      if (NON_TEXT_TAGS[element.tagName] === true) return true
+      if (element.hidden === true) return true
+      try {
+        const style = window.getComputedStyle?.(element);
+        return style ? style.display === 'none' || style.visibility === 'hidden' : false
+      } catch {
+        return false
+      }
+    }
+
+    /** Whitespace-free projection both sides of an anchor are compared on. */
+    function packedText(value) {
+      // The per-character `trim()` test this replaces kept exactly the
+      // non-whitespace code units; one regular expression is much cheaper on
+      // the long quotes and long rows this runs over.
+      return (typeof value === 'string' ? value : '').replace(/\s+/g, '')
+    }
+
+    /** Every visible kept character under a root, with its (node, offset) pair. */
+    function packedMapOf(root) {
+      let packed = '';
+      const map = [];
+      const walk = (node) => {
+        const children = node.childNodes;
+        for (let index = 0; index < children.length; index += 1) {
+          const child = children[index];
+          if (child.nodeType === 3) {
+            const data = child.data;
+            for (let offset = 0; offset < data.length; offset += 1) {
+              const ch = data.charAt(offset);
+              if (ch.trim() === '') continue
+              packed += ch;
+              map.push(child, offset);
+            }
+          } else if (child.nodeType === 1) {
+            if (isHiddenElement(child)) continue
+            walk(child);
+          }
+        }
+      };
+      walk(root);
+      return { packed, map }
+    }
+
+    /**
+     * Tags whose text reads as one passage. A selection inside one of these is
+     * promoted to the whole block, so the highlight covers the paragraph the
+     * words sit in rather than the words alone.
+     */
+    const PASSAGE_TAGS = {
+      P: true,
+      LI: true,
+      H1: true,
+      H2: true,
+      H3: true,
+      H4: true,
+      H5: true,
+      H6: true,
+      BLOCKQUOTE: true,
+      PRE: true,
+      TD: true,
+      TH: true,
+      DT: true,
+      DD: true,
+      FIGCAPTION: true,
+    };
+
+    /** Whether a range touches one node; a node that cannot be asked is skipped. */
+    function rangeTouches(range, node) {
+      try {
+        return typeof range.intersectsNode === 'function' && range.intersectsNode(node) === true
+      } catch {
+        return false
+      }
+    }
+
+    /** The innermost passage tag between a node and its flow item. */
+    function passageBlockOf(node, flowItem) {
+      let element = elementOfNode(node);
+      while (element !== null && element !== flowItem) {
+        if (PASSAGE_TAGS[String(element.tagName ?? '').toUpperCase()] === true) return element
+        element = element.parentElement ?? null;
+      }
+      return flowItem
+    }
+
+    /** The text one block carries, with only its trailing whitespace dropped. */
+    function blockTextOf(block) {
+      let text = '';
+      const walk = (node) => {
+        for (const child of node.childNodes ?? []) {
+          if (child.nodeType === 3) text += child.data ?? '';
+          else if (child.nodeType === 1 && !isHiddenElement(child)) walk(child);
+        }
+      };
+      walk(block);
+      return text.replace(/\s+$/, '')
+    }
+
+    /**
+     * The whole passages a selection touches, in document order.
+     *
+     * A selection inside a paragraph names that paragraph; one crossing several
+     * names all of them. The innermost block wins, so a list item wrapping a
+     * paragraph contributes its words once, and a flow item that carries no
+     * block of its own stands for its whole text.
+     */
+    function passagesOfRange(range) {
+      const elements = document.querySelectorAll?.(ANCHOR_SELECTOR) ?? [];
+      const blocks = [];
+      for (const element of elements) {
+        const walk = (node) => {
+          for (const child of node.childNodes ?? []) {
+            if (child.nodeType === 3) {
+              if (!rangeTouches(range, child)) continue
+              const block = passageBlockOf(child, element);
+              if (!blocks.includes(block)) blocks.push(block);
+            } else if (child.nodeType === 1 && !isHiddenElement(child)) {
+              walk(child);
+            }
+          }
+        };
+        walk(element);
+      }
+      const innermost = blocks.filter(
+        (block) => !blocks.some((other) => other !== block && block.contains?.(other) === true),
+      );
+      const texts = innermost.map(blockTextOf).filter((text) => text.trim() !== '');
+      return texts.length === 0 ? '' : texts.join('\n\n')
+    }
+
+    /** A DOM Range covering [start, end) of a packed map, or null. */
+    function rangeFromPacked(full, start, end) {
+      if (start < 0 || end <= start) return null
+      const last = end - 1;
+      if (last * 2 + 1 >= full.map.length) return null
+      try {
+        const range = document.createRange();
+        range.setStart(full.map[start * 2], full.map[start * 2 + 1]);
+        range.setEnd(full.map[last * 2], full.map[last * 2 + 1] + 1);
+        return range
+      } catch {
+        return null
+      }
+    }
+
+    /** Every start index of `needle` inside `haystack`, capped. */
+    function occurrencesOf(haystack, needle, limit) {
+      const out = [];
+      if (needle === '') return out
+      let at = haystack.indexOf(needle);
+      while (at !== -1 && out.length < limit) {
+        out.push(at);
+        at = haystack.indexOf(needle, at + 1);
+      }
+      return out
+    }
+
+    /** Centre-to-centre distance between two rects. */
+    function rectDistance(left, right) {
+      const dx = (left.left + left.right) / 2 - (right.left + right.right) / 2;
+      const dy = (left.top + left.bottom) / 2 - (right.top + right.bottom) / 2;
+      return Math.sqrt(dx * dx + dy * dy)
+    }
+
+    /** The anchor a live selection hangs on, or null outside a flow item. */
+    function anchorFromRange(range, quote) {
+      const element = elementOfNode(range.commonAncestorContainer);
+      if (element === null || typeof element.closest !== 'function') return null
+      const anchorElement = element.closest(ANCHOR_SELECTOR);
+      if (anchorElement === null) return null
+      const packed = packedText(quote);
+      if (packed === '') return null
+      const full = packedMapOf(anchorElement);
+      const candidates = occurrencesOf(full.packed, packed, MAX_OCCURRENCES);
+      if (candidates.length === 0) return null
+      let target = null;
+      try {
+        target = range.getBoundingClientRect();
+      } catch {
+        target = null;
+      }
+      let best = null;
+      for (const index of candidates) {
+        const candidateRange = rangeFromPacked(full, index, index + packed.length);
+        if (candidateRange === null) continue
+        let distance = 0;
+        if (target !== null) {
+          try {
+            distance = rectDistance(candidateRange.getBoundingClientRect(), target);
+          } catch {
+            distance = 0;
+          }
+        }
+        if (best === null || distance < best.distance) best = { index, distance };
+      }
+      if (best === null) return null
+      return {
+        key: anchorElement.getAttribute('data-chat-anchor-key'),
+        quote: packed,
+        prefix: full.packed.slice(Math.max(0, best.index - CONTEXT_CHARS), best.index),
+        suffix: full.packed.slice(
+          best.index + packed.length,
+          best.index + packed.length + CONTEXT_CHARS,
+        ),
+        index: best.index,
+      }
+    }
+
+    /**
+     * The anchor a quote hangs on when no live selection is left: the innermost
+     * flow item whose projection carries the passage.
+     *
+     * This is the recovery path, not the primary one — the anchor of a fresh
+     * selection comes from the range. A passage carried by two unrelated flow
+     * items stays unanchored, because painting the wrong one is worse than
+     * painting none.
+     */
+    function anchorFromQuote(quote) {
+      const packed = packedText(quote);
+      if (packed === '') return null
+      const elements = document.querySelectorAll?.(ANCHOR_SELECTOR) ?? [];
+      const matches = [];
+      for (const element of elements) {
+        const key = element.getAttribute?.('data-chat-anchor-key');
+        if (typeof key !== 'string' || key === '') continue
+        const full = packedMapOf(element);
+        const index = full.packed.indexOf(packed);
+        if (index === -1) continue
+        matches.push({ element, key, full, index });
+      }
+      // A turn-process row wraps its member rows, so the deepest match is the
+      // one the passage really belongs to.
+      const deepest = matches.filter(
+        (match) =>
+          !matches.some(
+            (other) => other !== match && match.element.contains?.(other.element) === true,
+          ),
+      );
+      if (deepest.length !== 1) return null
+      const { key, full, index } = deepest[0];
+      return {
+        key,
+        quote: packed,
+        prefix: full.packed.slice(Math.max(0, index - CONTEXT_CHARS), index),
+        suffix: full.packed.slice(index + packed.length, index + packed.length + CONTEXT_CHARS),
+        index,
+      }
+    }
+
+    /** Whether a painted highlight already covers exactly these ranges, in order. */
+    function sameRanges(highlight, ranges) {
+      if (!highlight || typeof highlight[Symbol.iterator] !== 'function') return false
+      const current = [...highlight];
+      if (current.length !== ranges.length) return false
+      return current.every((range, index) => {
+        const next = ranges[index];
+        return (
+          range.collapsed !== true &&
+          range.startContainer === next.startContainer &&
+          range.startOffset === next.startOffset &&
+          range.endContainer === next.endContainer &&
+          range.endOffset === next.endOffset
+        )
+      })
+    }
+
+    /** Where one stored anchor sits in an anchor element's current projection. */
+    function locateAnchor(full, anchor) {
+      if (anchor === null || typeof anchor !== 'object') return null
+      if (typeof anchor.quote !== 'string' || anchor.quote === '') return null
+      const prefix = typeof anchor.prefix === 'string' ? anchor.prefix : '';
+      const suffix = typeof anchor.suffix === 'string' ? anchor.suffix : '';
+      const candidates = occurrencesOf(full.packed, anchor.quote, MAX_OCCURRENCES);
+      if (candidates.length === 0) return null
+      let best = null;
+      for (const index of candidates) {
+        let score = 0;
+        if (prefix !== '' && full.packed.slice(Math.max(0, index - prefix.length), index) === prefix) score += 4;
+        if (
+          suffix !== '' &&
+          full.packed.slice(index + anchor.quote.length, index + anchor.quote.length + suffix.length) === suffix
+        ) {
+          score += 4;
+        }
+        if (typeof anchor.index === 'number') score += Math.max(0, 2 - Math.abs(index - anchor.index) / 200);
+        if (best === null || score > best.score) best = { index, score };
+      }
+      if (best === null) return null
+      if (best.score < 4 && candidates.length > 1) return null
+      return { start: best.index, end: best.index + anchor.quote.length }
+    }
+
+/**
  * The page storage facade.
  *
  * One guarded accessor pair for localStorage; writes tell the durable mirror there is news.
@@ -1497,6 +1821,53 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
         /* a value that cannot be serialized is not worth a crash */
         return false
       }
+    }
+
+/**
+ * The per-Session annotation store.
+ *
+ * Every note is keyed by the Session it quotes, so switching conversations keeps each tray.
+ *
+ * Built into `client.js` by `scripts/build.mjs`; edit this file, not the bundle.
+ */
+
+    /** Every stored annotation set, keyed by Session id. */
+    function readNoteStore() {
+      try {
+        const raw = storage()?.getItem(NOTES_KEY);
+        if (typeof raw !== 'string' || raw === '') return {}
+        const parsed = JSON.parse(raw);
+        return parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+      } catch {
+        return {}
+      }
+    }
+
+    /** One Session's stored annotations, degraded to [] when malformed. */
+    function notesOfSession(sessionId) {
+      if (typeof sessionId !== 'string' || sessionId === '') return []
+      const list = readNoteStore()[sessionId];
+      if (!Array.isArray(list)) return []
+      return list.filter(
+        (item) =>
+          item !== null &&
+          typeof item === 'object' &&
+          typeof item.quote === 'string' &&
+          typeof item.id === 'string',
+      )
+    }
+
+    /** Persist one Session's annotations, dropping empty sets and old Sessions. */
+    function saveNotesOfSession(sessionId, list) {
+      if (typeof sessionId !== 'string' || sessionId === '') return
+      const store = readNoteStore();
+      if (!Array.isArray(list) || list.length === 0) delete store[sessionId];
+      else store[sessionId] = list.slice(-MAX_NOTES);
+      const keys = Object.keys(store);
+      if (keys.length > MAX_NOTE_SESSIONS) {
+        for (const key of keys.slice(0, keys.length - MAX_NOTE_SESSIONS)) delete store[key];
+      }
+      writeJson(NOTES_KEY, store);
     }
 
 /**
@@ -1604,277 +1975,6 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
         /* storage unavailable */
       }
       return firstEnabled?.id ?? presets[0]?.id ?? DEFAULT_PRESET
-    }
-
-/**
- * Writing into the composer: the mounted bridge, the draft splice and the
- * pinned-prompt presses.
- *
- * The window never touches the editor DOM. It holds the handle the input
- * bridge hands over (`setDraft`/`readDraft`), appends a prompt on its own line
- * and — on a double press — sends the draft the first press composed.
- *
- * Built into `client.js` by `scripts/build.mjs`; edit this file, not the bundle.
- */
-
-    /**
-     * Build the composer side of the runtime.
-     *
-     * Every collaborator is injected: the state is read through `getState`,
-     * prompts come from `activePreset`/`state.presets`, and the effects that
-     * belong to the window (toast text, counters, delivery, auto-paste) stay
-     * callbacks, so this module has no DOM and no store of its own.
-     *
-     * @param deps - getState, setState, text, countStat, deliver, activePreset, onFocus.
-     * @returns the composer handle surface and the three insertion entry points.
-     */
-    function createComposerInsertion(deps) {
-      const { getState, setState, text, countStat, deliver, activePreset, onFocus } = deps;
-
-      /** The mounted composer bridge, when a conversation input is on screen. */
-      let composer;
-      /**
-       * A bar press counts its insert only when no second press follows: the
-       * pair is one send, not an insert plus a send.
-       */
-      let barInsertTimer;
-      let barInsertId = '';
-
-      /** The focused composer editor element, when the caret is inside it. */
-      function composerNode() {
-        try {
-          const active = /** @type {HTMLElement | null} */ (document.activeElement);
-          if (!active) return undefined
-          const editable =
-            active.isContentEditable === true ||
-            active.getAttribute?.('contenteditable') === 'true';
-          if (!editable) return undefined
-          // The DSH composer editor marks itself `data-composer-input`; Lexical
-          // marks its root too, and the slot host covers older shells.
-          if (typeof active.hasAttribute === 'function' && active.hasAttribute('data-composer-input')) return active
-          if (active.getAttribute?.('data-lexical-editor') === 'true') return active
-          if (typeof active.closest === 'function' && active.closest('[data-slot="conversation.composer"]')) {
-            return active
-          }
-          return undefined
-        } catch {
-          return undefined
-        }
-      }
-
-      /** Write mode is available only while a composer is mounted and focused. */
-      function canInsert() {
-        return composer !== undefined && composerNode() !== undefined
-      }
-
-      /** Keep the visible mode flag (the primary button label) in sync with focus. */
-      function syncComposerFocus() {
-        const focused = canInsert();
-        if (focused === getState().composerFocused) return
-        setState({ composerFocused: focused });
-        if (focused && typeof onFocus === 'function') onFocus();
-      }
-
-      /**
-       * Attach the live composer handle handed over by the input bridge.
-       * `sync: false` stores it without a store update, for React's render
-       * phase; the bridge's effect then attaches with the focus refresh.
-       */
-      function attachComposer(handle, sync = true) {
-        composer = handle;
-        if (sync) syncComposerFocus();
-      }
-
-      /** Detach only when the released handle is still the mounted one. */
-      function detachComposer(handle) {
-        if (composer !== handle) return
-        composer = undefined;
-        syncComposerFocus();
-      }
-
-      /** Whether the mounted composer already holds text. */
-      function composerHasText() {
-        if (composer === undefined) return false
-        try {
-          const draft = composer.readDraft?.();
-          return typeof draft === 'string' && draft.trim() !== ''
-        } catch {
-          return false
-        }
-      }
-
-      /**
-       * Append the selected preset to the composer draft instead of sending it.
-       * The caret ends up past the written text; existing content is kept and
-       * separated by one newline (a blank draft gets no leading newline).
-       */
-      function insertPreset(id, count = true) {
-        const handle = composer;
-        if (handle === undefined || typeof handle.setDraft !== 'function') {
-          setState({ note: text('insertUnavailable'), error: '' });
-          return false
-        }
-        const preset = id === undefined ? activePreset() : presetOf(getState().presets, id);
-        if (!preset) return false
-        let draft = '';
-        try {
-          draft = handle.readDraft?.() ?? '';
-        } catch {
-          draft = '';
-        }
-        if (typeof draft !== 'string') draft = '';
-        const next =
-          draft.trim() === ''
-            ? preset.text
-            : `${draft}${draft.endsWith('\n') ? '' : '\n'}${preset.text}`;
-        try {
-          handle.setDraft(next);
-        } catch (error) {
-          console.warn('[dsh-nudge] composer insert failed', error);
-          setState({ note: text('insertUnavailable'), error: '' });
-          return false
-        }
-        setState({ note: '', error: '' });
-        if (count === true) countStat('insert', preset.id);
-        return true
-      }
-
-      /**
-       * A single press on a pinned prompt: append it now, and count the insert
-       * only if the press is not followed by the second half of a double click.
-       */
-      function appendPrompt(id) {
-        if (barInsertTimer !== undefined) {
-          clearTimeout(barInsertTimer);
-          barInsertTimer = undefined;
-          if (barInsertId !== '') countStat('insert', barInsertId);
-          barInsertId = '';
-        }
-        if (!insertPreset(id, false)) return false
-        barInsertId = id;
-        barInsertTimer = setTimeout(() => {
-          barInsertTimer = undefined;
-          const pending = barInsertId;
-          barInsertId = '';
-          if (pending !== '') countStat('insert', pending);
-        }, 260);
-        return true
-      }
-
-      /**
-       * A double press on a pinned prompt: send the draft the first press
-       * composed. That press's insert count is dropped, so the pair counts as
-       * one send; a failed send keeps the draft as it was.
-       */
-      function sendDraft(id) {
-        const handle = composer;
-        if (handle === undefined || typeof handle.setDraft !== 'function') {
-          setState({ note: text('insertUnavailable'), error: '' });
-          return false
-        }
-        if (barInsertTimer !== undefined) {
-          clearTimeout(barInsertTimer);
-          barInsertTimer = undefined;
-          barInsertId = '';
-        }
-        const preset = presetOf(getState().presets, id);
-        let draft = '';
-        try {
-          draft = handle.readDraft?.() ?? '';
-        } catch {
-          draft = '';
-        }
-        if (typeof draft !== 'string') draft = '';
-        const body = preset?.text ?? '';
-        // The first press writes through the shell's input store; if that write
-        // has not reached the reader yet, compose it here so the send is whole.
-        if (body !== '' && !draft.replace(/\s+$/, '').endsWith(body.trim())) {
-          draft = draft.trim() === '' ? body : `${draft}${draft.endsWith('\n') ? '' : '\n'}${body}`;
-        }
-        if (draft.trim() === '') return false
-        if (!deliver(draft)) return false
-        try {
-          handle.setDraft('');
-        } catch {
-          /* the text stays if the shell refuses the clear */
-        }
-        countStat('send', id);
-        return true
-      }
-
-      /** The live handle, for the batch writer that needs the same action face. */
-      function composerHandle() {
-        return composer
-      }
-
-      /** Drop the pending double-press timer when the runtime goes away. */
-      function dispose() {
-        if (barInsertTimer === undefined) return
-        clearTimeout(barInsertTimer);
-        barInsertTimer = undefined;
-        barInsertId = '';
-      }
-
-      return {
-        composerNode,
-        canInsert,
-        syncComposerFocus,
-        attachComposer,
-        detachComposer,
-        composerHasText,
-        composerHandle,
-        insertPreset,
-        appendPrompt,
-        sendDraft,
-        dispose,
-      }
-    }
-
-/**
- * The per-Session annotation store.
- *
- * Every note is keyed by the Session it quotes, so switching conversations keeps each tray.
- *
- * Built into `client.js` by `scripts/build.mjs`; edit this file, not the bundle.
- */
-
-    /** Every stored annotation set, keyed by Session id. */
-    function readNoteStore() {
-      try {
-        const raw = storage()?.getItem(NOTES_KEY);
-        if (typeof raw !== 'string' || raw === '') return {}
-        const parsed = JSON.parse(raw);
-        return parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
-      } catch {
-        return {}
-      }
-    }
-
-    /** One Session's stored annotations, degraded to [] when malformed. */
-    function notesOfSession(sessionId) {
-      if (typeof sessionId !== 'string' || sessionId === '') return []
-      const list = readNoteStore()[sessionId];
-      if (!Array.isArray(list)) return []
-      return list.filter(
-        (item) =>
-          item !== null &&
-          typeof item === 'object' &&
-          typeof item.quote === 'string' &&
-          typeof item.id === 'string',
-      )
-    }
-
-    /** Persist one Session's annotations, dropping empty sets and old Sessions. */
-    function saveNotesOfSession(sessionId, list) {
-      if (typeof sessionId !== 'string' || sessionId === '') return
-      const store = readNoteStore();
-      if (!Array.isArray(list) || list.length === 0) delete store[sessionId];
-      else store[sessionId] = list.slice(-MAX_NOTES);
-      const keys = Object.keys(store);
-      if (keys.length > MAX_NOTE_SESSIONS) {
-        for (const key of keys.slice(0, keys.length - MAX_NOTE_SESSIONS)) delete store[key];
-      }
-      writeJson(NOTES_KEY, store);
     }
 
 /**
@@ -2453,6 +2553,903 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
     }
 
 /**
+ * The annotation surfaces: the selection card, the in-place editor and the tray.
+ *
+ * One state machine over three surfaces is the whole point of this module: a
+ * card and an editor never coexist, and every closing path returns the same
+ * fields to rest. The window state arrives through `getState`; persistence,
+ * counters, toast text and the repaint stay callbacks.
+ *
+ * Built into `client.js` by `scripts/build.mjs`; edit this file, not the bundle.
+ */
+
+    /**
+     * Build the annotation surfaces over one runtime.
+     *
+     * @param deps - getState, setState, text, countStat, persistSetting,
+     *   repaintHighlights, sessionId.
+     * @returns every action the window, the tray and the key handlers call.
+     */
+    function createAnnotations(deps) {
+      const { getState, setState, text, countStat, persistSetting, repaintHighlights, sessionId, recordAnchorMiss } = deps;
+
+      // --- annotations ----------------------------------------------------
+
+
+      /** Trim only the trailing whitespace a selection picks up. */
+      function tidyQuote(value) {
+        return String(value ?? '').replace(/\s+$/, '')
+      }
+
+      /**
+       * One passage as the Markdown blockquote the shell serializes a quote
+       * node to; text copied out of the composer keeps this form.
+       */
+      function quoteMarkdown(value) {
+        const lines = tidyQuote(value).split('\n');
+        return lines.map((line) => (line === '' ? '>' : `> ${line}`)).join('\n')
+      }
+
+      /** The answer line under a passage, or '' when the passage stands alone. */
+      function annotationNoteLine(item) {
+        const note = typeof item.note === 'string' ? item.note.trim() : '';
+        return note === '' ? '' : `${text('answerLabel')}${note}`
+      }
+
+      /**
+       * One annotation as the Markdown block it becomes when it is sent: the
+       * quote on its own lines, the answer on the line right below it.
+       */
+      function annotationBlock(item) {
+        const quoted = quoteMarkdown(item.quote);
+        const note = annotationNoteLine(item);
+        return note === '' ? quoted : `${quoted}\n${note}`
+      }
+
+      /** The annotations still waiting to be written into a message. */
+      function pendingAnnotations() {
+        return getState().annotations.filter((item) => item.written !== true)
+      }
+
+      // --- the annotation lifecycle ---------------------------------------
+      //
+      // Three surfaces share one state: the selection card (a draft), the
+      // in-place editor (one stored note) and the tray (the Session's notes). A
+      // card and an editor never coexist, and every path that ends one of them
+      // returns the same fields to rest — so the resting surface is written
+      // down once here, and a tray change is persisted and repainted in one
+      // step, instead of each transition spelling out its own subset.
+
+      /** One surface change: show it, then repaint the marks it implies. */
+      function settleAnnotation(patch) {
+        setState(patch);
+        repaintHighlights();
+      }
+
+      /** Return the surface to rest; the tray list is left as it is. */
+      function closeAnnotationSurface(extra) {
+        settleAnnotation({ ...IDLE_ANNOTATION, ...(extra ?? {}) });
+        return true
+      }
+
+      /**
+       * Replace the tray: persist it, show it, repaint its marks. A mark belongs
+       * to the conversation rather than to a draft, so the list and its painting
+       * can never drift apart.
+       */
+      function commitAnnotations(next, extra) {
+        persistNotes(next);
+        settleAnnotation({ annotations: next, ...IDLE_ANNOTATION, ...(extra ?? {}) });
+        return next
+      }
+
+      /** Whether one DOM node belongs to this window rather than to the page. */
+      function isSelfNode(node) {
+        if (!node || typeof node.closest !== 'function') return false
+        try {
+          return node.closest(SELF_SELECTOR) !== null
+        } catch {
+          return false
+        }
+      }
+
+      /** One write or send batch as one message body, notes two blank lines apart. */
+      function annotationsText(list) {
+        const items = Array.isArray(list) ? list : pendingAnnotations();
+        return items.map(annotationBlock).join('\n\n\n')
+      }
+
+      /**
+       * The break a Markdown block needs in front of it: two blank lines, so a
+       * note reads as a block of its own in the draft instead of running on from
+       * whatever it is appended to. A draft already ending with them gets no more.
+       */
+      function blockBreak(before) {
+        if (before === '') return ''
+        if (before.endsWith('\n\n\n')) return ''
+        if (before.endsWith('\n\n')) return '\n'
+        return before.endsWith('\n') ? '\n\n' : '\n\n\n'
+      }
+
+      /** Whether a node belongs to a text field rather than the transcript. */
+      function inEditable(node) {
+        if (!node || typeof node.closest !== 'function') return false
+        try {
+          return node.closest(EDITABLE_SELECTOR) !== null
+        } catch {
+          return false
+        }
+      }
+
+      /** The selection worth annotating: quote + its flow-item anchor. */
+      function readSelection() {
+        try {
+          if (typeof window.getSelection !== 'function') return null
+          const selection = window.getSelection();
+          if (!selection || selection.rangeCount === 0 || selection.isCollapsed) return null
+          const quote = tidyQuote(selection.toString());
+          if (quote.trim() === '') return null
+          const range = selection.getRangeAt(0);
+          const node = range.commonAncestorContainer;
+          const element = /** @type {Element | null} */ (
+            node && node.nodeType === 1 ? node : node?.parentElement
+          );
+          if (!element || typeof element.closest !== 'function') return null
+          if (element.closest(EDITABLE_SELECTOR)) return null
+          if (element.closest(MODAL_SELECTOR)) return null
+          if (element.closest(SELF_SELECTOR)) return null
+          // The browser keeps two ends: `anchor` is where the gesture started,
+          // `focus` is where it ended. The native Shift+click grows from the
+          // anchor, so a downward drag extends forward and an upward drag
+          // extends backward. Both are kept while the range still points at
+          // live nodes.
+          let anchorPoint = null;
+          let focusPoint = null;
+          try {
+            if (selection.anchorNode) {
+              anchorPoint = { node: selection.anchorNode, offset: selection.anchorOffset };
+            }
+            if (selection.focusNode) {
+              focusPoint = { node: selection.focusNode, offset: selection.focusOffset };
+            }
+          } catch {
+            anchorPoint = null;
+            focusPoint = null;
+          }
+          return { quote, range, anchorPoint, focusPoint }
+        } catch {
+          return null
+        }
+      }
+
+      let selectionTimer;
+      let attentionTimer;
+      let flashTimer;
+      /** True while a pointer gesture is down, so no card opens mid-drag. */
+      let pointerHeld = false;
+
+      /** Cancel a capture that has not fired yet (a new press is starting). */
+      function cancelPendingCapture() {
+        if (selectionTimer !== undefined) {
+          clearTimeout(selectionTimer);
+          selectionTimer = undefined;
+        }
+      }
+
+      /**
+       * Read the selection once it has settled. A short debounce is what keeps
+       * double-click word selection and drag-then-adjust smooth: the browser's
+       * own finalisation, the second click and the following mouseup all land
+       * before the draft appears, and focus is not stolen mid-gesture.
+       * The pointer's own position is kept so the card can open right at the cursor.
+       */
+      function captureSelectionLater(event) {
+        if (getState().quick !== true) return
+        if (selectionTimer !== undefined) clearTimeout(selectionTimer);
+        const pointer =
+          event && typeof event.clientX === 'number' && typeof event.clientY === 'number'
+            ? { x: event.clientX, y: event.clientY }
+            : null;
+        selectionTimer = setTimeout(() => {
+          selectionTimer = undefined;
+          captureSelection(pointer);
+        }, 200);
+      }
+
+      /**
+       * Keyboard selections end on a shifted keyup — in the transcript only.
+       *
+       * Shift+Enter makes a newline and Shift+<letter> capitalises, so a keyup
+       * inside a text field is typing, not a selection gesture. Capturing it
+       * would read a caret as a passage and pull the card (and the focus) over
+       * the field the user is typing in.
+       */
+      function onSelectionKeyup(event) {
+        if (getState().quick !== true) return
+        if (event?.shiftKey !== true) return
+        if (inEditable(event?.target)) return
+        if (inEditable(document.activeElement)) return
+        captureSelectionLater();
+      }
+
+      /**
+       * A card must never open while the button is still down: dragging a
+       * selection keeps firing `selectionchange`, and opening then would steal
+       * the focus (and the caret) in the middle of the gesture. The pointer
+       * path and the safety net both wait for the release.
+       */
+      function onPointerGestureDown() {
+        pointerHeld = true;
+        cancelPendingCapture();
+      }
+
+      function onPointerGestureUp() {
+        pointerHeld = false;
+      }
+
+      /**
+       * Safety net for a settled selection that never reaches the pointer path:
+       * a drag that ends outside the transcript, a double-click on a boundary,
+       * or a second selection whose mouseup was swallowed by a re-render. It
+       * shares the debounce timer, so the pointer path always wins, and
+       * `captureSelection` itself refuses the quote that is already captured.
+       */
+      function onSelectionChange() {
+        if (getState().quick !== true) return
+        if (pointerHeld) return
+        if (selectionTimer !== undefined) clearTimeout(selectionTimer);
+        selectionTimer = setTimeout(() => {
+          selectionTimer = undefined;
+          captureSelection();
+        }, 260);
+      }
+
+      /** One short pulse so a capture is noticed wherever the eye is. */
+      function pulse() {
+        setState({ attentionAt: Date.now() });
+        if (attentionTimer !== undefined) clearTimeout(attentionTimer);
+        attentionTimer = setTimeout(() => {
+          attentionTimer = undefined;
+          setState({ attentionAt: 0 });
+        }, 900);
+      }
+
+      /**
+       * Show one short confirmation line after a toggle, so a icon-only button
+       * still says in words what it just switched to.
+       */
+      function notify(message) {
+        const line = typeof message === 'string' ? message : '';
+        if (line === '') return false
+        setState({ flash: line });
+        if (flashTimer !== undefined) clearTimeout(flashTimer);
+        flashTimer = setTimeout(() => {
+          flashTimer = undefined;
+          setState({ flash: '' });
+        }, FLASH_HOLD_MS);
+        return true
+      }
+
+      /** Turn the current selection into the pending annotation draft. */
+      function captureSelection(pointer = null) {
+        const selection = readSelection();
+        if (selection === null) return false
+        if (
+          getState().annotationDraft !== null &&
+          getState().annotationDraft.quote === selection.quote &&
+          getState().annotationEditingId === null
+        ) {
+          return false
+        }
+        // The card hangs next to the selection; the nudge window does not move
+        // and keeps no focus, so the browser's own selection stays untouched.
+        let rect = null;
+        try {
+          rect = selection.range.getBoundingClientRect();
+        } catch {
+          rect = null;
+        }
+        if (rect !== null && rect.width === 0 && rect.height === 0) rect = null;
+        // Anchor now, while the range still points at the nodes the user just
+        // selected. Waiting for the click would gamble on the page not having
+        // re-rendered in between, and a lost anchor means no highlight ever.
+        let anchor = null;
+        try {
+          anchor = anchorFromRange(selection.range, selection.quote);
+        } catch {
+          anchor = null;
+        }
+        settleAnnotation({
+          ...IDLE_ANNOTATION,
+          annotationDraft: {
+            quote: selection.quote,
+            anchor,
+            range: selection.range,
+            // The gesture's start end: Shift+press grows away from it, so an
+            // upward selection keeps its lower edge and an upward press extends
+            // further up instead of dropping the rows already selected.
+            anchorPoint: selection.anchorPoint,
+            rect: rect
+              ? {
+                  left: rect.left,
+                  top: rect.top,
+                  right: rect.right,
+                  bottom: rect.bottom,
+                  width: rect.width,
+                  height: rect.height,
+                }
+              : null,
+            pointer,
+          },
+          note: '',
+          error: '',
+        });
+        return true
+      }
+
+      /** Drop the browser selection only when it is still our captured quote. */
+      function clearNativeSelection(quote) {
+        try {
+          const selection = window.getSelection?.();
+          if (!selection || selection.rangeCount === 0) return
+          if (typeof quote === 'string' && quote !== '' && selection.toString() === quote) {
+            selection.removeAllRanges();
+          }
+        } catch {
+          /* no selection object */
+        }
+      }
+
+      /** Quick-annotation master switch. */
+      function setQuick(value) {
+        const next = value === true;
+        persistSetting('quick', next);
+        settleAnnotation({
+          quick: next,
+          // The switch no longer unfolds the tray (its open state belongs to the
+          // user); turning it off still drops whatever the tray was holding.
+          ...(next ? null : { ...IDLE_ANNOTATION, annotationExpanded: false }),
+        });
+        notify(next ? text('quickOn') : text('quickOff'));
+        return true
+      }
+
+      /** Auto-paste switch: when on, pending notes flow into the composer on focus. */
+      function setAutoPaste(value) {
+        const next = value === true;
+        persistSetting('autoPaste', next);
+        setState({ autoPaste: next });
+        notify(next ? text('autoPasteOn') : text('autoPasteOff'));
+        return true
+      }
+
+      /**
+       * Show the explanation bubble for one window control. `rect` is the
+       * control's viewport box, kept as numbers so the renderer only has to
+       * place the bubble; the text is derived from the live state, so a toggle
+       * updates the bubble without moving the pointer.
+       */
+      function showTip(key, rect) {
+        if (typeof key !== 'string' || key === '') return false
+        const box = rect && typeof rect === 'object' ? rect : null;
+        const left = box === null ? NaN : Number(box.left);
+        const top = box === null ? NaN : Number(box.top);
+        const right = box === null ? NaN : Number(box.right);
+        const bottom = box === null ? NaN : Number(box.bottom);
+        if (!Number.isFinite(left) || !Number.isFinite(top) || !Number.isFinite(right) || !Number.isFinite(bottom)) {
+          return false
+        }
+        setState({ tip: { key, left, top, right, bottom } });
+        return true
+      }
+
+      /** Hide the explanation bubble. */
+      function hideTip() {
+        if (getState().tip !== null) setState({ tip: null });
+        return true
+      }
+
+      /** Border width of the floating window, in px; the default is not stored. */
+      function setFrame(value) {
+        const width = Number(value);
+        if (!isFrameWidth(width)) return false
+        persistSetting('frame', width);
+        setState({ frame: width });
+        notify(`${text('frameTitle')}：${text(frameLabelKey(width))}`);
+        return true
+      }
+
+      /** Whether the annotation module shows its body. */
+      function setAnnotationExpanded(value) {
+        setState({ annotationExpanded: value === true });
+      }
+
+      /** Whether the nudge module shows its body. */
+      function setNudgeExpanded(value) {
+        setState({ nudgeExpanded: value === true });
+      }
+
+      /** Update the note for the pending annotation draft (or the edit). */
+      function setAnnotationNote(value) {
+        setState({ annotationNote: typeof value === 'string' ? value : '' });
+      }
+
+      /** The Session the annotation tray belongs to. */
+      function noteSessionId() {
+        return sessionId()
+      }
+
+      /** Persist the tray of the owning Session. */
+      function persistNotes(list) {
+        saveNotesOfSession(noteSessionId(), Array.isArray(list) ? list : getState().annotations);
+      }
+
+      /** Commit the pending quote + note into the tray. */
+      function addAnnotation(noteOverride) {
+        const draft = getState().annotationDraft;
+        if (!draft || typeof draft.quote !== 'string' || draft.quote.trim() === '') return false
+        const note =
+          typeof noteOverride === 'string'
+            ? noteOverride
+            : typeof getState().annotationNote === 'string'
+              ? getState().annotationNote.trim()
+              : '';
+        // The capture already anchored the passage; the two retries cover a page
+        // that re-rendered between the selection and this click. Whatever still
+        // fails leaves a diagnostic sample, because a note without an anchor
+        // shows up only as a highlight that never appears.
+        let anchor = typeof draft.anchor?.key === 'string' ? draft.anchor : null;
+        if (anchor === null && draft.range != null) {
+          try {
+            anchor = anchorFromRange(draft.range, draft.quote);
+          } catch {
+            anchor = null;
+          }
+        }
+        if (anchor === null) anchor = anchorFromQuote(draft.quote);
+        if (anchor === null) recordAnchorMiss(draft.quote);
+        const annotation = {
+          id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+          quote: draft.quote,
+          note,
+          anchor,
+        };
+        const next = [...getState().annotations, annotation];
+        clearNativeSelection(draft.quote);
+        // Only the text clears. A note landing never opens or resizes the tray:
+        // the window keeps its shape while several passages are annotated.
+        commitAnnotations(next, { note: '', error: '' });
+        countStat('annotation');
+        return true
+      }
+
+      /**
+       * Commit the captured passage as an answer.
+       *
+       * The highlight covers the whole paragraph(s) the selection sits in, and
+       * the selected words become the note itself — the note says "this is the
+       * answer" without the user retyping it.
+       */
+      function markAsAnswer() {
+        const draft = getState().annotationDraft;
+        if (!draft || typeof draft.quote !== 'string' || draft.quote.trim() === '') return false
+        let quote = draft.quote;
+        if (draft.range != null) {
+          try {
+            quote = passagesOfRange(draft.range) || draft.quote;
+          } catch {
+            quote = draft.quote;
+          }
+        }
+        let anchor = null;
+        if (draft.range != null) {
+          try {
+            anchor = anchorFromRange(draft.range, quote);
+          } catch {
+            anchor = null;
+          }
+        }
+        if (anchor === null) anchor = anchorFromQuote(quote);
+        if (anchor === null) recordAnchorMiss(quote);
+        // Where the marked words sit inside the highlighted paragraph, in the
+        // same whitespace-free projection the anchor uses. The purple span is
+        // measured from it, so the mark survives a note edit.
+        const packed = packedText(quote);
+        const packedAnswer = packedText(draft.quote);
+        const at = packedAnswer === '' ? -1 : packed.indexOf(packedAnswer);
+        const annotation = {
+          id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+          quote,
+          note: draft.quote,
+          anchor,
+          answer: at === -1 ? true : { start: at, length: packedAnswer.length },
+        };
+        // One answer per passage: marking the same block again replaces the
+        // earlier note instead of stacking an identical highlight.
+        const next = [
+          ...getState().annotations.filter((item) => packedText(item.quote) !== packed),
+          annotation,
+        ];
+        clearNativeSelection(draft.quote);
+        commitAnnotations(next, { note: '', error: '' });
+        countStat('annotation');
+        return true
+      }
+
+      /**
+       * Add the captured passage with the 同意 / 不同意 answer. A remark typed
+       * in the card is kept: the verdict comes first, then the remark.
+       */
+      function quickReply(kind) {
+        const verdict = kind === 'agree' ? text('agree') : text('disagree');
+        const remark = typeof getState().annotationNote === 'string' ? getState().annotationNote.trim() : '';
+        return addAnnotation(remark === '' || remark === verdict ? verdict : `${verdict}，${remark}`)
+      }
+
+      /** Drop the pending annotation draft without adding it. */
+      function dismissAnnotationDraft() {
+        return closeAnnotationSurface()
+      }
+
+      /**
+       * Open one collected annotation in the in-place bubble.
+       *
+       * `rect` is the viewport box the bubble hangs off: the clicked passage,
+       * or the tray row that was clicked. The window itself is left alone —
+       * editing a mark must never resize or unfold it.
+       */
+      function startEditAnnotation(id, rect = null) {
+        const item = getState().annotations.find((candidate) => candidate.id === id);
+        if (item === undefined) return false
+        const box = rectValue(rect);
+        if (getState().annotationEditingId === id) {
+          // Clicking the same mark again only moves the bubble: whatever is
+          // already typed stays in the field.
+          settleAnnotation({ annotationEditRect: box });
+          return true
+        }
+        settleAnnotation({
+          ...IDLE_ANNOTATION,
+          annotationEditingId: id,
+          annotationEditRect: box,
+          annotationNote: typeof item.note === 'string' ? item.note : '',
+          note: '',
+          error: '',
+        });
+        pulse();
+        return true
+      }
+
+      /** Persist the edited note. */
+      function saveEditedAnnotation() {
+        if (getState().annotationEditingId === null) return false
+        const note = typeof getState().annotationNote === 'string' ? getState().annotationNote.trim() : '';
+        const next = getState().annotations.map((item) =>
+          item.id === getState().annotationEditingId ? { ...item, note } : item,
+        );
+        commitAnnotations(next, { note: '', error: '' });
+        return true
+      }
+
+      /** Leave the edit without saving. */
+      function cancelAnnotationEdit() {
+        return closeAnnotationSurface()
+      }
+
+      /** Remove one collected annotation (also used from the edit body). */
+      function removeAnnotation(id) {
+        const next = getState().annotations.filter((item) => item.id !== id);
+        if (next.length === getState().annotations.length) return false
+        // Removing the note under the editor closes it; removing any other note
+        // leaves the editor and whatever was typed in it alone.
+        persistNotes(next);
+        if (getState().annotationEditingId === id) closeAnnotationSurface({ annotations: next });
+        else settleAnnotation({ annotations: next });
+        return true
+      }
+
+      /**
+       * Copy the captured passage. Resolves to whether the clipboard took it;
+       * the card reports that in place, the way ds-popup's copy button does.
+       */
+      function copyDraftQuote() {
+        const quote = getState().annotationDraft?.quote;
+        if (typeof quote !== 'string' || quote === '') return Promise.resolve(false)
+        try {
+          const clipboard = navigator.clipboard;
+          if (typeof clipboard?.writeText !== 'function') return Promise.resolve(false)
+          return Promise.resolve(clipboard.writeText(quote)).then(
+            () => true,
+            () => false,
+          )
+        } catch {
+          return Promise.resolve(false)
+        }
+      }
+
+      /** Drop the pending timers when the runtime goes away. */
+      function dispose() {
+        pointerHeld = false;
+        if (selectionTimer !== undefined) clearTimeout(selectionTimer);
+        if (attentionTimer !== undefined) clearTimeout(attentionTimer);
+        if (flashTimer !== undefined) clearTimeout(flashTimer);
+        selectionTimer = undefined;
+        attentionTimer = undefined;
+        flashTimer = undefined;
+      }
+
+      return {
+        tidyQuote,
+        quoteMarkdown,
+        annotationNoteLine,
+        annotationBlock,
+        pendingAnnotations,
+        settleAnnotation,
+        closeAnnotationSurface,
+        commitAnnotations,
+        isSelfNode,
+        annotationsText,
+        blockBreak,
+        inEditable,
+        readSelection,
+        cancelPendingCapture,
+        captureSelectionLater,
+        onSelectionKeyup,
+        onPointerGestureDown,
+        onPointerGestureUp,
+        onSelectionChange,
+        pulse,
+        notify,
+        captureSelection,
+        clearNativeSelection,
+        setQuick,
+        setAutoPaste,
+        showTip,
+        hideTip,
+        setFrame,
+        setAnnotationExpanded,
+        setNudgeExpanded,
+        setAnnotationNote,
+        noteSessionId,
+        persistNotes,
+        addAnnotation,
+        markAsAnswer,
+        quickReply,
+        dismissAnnotationDraft,
+        startEditAnnotation,
+        saveEditedAnnotation,
+        cancelAnnotationEdit,
+        removeAnnotation,
+        copyDraftQuote,
+        dispose,
+      }
+    }
+
+/**
+ * Writing into the composer: the mounted bridge, the draft splice and the
+ * pinned-prompt presses.
+ *
+ * The window never touches the editor DOM. It holds the handle the input
+ * bridge hands over (`setDraft`/`readDraft`), appends a prompt on its own line
+ * and — on a double press — sends the draft the first press composed.
+ *
+ * Built into `client.js` by `scripts/build.mjs`; edit this file, not the bundle.
+ */
+
+    /**
+     * Build the composer side of the runtime.
+     *
+     * Every collaborator is injected: the state is read through `getState`,
+     * prompts come from `activePreset`/`state.presets`, and the effects that
+     * belong to the window (toast text, counters, delivery, auto-paste) stay
+     * callbacks, so this module has no DOM and no store of its own.
+     *
+     * @param deps - getState, setState, text, countStat, deliver, activePreset, onFocus.
+     * @returns the composer handle surface and the three insertion entry points.
+     */
+    function createComposerInsertion(deps) {
+      const { getState, setState, text, countStat, deliver, activePreset, onFocus } = deps;
+
+      /** The mounted composer bridge, when a conversation input is on screen. */
+      let composer;
+      /**
+       * A bar press counts its insert only when no second press follows: the
+       * pair is one send, not an insert plus a send.
+       */
+      let barInsertTimer;
+      let barInsertId = '';
+
+      /** The focused composer editor element, when the caret is inside it. */
+      function composerNode() {
+        try {
+          const active = /** @type {HTMLElement | null} */ (document.activeElement);
+          if (!active) return undefined
+          const editable =
+            active.isContentEditable === true ||
+            active.getAttribute?.('contenteditable') === 'true';
+          if (!editable) return undefined
+          // The DSH composer editor marks itself `data-composer-input`; Lexical
+          // marks its root too, and the slot host covers older shells.
+          if (typeof active.hasAttribute === 'function' && active.hasAttribute('data-composer-input')) return active
+          if (active.getAttribute?.('data-lexical-editor') === 'true') return active
+          if (typeof active.closest === 'function' && active.closest('[data-slot="conversation.composer"]')) {
+            return active
+          }
+          return undefined
+        } catch {
+          return undefined
+        }
+      }
+
+      /** Write mode is available only while a composer is mounted and focused. */
+      function canInsert() {
+        return composer !== undefined && composerNode() !== undefined
+      }
+
+      /** Keep the visible mode flag (the primary button label) in sync with focus. */
+      function syncComposerFocus() {
+        const focused = canInsert();
+        if (focused === getState().composerFocused) return
+        setState({ composerFocused: focused });
+        if (focused && typeof onFocus === 'function') onFocus();
+      }
+
+      /**
+       * Attach the live composer handle handed over by the input bridge.
+       * `sync: false` stores it without a store update, for React's render
+       * phase; the bridge's effect then attaches with the focus refresh.
+       */
+      function attachComposer(handle, sync = true) {
+        composer = handle;
+        if (sync) syncComposerFocus();
+      }
+
+      /** Detach only when the released handle is still the mounted one. */
+      function detachComposer(handle) {
+        if (composer !== handle) return
+        composer = undefined;
+        syncComposerFocus();
+      }
+
+      /** Whether the mounted composer already holds text. */
+      function composerHasText() {
+        if (composer === undefined) return false
+        try {
+          const draft = composer.readDraft?.();
+          return typeof draft === 'string' && draft.trim() !== ''
+        } catch {
+          return false
+        }
+      }
+
+      /**
+       * Append the selected preset to the composer draft instead of sending it.
+       * The caret ends up past the written text; existing content is kept and
+       * separated by one newline (a blank draft gets no leading newline).
+       */
+      function insertPreset(id, count = true) {
+        const handle = composer;
+        if (handle === undefined || typeof handle.setDraft !== 'function') {
+          setState({ note: text('insertUnavailable'), error: '' });
+          return false
+        }
+        const preset = id === undefined ? activePreset() : presetOf(getState().presets, id);
+        if (!preset) return false
+        let draft = '';
+        try {
+          draft = handle.readDraft?.() ?? '';
+        } catch {
+          draft = '';
+        }
+        if (typeof draft !== 'string') draft = '';
+        const next =
+          draft.trim() === ''
+            ? preset.text
+            : `${draft}${draft.endsWith('\n') ? '' : '\n'}${preset.text}`;
+        try {
+          handle.setDraft(next);
+        } catch (error) {
+          console.warn('[dsh-nudge] composer insert failed', error);
+          setState({ note: text('insertUnavailable'), error: '' });
+          return false
+        }
+        setState({ note: '', error: '' });
+        if (count === true) countStat('insert', preset.id);
+        return true
+      }
+
+      /**
+       * A single press on a pinned prompt: append it now, and count the insert
+       * only if the press is not followed by the second half of a double click.
+       */
+      function appendPrompt(id) {
+        if (barInsertTimer !== undefined) {
+          clearTimeout(barInsertTimer);
+          barInsertTimer = undefined;
+          if (barInsertId !== '') countStat('insert', barInsertId);
+          barInsertId = '';
+        }
+        if (!insertPreset(id, false)) return false
+        barInsertId = id;
+        barInsertTimer = setTimeout(() => {
+          barInsertTimer = undefined;
+          const pending = barInsertId;
+          barInsertId = '';
+          if (pending !== '') countStat('insert', pending);
+        }, 260);
+        return true
+      }
+
+      /**
+       * A double press on a pinned prompt: send the draft the first press
+       * composed. That press's insert count is dropped, so the pair counts as
+       * one send; a failed send keeps the draft as it was.
+       */
+      function sendDraft(id) {
+        const handle = composer;
+        if (handle === undefined || typeof handle.setDraft !== 'function') {
+          setState({ note: text('insertUnavailable'), error: '' });
+          return false
+        }
+        if (barInsertTimer !== undefined) {
+          clearTimeout(barInsertTimer);
+          barInsertTimer = undefined;
+          barInsertId = '';
+        }
+        const preset = presetOf(getState().presets, id);
+        let draft = '';
+        try {
+          draft = handle.readDraft?.() ?? '';
+        } catch {
+          draft = '';
+        }
+        if (typeof draft !== 'string') draft = '';
+        const body = preset?.text ?? '';
+        // The first press writes through the shell's input store; if that write
+        // has not reached the reader yet, compose it here so the send is whole.
+        if (body !== '' && !draft.replace(/\s+$/, '').endsWith(body.trim())) {
+          draft = draft.trim() === '' ? body : `${draft}${draft.endsWith('\n') ? '' : '\n'}${body}`;
+        }
+        if (draft.trim() === '') return false
+        if (!deliver(draft)) return false
+        try {
+          handle.setDraft('');
+        } catch {
+          /* the text stays if the shell refuses the clear */
+        }
+        countStat('send', id);
+        return true
+      }
+
+      /** The live handle, for the batch writer that needs the same action face. */
+      function composerHandle() {
+        return composer
+      }
+
+      /** Drop the pending double-press timer when the runtime goes away. */
+      function dispose() {
+        if (barInsertTimer === undefined) return
+        clearTimeout(barInsertTimer);
+        barInsertTimer = undefined;
+        barInsertId = '';
+      }
+
+      return {
+        composerNode,
+        canInsert,
+        syncComposerFocus,
+        attachComposer,
+        detachComposer,
+        composerHasText,
+        composerHandle,
+        insertPreset,
+        appendPrompt,
+        sendDraft,
+        dispose,
+      }
+    }
+
+/**
  * Delivery: putting one probe into the conversation, and settling the wait.
  *
  * The wait is correlated exactly: the probe carries a client-minted requestId,
@@ -2808,318 +3805,6 @@ function createDelivery({ ctx, getState, setState, text }) {
     isWaiting: () => waiting !== null,
   }
 }
-
-/**
- * Reading the transcript: packed text and quote anchors.
- *
- * Selection anchors survive a repaint because they are found again by text, not by node.
- *
- * Built into `client.js` by `scripts/build.mjs`; edit this file, not the bundle.
- */
-
-    /** The element a DOM node belongs to, or null. */
-    function elementOfNode(node) {
-      if (!node) return null
-      return node.nodeType === 1 ? node : (node.parentElement ?? null)
-    }
-
-    /** Tags whose text must not be projected. */
-    const NON_TEXT_TAGS = { SCRIPT: true, STYLE: true, NOSCRIPT: true, TEMPLATE: true };
-
-    /** Whether an element's subtree is invisible and must not be walked. */
-    function isHiddenElement(element) {
-      if (NON_TEXT_TAGS[element.tagName] === true) return true
-      if (element.hidden === true) return true
-      try {
-        const style = window.getComputedStyle?.(element);
-        return style ? style.display === 'none' || style.visibility === 'hidden' : false
-      } catch {
-        return false
-      }
-    }
-
-    /** Whitespace-free projection both sides of an anchor are compared on. */
-    function packedText(value) {
-      // The per-character `trim()` test this replaces kept exactly the
-      // non-whitespace code units; one regular expression is much cheaper on
-      // the long quotes and long rows this runs over.
-      return (typeof value === 'string' ? value : '').replace(/\s+/g, '')
-    }
-
-    /** Every visible kept character under a root, with its (node, offset) pair. */
-    function packedMapOf(root) {
-      let packed = '';
-      const map = [];
-      const walk = (node) => {
-        const children = node.childNodes;
-        for (let index = 0; index < children.length; index += 1) {
-          const child = children[index];
-          if (child.nodeType === 3) {
-            const data = child.data;
-            for (let offset = 0; offset < data.length; offset += 1) {
-              const ch = data.charAt(offset);
-              if (ch.trim() === '') continue
-              packed += ch;
-              map.push(child, offset);
-            }
-          } else if (child.nodeType === 1) {
-            if (isHiddenElement(child)) continue
-            walk(child);
-          }
-        }
-      };
-      walk(root);
-      return { packed, map }
-    }
-
-    /**
-     * Tags whose text reads as one passage. A selection inside one of these is
-     * promoted to the whole block, so the highlight covers the paragraph the
-     * words sit in rather than the words alone.
-     */
-    const PASSAGE_TAGS = {
-      P: true,
-      LI: true,
-      H1: true,
-      H2: true,
-      H3: true,
-      H4: true,
-      H5: true,
-      H6: true,
-      BLOCKQUOTE: true,
-      PRE: true,
-      TD: true,
-      TH: true,
-      DT: true,
-      DD: true,
-      FIGCAPTION: true,
-    };
-
-    /** Whether a range touches one node; a node that cannot be asked is skipped. */
-    function rangeTouches(range, node) {
-      try {
-        return typeof range.intersectsNode === 'function' && range.intersectsNode(node) === true
-      } catch {
-        return false
-      }
-    }
-
-    /** The innermost passage tag between a node and its flow item. */
-    function passageBlockOf(node, flowItem) {
-      let element = elementOfNode(node);
-      while (element !== null && element !== flowItem) {
-        if (PASSAGE_TAGS[String(element.tagName ?? '').toUpperCase()] === true) return element
-        element = element.parentElement ?? null;
-      }
-      return flowItem
-    }
-
-    /** The text one block carries, with only its trailing whitespace dropped. */
-    function blockTextOf(block) {
-      let text = '';
-      const walk = (node) => {
-        for (const child of node.childNodes ?? []) {
-          if (child.nodeType === 3) text += child.data ?? '';
-          else if (child.nodeType === 1 && !isHiddenElement(child)) walk(child);
-        }
-      };
-      walk(block);
-      return text.replace(/\s+$/, '')
-    }
-
-    /**
-     * The whole passages a selection touches, in document order.
-     *
-     * A selection inside a paragraph names that paragraph; one crossing several
-     * names all of them. The innermost block wins, so a list item wrapping a
-     * paragraph contributes its words once, and a flow item that carries no
-     * block of its own stands for its whole text.
-     */
-    function passagesOfRange(range) {
-      const elements = document.querySelectorAll?.(ANCHOR_SELECTOR) ?? [];
-      const blocks = [];
-      for (const element of elements) {
-        const walk = (node) => {
-          for (const child of node.childNodes ?? []) {
-            if (child.nodeType === 3) {
-              if (!rangeTouches(range, child)) continue
-              const block = passageBlockOf(child, element);
-              if (!blocks.includes(block)) blocks.push(block);
-            } else if (child.nodeType === 1 && !isHiddenElement(child)) {
-              walk(child);
-            }
-          }
-        };
-        walk(element);
-      }
-      const innermost = blocks.filter(
-        (block) => !blocks.some((other) => other !== block && block.contains?.(other) === true),
-      );
-      const texts = innermost.map(blockTextOf).filter((text) => text.trim() !== '');
-      return texts.length === 0 ? '' : texts.join('\n\n')
-    }
-
-    /** A DOM Range covering [start, end) of a packed map, or null. */
-    function rangeFromPacked(full, start, end) {
-      if (start < 0 || end <= start) return null
-      const last = end - 1;
-      if (last * 2 + 1 >= full.map.length) return null
-      try {
-        const range = document.createRange();
-        range.setStart(full.map[start * 2], full.map[start * 2 + 1]);
-        range.setEnd(full.map[last * 2], full.map[last * 2 + 1] + 1);
-        return range
-      } catch {
-        return null
-      }
-    }
-
-    /** Every start index of `needle` inside `haystack`, capped. */
-    function occurrencesOf(haystack, needle, limit) {
-      const out = [];
-      if (needle === '') return out
-      let at = haystack.indexOf(needle);
-      while (at !== -1 && out.length < limit) {
-        out.push(at);
-        at = haystack.indexOf(needle, at + 1);
-      }
-      return out
-    }
-
-    /** Centre-to-centre distance between two rects. */
-    function rectDistance(left, right) {
-      const dx = (left.left + left.right) / 2 - (right.left + right.right) / 2;
-      const dy = (left.top + left.bottom) / 2 - (right.top + right.bottom) / 2;
-      return Math.sqrt(dx * dx + dy * dy)
-    }
-
-    /** The anchor a live selection hangs on, or null outside a flow item. */
-    function anchorFromRange(range, quote) {
-      const element = elementOfNode(range.commonAncestorContainer);
-      if (element === null || typeof element.closest !== 'function') return null
-      const anchorElement = element.closest(ANCHOR_SELECTOR);
-      if (anchorElement === null) return null
-      const packed = packedText(quote);
-      if (packed === '') return null
-      const full = packedMapOf(anchorElement);
-      const candidates = occurrencesOf(full.packed, packed, MAX_OCCURRENCES);
-      if (candidates.length === 0) return null
-      let target = null;
-      try {
-        target = range.getBoundingClientRect();
-      } catch {
-        target = null;
-      }
-      let best = null;
-      for (const index of candidates) {
-        const candidateRange = rangeFromPacked(full, index, index + packed.length);
-        if (candidateRange === null) continue
-        let distance = 0;
-        if (target !== null) {
-          try {
-            distance = rectDistance(candidateRange.getBoundingClientRect(), target);
-          } catch {
-            distance = 0;
-          }
-        }
-        if (best === null || distance < best.distance) best = { index, distance };
-      }
-      if (best === null) return null
-      return {
-        key: anchorElement.getAttribute('data-chat-anchor-key'),
-        quote: packed,
-        prefix: full.packed.slice(Math.max(0, best.index - CONTEXT_CHARS), best.index),
-        suffix: full.packed.slice(
-          best.index + packed.length,
-          best.index + packed.length + CONTEXT_CHARS,
-        ),
-        index: best.index,
-      }
-    }
-
-    /**
-     * The anchor a quote hangs on when no live selection is left: the innermost
-     * flow item whose projection carries the passage.
-     *
-     * This is the recovery path, not the primary one — the anchor of a fresh
-     * selection comes from the range. A passage carried by two unrelated flow
-     * items stays unanchored, because painting the wrong one is worse than
-     * painting none.
-     */
-    function anchorFromQuote(quote) {
-      const packed = packedText(quote);
-      if (packed === '') return null
-      const elements = document.querySelectorAll?.(ANCHOR_SELECTOR) ?? [];
-      const matches = [];
-      for (const element of elements) {
-        const key = element.getAttribute?.('data-chat-anchor-key');
-        if (typeof key !== 'string' || key === '') continue
-        const full = packedMapOf(element);
-        const index = full.packed.indexOf(packed);
-        if (index === -1) continue
-        matches.push({ element, key, full, index });
-      }
-      // A turn-process row wraps its member rows, so the deepest match is the
-      // one the passage really belongs to.
-      const deepest = matches.filter(
-        (match) =>
-          !matches.some(
-            (other) => other !== match && match.element.contains?.(other.element) === true,
-          ),
-      );
-      if (deepest.length !== 1) return null
-      const { key, full, index } = deepest[0];
-      return {
-        key,
-        quote: packed,
-        prefix: full.packed.slice(Math.max(0, index - CONTEXT_CHARS), index),
-        suffix: full.packed.slice(index + packed.length, index + packed.length + CONTEXT_CHARS),
-        index,
-      }
-    }
-
-    /** Whether a painted highlight already covers exactly these ranges, in order. */
-    function sameRanges(highlight, ranges) {
-      if (!highlight || typeof highlight[Symbol.iterator] !== 'function') return false
-      const current = [...highlight];
-      if (current.length !== ranges.length) return false
-      return current.every((range, index) => {
-        const next = ranges[index];
-        return (
-          range.collapsed !== true &&
-          range.startContainer === next.startContainer &&
-          range.startOffset === next.startOffset &&
-          range.endContainer === next.endContainer &&
-          range.endOffset === next.endOffset
-        )
-      })
-    }
-
-    /** Where one stored anchor sits in an anchor element's current projection. */
-    function locateAnchor(full, anchor) {
-      if (anchor === null || typeof anchor !== 'object') return null
-      if (typeof anchor.quote !== 'string' || anchor.quote === '') return null
-      const prefix = typeof anchor.prefix === 'string' ? anchor.prefix : '';
-      const suffix = typeof anchor.suffix === 'string' ? anchor.suffix : '';
-      const candidates = occurrencesOf(full.packed, anchor.quote, MAX_OCCURRENCES);
-      if (candidates.length === 0) return null
-      let best = null;
-      for (const index of candidates) {
-        let score = 0;
-        if (prefix !== '' && full.packed.slice(Math.max(0, index - prefix.length), index) === prefix) score += 4;
-        if (
-          suffix !== '' &&
-          full.packed.slice(index + anchor.quote.length, index + anchor.quote.length + suffix.length) === suffix
-        ) {
-          score += 4;
-        }
-        if (typeof anchor.index === 'number') score += Math.max(0, 2 - Math.abs(index - anchor.index) / 200);
-        if (best === null || score > best.score) best = { index, score };
-      }
-      if (best === null) return null
-      if (best.score < 4 && candidates.length > 1) return null
-      return { start: best.index, end: best.index + anchor.quote.length }
-    }
 
 /**
  * The painted marks: anchors, the repaint pass and the transcript hooks.
@@ -4433,19 +5118,6 @@ function createDelivery({ ctx, getState, setState, text }) {
         readSettings({ lang: language, sessionId: initialTarget?.sessionId })
       );
 
-      /**
-       * The annotation surface at rest: no draft, nothing stowed, no editor, no
-       * half-typed note. The launch state and every closing transition spread
-       * this instead of listing the fields again, so a field added to the
-       * surface is reset in one place.
-       */
-      const IDLE_ANNOTATION = {
-        annotationDraft: null,
-        annotationCardHidden: false,
-        annotationNote: '',
-        annotationEditingId: null,
-        annotationEditRect: null,
-      };
       /** @type {NudgeRuntimeState} */
       let state = {
         phase: 'idle',
@@ -4601,597 +5273,66 @@ function createDelivery({ ctx, getState, setState, text }) {
 
       // --- annotations ----------------------------------------------------
 
-
-      /** Trim only the trailing whitespace a selection picks up. */
-      function tidyQuote(value) {
-        return String(value ?? '').replace(/\s+$/, '')
-      }
-
       /**
-       * One passage as the Markdown blockquote the shell serializes a quote
-       * node to; text copied out of the composer keeps this form.
+       * The annotation surfaces and their timers. The module owns the state
+       * machine; persistence, counters, toast text and the repaint come in as
+       * callbacks, and the transcript subscription stays in highlights.
        */
-      function quoteMarkdown(value) {
-        const lines = tidyQuote(value).split('\n');
-        return lines.map((line) => (line === '' ? '>' : `> ${line}`)).join('\n')
-      }
-
-      /** The answer line under a passage, or '' when the passage stands alone. */
-      function annotationNoteLine(item) {
-        const note = typeof item.note === 'string' ? item.note.trim() : '';
-        return note === '' ? '' : `${text('answerLabel')}${note}`
-      }
-
-      /**
-       * One annotation as the Markdown block it becomes when it is sent: the
-       * quote on its own lines, the answer on the line right below it.
-       */
-      function annotationBlock(item) {
-        const quoted = quoteMarkdown(item.quote);
-        const note = annotationNoteLine(item);
-        return note === '' ? quoted : `${quoted}\n${note}`
-      }
-
-      /** The annotations still waiting to be written into a message. */
-      function pendingAnnotations() {
-        return state.annotations.filter((item) => item.written !== true)
-      }
-
-      // --- the annotation lifecycle ---------------------------------------
-      //
-      // Three surfaces share one state: the selection card (a draft), the
-      // in-place editor (one stored note) and the tray (the Session's notes). A
-      // card and an editor never coexist, and every path that ends one of them
-      // returns the same fields to rest — so the resting surface is written
-      // down once here, and a tray change is persisted and repainted in one
-      // step, instead of each transition spelling out its own subset.
-
-      /** One surface change: show it, then repaint the marks it implies. */
-      function settleAnnotation(patch) {
-        setState(patch);
-        repaintHighlights();
-      }
-
-      /** Return the surface to rest; the tray list is left as it is. */
-      function closeAnnotationSurface(extra) {
-        settleAnnotation({ ...IDLE_ANNOTATION, ...(extra ?? {}) });
-        return true
-      }
-
-      /**
-       * Replace the tray: persist it, show it, repaint its marks. A mark belongs
-       * to the conversation rather than to a draft, so the list and its painting
-       * can never drift apart.
-       */
-      function commitAnnotations(next, extra) {
-        persistNotes(next);
-        settleAnnotation({ annotations: next, ...IDLE_ANNOTATION, ...(extra ?? {}) });
-        return next
-      }
-
-      /** Whether one DOM node belongs to this window rather than to the page. */
-      function isSelfNode(node) {
-        if (!node || typeof node.closest !== 'function') return false
-        try {
-          return node.closest(SELF_SELECTOR) !== null
-        } catch {
-          return false
-        }
-      }
-
-      /** One write or send batch as one message body, notes two blank lines apart. */
-      function annotationsText(list) {
-        const items = Array.isArray(list) ? list : pendingAnnotations();
-        return items.map(annotationBlock).join('\n\n\n')
-      }
-
-      /**
-       * The break a Markdown block needs in front of it: two blank lines, so a
-       * note reads as a block of its own in the draft instead of running on from
-       * whatever it is appended to. A draft already ending with them gets no more.
-       */
-      function blockBreak(before) {
-        if (before === '') return ''
-        if (before.endsWith('\n\n\n')) return ''
-        if (before.endsWith('\n\n')) return '\n'
-        return before.endsWith('\n') ? '\n\n' : '\n\n\n'
-      }
-
-      /** Whether a node belongs to a text field rather than the transcript. */
-      function inEditable(node) {
-        if (!node || typeof node.closest !== 'function') return false
-        try {
-          return node.closest(EDITABLE_SELECTOR) !== null
-        } catch {
-          return false
-        }
-      }
-
-      /** The selection worth annotating: quote + its flow-item anchor. */
-      function readSelection() {
-        try {
-          if (typeof window.getSelection !== 'function') return null
-          const selection = window.getSelection();
-          if (!selection || selection.rangeCount === 0 || selection.isCollapsed) return null
-          const quote = tidyQuote(selection.toString());
-          if (quote.trim() === '') return null
-          const range = selection.getRangeAt(0);
-          const node = range.commonAncestorContainer;
-          const element = /** @type {Element | null} */ (
-            node && node.nodeType === 1 ? node : node?.parentElement
-          );
-          if (!element || typeof element.closest !== 'function') return null
-          if (element.closest(EDITABLE_SELECTOR)) return null
-          if (element.closest(MODAL_SELECTOR)) return null
-          if (element.closest(SELF_SELECTOR)) return null
-          // The browser keeps two ends: `anchor` is where the gesture started,
-          // `focus` is where it ended. The native Shift+click grows from the
-          // anchor, so a downward drag extends forward and an upward drag
-          // extends backward. Both are kept while the range still points at
-          // live nodes.
-          let anchorPoint = null;
-          let focusPoint = null;
-          try {
-            if (selection.anchorNode) {
-              anchorPoint = { node: selection.anchorNode, offset: selection.anchorOffset };
-            }
-            if (selection.focusNode) {
-              focusPoint = { node: selection.focusNode, offset: selection.focusOffset };
-            }
-          } catch {
-            anchorPoint = null;
-            focusPoint = null;
-          }
-          return { quote, range, anchorPoint, focusPoint }
-        } catch {
-          return null
-        }
-      }
-
-      let selectionTimer;
-      let attentionTimer;
-      let flashTimer;
-      /** True while a pointer gesture is down, so no card opens mid-drag. */
-      let pointerHeld = false;
-
-      /** Cancel a capture that has not fired yet (a new press is starting). */
-      function cancelPendingCapture() {
-        if (selectionTimer !== undefined) {
-          clearTimeout(selectionTimer);
-          selectionTimer = undefined;
-        }
-      }
-
-      /**
-       * Read the selection once it has settled. A short debounce is what keeps
-       * double-click word selection and drag-then-adjust smooth: the browser's
-       * own finalisation, the second click and the following mouseup all land
-       * before the draft appears, and focus is not stolen mid-gesture.
-       * The pointer's own position is kept so the card can open right at the cursor.
-       */
-      function captureSelectionLater(event) {
-        if (state.quick !== true) return
-        if (selectionTimer !== undefined) clearTimeout(selectionTimer);
-        const pointer =
-          event && typeof event.clientX === 'number' && typeof event.clientY === 'number'
-            ? { x: event.clientX, y: event.clientY }
-            : null;
-        selectionTimer = setTimeout(() => {
-          selectionTimer = undefined;
-          captureSelection(pointer);
-        }, 200);
-      }
-
-      /**
-       * Keyboard selections end on a shifted keyup — in the transcript only.
-       *
-       * Shift+Enter makes a newline and Shift+<letter> capitalises, so a keyup
-       * inside a text field is typing, not a selection gesture. Capturing it
-       * would read a caret as a passage and pull the card (and the focus) over
-       * the field the user is typing in.
-       */
-      function onSelectionKeyup(event) {
-        if (state.quick !== true) return
-        if (event?.shiftKey !== true) return
-        if (inEditable(event?.target)) return
-        if (inEditable(document.activeElement)) return
-        captureSelectionLater();
-      }
-
-      /**
-       * A card must never open while the button is still down: dragging a
-       * selection keeps firing `selectionchange`, and opening then would steal
-       * the focus (and the caret) in the middle of the gesture. The pointer
-       * path and the safety net both wait for the release.
-       */
-      function onPointerGestureDown() {
-        pointerHeld = true;
-        cancelPendingCapture();
-      }
-
-      function onPointerGestureUp() {
-        pointerHeld = false;
-      }
-
-      /**
-       * Safety net for a settled selection that never reaches the pointer path:
-       * a drag that ends outside the transcript, a double-click on a boundary,
-       * or a second selection whose mouseup was swallowed by a re-render. It
-       * shares the debounce timer, so the pointer path always wins, and
-       * `captureSelection` itself refuses the quote that is already captured.
-       */
-      function onSelectionChange() {
-        if (state.quick !== true) return
-        if (pointerHeld) return
-        if (selectionTimer !== undefined) clearTimeout(selectionTimer);
-        selectionTimer = setTimeout(() => {
-          selectionTimer = undefined;
-          captureSelection();
-        }, 260);
-      }
-
-      /** One short pulse so a capture is noticed wherever the eye is. */
-      function pulse() {
-        setState({ attentionAt: Date.now() });
-        if (attentionTimer !== undefined) clearTimeout(attentionTimer);
-        attentionTimer = setTimeout(() => {
-          attentionTimer = undefined;
-          setState({ attentionAt: 0 });
-        }, 900);
-      }
-
-      /**
-       * Show one short confirmation line after a toggle, so a icon-only button
-       * still says in words what it just switched to.
-       */
-      function notify(message) {
-        const line = typeof message === 'string' ? message : '';
-        if (line === '') return false
-        setState({ flash: line });
-        if (flashTimer !== undefined) clearTimeout(flashTimer);
-        flashTimer = setTimeout(() => {
-          flashTimer = undefined;
-          setState({ flash: '' });
-        }, FLASH_HOLD_MS);
-        return true
-      }
-
-      /** Turn the current selection into the pending annotation draft. */
-      function captureSelection(pointer = null) {
-        const selection = readSelection();
-        if (selection === null) return false
-        if (
-          state.annotationDraft !== null &&
-          state.annotationDraft.quote === selection.quote &&
-          state.annotationEditingId === null
-        ) {
-          return false
-        }
-        // The card hangs next to the selection; the nudge window does not move
-        // and keeps no focus, so the browser's own selection stays untouched.
-        let rect = null;
-        try {
-          rect = selection.range.getBoundingClientRect();
-        } catch {
-          rect = null;
-        }
-        if (rect !== null && rect.width === 0 && rect.height === 0) rect = null;
-        // Anchor now, while the range still points at the nodes the user just
-        // selected. Waiting for the click would gamble on the page not having
-        // re-rendered in between, and a lost anchor means no highlight ever.
-        let anchor = null;
-        try {
-          anchor = anchorFromRange(selection.range, selection.quote);
-        } catch {
-          anchor = null;
-        }
-        settleAnnotation({
-          ...IDLE_ANNOTATION,
-          annotationDraft: {
-            quote: selection.quote,
-            anchor,
-            range: selection.range,
-            // The gesture's start end: Shift+press grows away from it, so an
-            // upward selection keeps its lower edge and an upward press extends
-            // further up instead of dropping the rows already selected.
-            anchorPoint: selection.anchorPoint,
-            rect: rect
-              ? {
-                  left: rect.left,
-                  top: rect.top,
-                  right: rect.right,
-                  bottom: rect.bottom,
-                  width: rect.width,
-                  height: rect.height,
-                }
-              : null,
-            pointer,
-          },
-          note: '',
-          error: '',
-        });
-        return true
-      }
-
-      /** Drop the browser selection only when it is still our captured quote. */
-      function clearNativeSelection(quote) {
-        try {
-          const selection = window.getSelection?.();
-          if (!selection || selection.rangeCount === 0) return
-          if (typeof quote === 'string' && quote !== '' && selection.toString() === quote) {
-            selection.removeAllRanges();
-          }
-        } catch {
-          /* no selection object */
-        }
-      }
-
-      /** Quick-annotation master switch. */
-      function setQuick(value) {
-        const next = value === true;
-        persistSetting('quick', next);
-        settleAnnotation({
-          quick: next,
-          // The switch no longer unfolds the tray (its open state belongs to the
-          // user); turning it off still drops whatever the tray was holding.
-          ...(next ? null : { ...IDLE_ANNOTATION, annotationExpanded: false }),
-        });
-        notify(next ? text('quickOn') : text('quickOff'));
-        return true
-      }
-
-      /** Auto-paste switch: when on, pending notes flow into the composer on focus. */
-      function setAutoPaste(value) {
-        const next = value === true;
-        persistSetting('autoPaste', next);
-        setState({ autoPaste: next });
-        notify(next ? text('autoPasteOn') : text('autoPasteOff'));
-        return true
-      }
-
-      /**
-       * Show the explanation bubble for one window control. `rect` is the
-       * control's viewport box, kept as numbers so the renderer only has to
-       * place the bubble; the text is derived from the live state, so a toggle
-       * updates the bubble without moving the pointer.
-       */
-      function showTip(key, rect) {
-        if (typeof key !== 'string' || key === '') return false
-        const box = rect && typeof rect === 'object' ? rect : null;
-        const left = box === null ? NaN : Number(box.left);
-        const top = box === null ? NaN : Number(box.top);
-        const right = box === null ? NaN : Number(box.right);
-        const bottom = box === null ? NaN : Number(box.bottom);
-        if (!Number.isFinite(left) || !Number.isFinite(top) || !Number.isFinite(right) || !Number.isFinite(bottom)) {
-          return false
-        }
-        setState({ tip: { key, left, top, right, bottom } });
-        return true
-      }
-
-      /** Hide the explanation bubble. */
-      function hideTip() {
-        if (state.tip !== null) setState({ tip: null });
-        return true
-      }
-
-      /** Border width of the floating window, in px; the default is not stored. */
-      function setFrame(value) {
-        const width = Number(value);
-        if (!isFrameWidth(width)) return false
-        persistSetting('frame', width);
-        setState({ frame: width });
-        notify(`${text('frameTitle')}：${text(frameLabelKey(width))}`);
-        return true
-      }
-
-      /** Whether the annotation module shows its body. */
-      function setAnnotationExpanded(value) {
-        setState({ annotationExpanded: value === true });
-      }
-
-      /** Whether the nudge module shows its body. */
-      function setNudgeExpanded(value) {
-        setState({ nudgeExpanded: value === true });
-      }
-
-      /** Update the note for the pending annotation draft (or the edit). */
-      function setAnnotationNote(value) {
-        setState({ annotationNote: typeof value === 'string' ? value : '' });
-      }
-
-      /** The Session the annotation tray belongs to. */
-      function noteSessionId() {
-        return (resolveTarget(ctx) ?? state.target)?.sessionId
-      }
-
-      /** Persist the tray of the owning Session. */
-      function persistNotes(list) {
-        saveNotesOfSession(noteSessionId(), Array.isArray(list) ? list : state.annotations);
-      }
-
-      /** Commit the pending quote + note into the tray. */
-      function addAnnotation(noteOverride) {
-        const draft = state.annotationDraft;
-        if (!draft || typeof draft.quote !== 'string' || draft.quote.trim() === '') return false
-        const note =
-          typeof noteOverride === 'string'
-            ? noteOverride
-            : typeof state.annotationNote === 'string'
-              ? state.annotationNote.trim()
-              : '';
-        // The capture already anchored the passage; the two retries cover a page
-        // that re-rendered between the selection and this click. Whatever still
-        // fails leaves a diagnostic sample, because a note without an anchor
-        // shows up only as a highlight that never appears.
-        let anchor = typeof draft.anchor?.key === 'string' ? draft.anchor : null;
-        if (anchor === null && draft.range != null) {
-          try {
-            anchor = anchorFromRange(draft.range, draft.quote);
-          } catch {
-            anchor = null;
-          }
-        }
-        if (anchor === null) anchor = anchorFromQuote(draft.quote);
-        if (anchor === null) recordAnchorMiss(draft.quote);
-        const annotation = {
-          id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
-          quote: draft.quote,
-          note,
-          anchor,
-        };
-        const next = [...state.annotations, annotation];
-        clearNativeSelection(draft.quote);
-        // Only the text clears. A note landing never opens or resizes the tray:
-        // the window keeps its shape while several passages are annotated.
-        commitAnnotations(next, { note: '', error: '' });
-        countStat('annotation');
-        return true
-      }
-
-      /**
-       * Commit the captured passage as an answer.
-       *
-       * The highlight covers the whole paragraph(s) the selection sits in, and
-       * the selected words become the note itself — the note says "this is the
-       * answer" without the user retyping it.
-       */
-      function markAsAnswer() {
-        const draft = state.annotationDraft;
-        if (!draft || typeof draft.quote !== 'string' || draft.quote.trim() === '') return false
-        let quote = draft.quote;
-        if (draft.range != null) {
-          try {
-            quote = passagesOfRange(draft.range) || draft.quote;
-          } catch {
-            quote = draft.quote;
-          }
-        }
-        let anchor = null;
-        if (draft.range != null) {
-          try {
-            anchor = anchorFromRange(draft.range, quote);
-          } catch {
-            anchor = null;
-          }
-        }
-        if (anchor === null) anchor = anchorFromQuote(quote);
-        if (anchor === null) recordAnchorMiss(quote);
-        // Where the marked words sit inside the highlighted paragraph, in the
-        // same whitespace-free projection the anchor uses. The purple span is
-        // measured from it, so the mark survives a note edit.
-        const packed = packedText(quote);
-        const packedAnswer = packedText(draft.quote);
-        const at = packedAnswer === '' ? -1 : packed.indexOf(packedAnswer);
-        const annotation = {
-          id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
-          quote,
-          note: draft.quote,
-          anchor,
-          answer: at === -1 ? true : { start: at, length: packedAnswer.length },
-        };
-        // One answer per passage: marking the same block again replaces the
-        // earlier note instead of stacking an identical highlight.
-        const next = [
-          ...state.annotations.filter((item) => packedText(item.quote) !== packed),
-          annotation,
-        ];
-        clearNativeSelection(draft.quote);
-        commitAnnotations(next, { note: '', error: '' });
-        countStat('annotation');
-        return true
-      }
-
-      /**
-       * Add the captured passage with the 同意 / 不同意 answer. A remark typed
-       * in the card is kept: the verdict comes first, then the remark.
-       */
-      function quickReply(kind) {
-        const verdict = kind === 'agree' ? text('agree') : text('disagree');
-        const remark = typeof state.annotationNote === 'string' ? state.annotationNote.trim() : '';
-        return addAnnotation(remark === '' || remark === verdict ? verdict : `${verdict}，${remark}`)
-      }
-
-      /** Drop the pending annotation draft without adding it. */
-      function dismissAnnotationDraft() {
-        return closeAnnotationSurface()
-      }
-
-      /**
-       * Open one collected annotation in the in-place bubble.
-       *
-       * `rect` is the viewport box the bubble hangs off: the clicked passage,
-       * or the tray row that was clicked. The window itself is left alone —
-       * editing a mark must never resize or unfold it.
-       */
-      function startEditAnnotation(id, rect = null) {
-        const item = state.annotations.find((candidate) => candidate.id === id);
-        if (item === undefined) return false
-        const box = rectValue(rect);
-        if (state.annotationEditingId === id) {
-          // Clicking the same mark again only moves the bubble: whatever is
-          // already typed stays in the field.
-          settleAnnotation({ annotationEditRect: box });
-          return true
-        }
-        settleAnnotation({
-          ...IDLE_ANNOTATION,
-          annotationEditingId: id,
-          annotationEditRect: box,
-          annotationNote: typeof item.note === 'string' ? item.note : '',
-          note: '',
-          error: '',
-        });
-        pulse();
-        return true
-      }
-
-      /** Persist the edited note. */
-      function saveEditedAnnotation() {
-        if (state.annotationEditingId === null) return false
-        const note = typeof state.annotationNote === 'string' ? state.annotationNote.trim() : '';
-        const next = state.annotations.map((item) =>
-          item.id === state.annotationEditingId ? { ...item, note } : item,
-        );
-        commitAnnotations(next, { note: '', error: '' });
-        return true
-      }
-
-      /** Leave the edit without saving. */
-      function cancelAnnotationEdit() {
-        return closeAnnotationSurface()
-      }
-
-      /** Remove one collected annotation (also used from the edit body). */
-      function removeAnnotation(id) {
-        const next = state.annotations.filter((item) => item.id !== id);
-        if (next.length === state.annotations.length) return false
-        // Removing the note under the editor closes it; removing any other note
-        // leaves the editor and whatever was typed in it alone.
-        persistNotes(next);
-        if (state.annotationEditingId === id) closeAnnotationSurface({ annotations: next });
-        else settleAnnotation({ annotations: next });
-        return true
-      }
-
-      /**
-       * Copy the captured passage. Resolves to whether the clipboard took it;
-       * the card reports that in place, the way ds-popup's copy button does.
-       */
-      function copyDraftQuote() {
-        const quote = state.annotationDraft?.quote;
-        if (typeof quote !== 'string' || quote === '') return Promise.resolve(false)
-        try {
-          const clipboard = navigator.clipboard;
-          if (typeof clipboard?.writeText !== 'function') return Promise.resolve(false)
-          return Promise.resolve(clipboard.writeText(quote)).then(
-            () => true,
-            () => false,
-          )
-        } catch {
-          return Promise.resolve(false)
-        }
-      }
+      const annotations = createAnnotations({
+        getState: () => state,
+        setState,
+        text,
+        countStat,
+        persistSetting,
+        repaintHighlights: () => highlights.repaintHighlights(),
+        sessionId: () => (resolveTarget(ctx) ?? state.target)?.sessionId,
+        recordAnchorMiss,
+      });
+      const {
+        tidyQuote,
+        quoteMarkdown,
+        annotationNoteLine,
+        annotationBlock,
+        pendingAnnotations,
+        settleAnnotation,
+        closeAnnotationSurface,
+        commitAnnotations,
+        isSelfNode,
+        annotationsText,
+        blockBreak,
+        inEditable,
+        readSelection,
+        cancelPendingCapture,
+        captureSelectionLater,
+        onSelectionKeyup,
+        onPointerGestureDown,
+        onPointerGestureUp,
+        onSelectionChange,
+        pulse,
+        notify,
+        captureSelection,
+        clearNativeSelection,
+        setQuick,
+        setAutoPaste,
+        showTip,
+        hideTip,
+        setFrame,
+        setAnnotationExpanded,
+        setNudgeExpanded,
+        setAnnotationNote,
+        noteSessionId,
+        persistNotes,
+        addAnnotation,
+        markAsAnswer,
+        quickReply,
+        dismissAnnotationDraft,
+        startEditAnnotation,
+        saveEditedAnnotation,
+        cancelAnnotationEdit,
+        removeAnnotation,
+        copyDraftQuote,
+        dispose: disposeAnnotations,
+      } = annotations;
 
       // --- painted highlights ---------------------------------------------
 
@@ -6172,7 +6313,7 @@ function createDelivery({ ctx, getState, setState, text }) {
       function dispose() {
         flushSettingsMirror();
         cancelPendingCapture();
-        pointerHeld = false;
+        disposeAnnotations();
         endWaiting();
         for (const off of offs) {
           try {
@@ -6210,8 +6351,6 @@ function createDelivery({ ctx, getState, setState, text }) {
           /* no document */
         }
         insertion.dispose();
-        if (selectionTimer !== undefined) clearTimeout(selectionTimer);
-        if (attentionTimer !== undefined) clearTimeout(attentionTimer);
         highlights.dispose();
         try {
           window.CSS?.highlights?.delete(HIGHLIGHT_NAME);
