@@ -1483,53 +1483,6 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
     }
 
 /**
- * The per-Session annotation store.
- *
- * Every note is keyed by the Session it quotes, so switching conversations keeps each tray.
- *
- * Built into `client.js` by `scripts/build.mjs`; edit this file, not the bundle.
- */
-
-    /** Every stored annotation set, keyed by Session id. */
-    function readNoteStore() {
-      try {
-        const raw = storage()?.getItem(NOTES_KEY);
-        if (typeof raw !== 'string' || raw === '') return {}
-        const parsed = JSON.parse(raw);
-        return parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
-      } catch {
-        return {}
-      }
-    }
-
-    /** One Session's stored annotations, degraded to [] when malformed. */
-    function notesOfSession(sessionId) {
-      if (typeof sessionId !== 'string' || sessionId === '') return []
-      const list = readNoteStore()[sessionId];
-      if (!Array.isArray(list)) return []
-      return list.filter(
-        (item) =>
-          item !== null &&
-          typeof item === 'object' &&
-          typeof item.quote === 'string' &&
-          typeof item.id === 'string',
-      )
-    }
-
-    /** Persist one Session's annotations, dropping empty sets and old Sessions. */
-    function saveNotesOfSession(sessionId, list) {
-      if (typeof sessionId !== 'string' || sessionId === '') return
-      const store = readNoteStore();
-      if (!Array.isArray(list) || list.length === 0) delete store[sessionId];
-      else store[sessionId] = list.slice(-MAX_NOTES);
-      const keys = Object.keys(store);
-      if (keys.length > MAX_NOTE_SESSIONS) {
-        for (const key of keys.slice(0, keys.length - MAX_NOTE_SESSIONS)) delete store[key];
-      }
-      writeJson(NOTES_KEY, store);
-    }
-
-/**
  * Probe presets: built-ins, normalization and the chosen one.
  *
  * The list an install starts with, the legacy shapes it may have been stored in, and the pick.
@@ -1634,6 +1587,277 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
         /* storage unavailable */
       }
       return firstEnabled?.id ?? presets[0]?.id ?? DEFAULT_PRESET
+    }
+
+/**
+ * Writing into the composer: the mounted bridge, the draft splice and the
+ * pinned-prompt presses.
+ *
+ * The window never touches the editor DOM. It holds the handle the input
+ * bridge hands over (`setDraft`/`readDraft`), appends a prompt on its own line
+ * and — on a double press — sends the draft the first press composed.
+ *
+ * Built into `client.js` by `scripts/build.mjs`; edit this file, not the bundle.
+ */
+
+    /**
+     * Build the composer side of the runtime.
+     *
+     * Every collaborator is injected: the state is read through `getState`,
+     * prompts come from `activePreset`/`state.presets`, and the effects that
+     * belong to the window (toast text, counters, delivery, auto-paste) stay
+     * callbacks, so this module has no DOM and no store of its own.
+     *
+     * @param deps - getState, setState, text, countStat, deliver, activePreset, onFocus.
+     * @returns the composer handle surface and the three insertion entry points.
+     */
+    function createComposerInsertion(deps) {
+      const { getState, setState, text, countStat, deliver, activePreset, onFocus } = deps;
+
+      /** The mounted composer bridge, when a conversation input is on screen. */
+      let composer;
+      /**
+       * A bar press counts its insert only when no second press follows: the
+       * pair is one send, not an insert plus a send.
+       */
+      let barInsertTimer;
+      let barInsertId = '';
+
+      /** The focused composer editor element, when the caret is inside it. */
+      function composerNode() {
+        try {
+          const active = /** @type {HTMLElement | null} */ (document.activeElement);
+          if (!active) return undefined
+          const editable =
+            active.isContentEditable === true ||
+            active.getAttribute?.('contenteditable') === 'true';
+          if (!editable) return undefined
+          // The DSH composer editor marks itself `data-composer-input`; Lexical
+          // marks its root too, and the slot host covers older shells.
+          if (typeof active.hasAttribute === 'function' && active.hasAttribute('data-composer-input')) return active
+          if (active.getAttribute?.('data-lexical-editor') === 'true') return active
+          if (typeof active.closest === 'function' && active.closest('[data-slot="conversation.composer"]')) {
+            return active
+          }
+          return undefined
+        } catch {
+          return undefined
+        }
+      }
+
+      /** Write mode is available only while a composer is mounted and focused. */
+      function canInsert() {
+        return composer !== undefined && composerNode() !== undefined
+      }
+
+      /** Keep the visible mode flag (the primary button label) in sync with focus. */
+      function syncComposerFocus() {
+        const focused = canInsert();
+        if (focused === getState().composerFocused) return
+        setState({ composerFocused: focused });
+        if (focused && typeof onFocus === 'function') onFocus();
+      }
+
+      /**
+       * Attach the live composer handle handed over by the input bridge.
+       * `sync: false` stores it without a store update, for React's render
+       * phase; the bridge's effect then attaches with the focus refresh.
+       */
+      function attachComposer(handle, sync = true) {
+        composer = handle;
+        if (sync) syncComposerFocus();
+      }
+
+      /** Detach only when the released handle is still the mounted one. */
+      function detachComposer(handle) {
+        if (composer !== handle) return
+        composer = undefined;
+        syncComposerFocus();
+      }
+
+      /** Whether the mounted composer already holds text. */
+      function composerHasText() {
+        if (composer === undefined) return false
+        try {
+          const draft = composer.readDraft?.();
+          return typeof draft === 'string' && draft.trim() !== ''
+        } catch {
+          return false
+        }
+      }
+
+      /**
+       * Append the selected preset to the composer draft instead of sending it.
+       * The caret ends up past the written text; existing content is kept and
+       * separated by one newline (a blank draft gets no leading newline).
+       */
+      function insertPreset(id, count = true) {
+        const handle = composer;
+        if (handle === undefined || typeof handle.setDraft !== 'function') {
+          setState({ note: text('insertUnavailable'), error: '' });
+          return false
+        }
+        const preset = id === undefined ? activePreset() : presetOf(getState().presets, id);
+        if (!preset) return false
+        let draft = '';
+        try {
+          draft = handle.readDraft?.() ?? '';
+        } catch {
+          draft = '';
+        }
+        if (typeof draft !== 'string') draft = '';
+        const next =
+          draft.trim() === ''
+            ? preset.text
+            : `${draft}${draft.endsWith('\n') ? '' : '\n'}${preset.text}`;
+        try {
+          handle.setDraft(next);
+        } catch (error) {
+          console.warn('[dsh-nudge] composer insert failed', error);
+          setState({ note: text('insertUnavailable'), error: '' });
+          return false
+        }
+        setState({ note: '', error: '' });
+        if (count === true) countStat('insert', preset.id);
+        return true
+      }
+
+      /**
+       * A single press on a pinned prompt: append it now, and count the insert
+       * only if the press is not followed by the second half of a double click.
+       */
+      function appendPrompt(id) {
+        if (barInsertTimer !== undefined) {
+          clearTimeout(barInsertTimer);
+          barInsertTimer = undefined;
+          if (barInsertId !== '') countStat('insert', barInsertId);
+          barInsertId = '';
+        }
+        if (!insertPreset(id, false)) return false
+        barInsertId = id;
+        barInsertTimer = setTimeout(() => {
+          barInsertTimer = undefined;
+          const pending = barInsertId;
+          barInsertId = '';
+          if (pending !== '') countStat('insert', pending);
+        }, 260);
+        return true
+      }
+
+      /**
+       * A double press on a pinned prompt: send the draft the first press
+       * composed. That press's insert count is dropped, so the pair counts as
+       * one send; a failed send keeps the draft as it was.
+       */
+      function sendDraft(id) {
+        const handle = composer;
+        if (handle === undefined || typeof handle.setDraft !== 'function') {
+          setState({ note: text('insertUnavailable'), error: '' });
+          return false
+        }
+        if (barInsertTimer !== undefined) {
+          clearTimeout(barInsertTimer);
+          barInsertTimer = undefined;
+          barInsertId = '';
+        }
+        const preset = presetOf(getState().presets, id);
+        let draft = '';
+        try {
+          draft = handle.readDraft?.() ?? '';
+        } catch {
+          draft = '';
+        }
+        if (typeof draft !== 'string') draft = '';
+        const body = preset?.text ?? '';
+        // The first press writes through the shell's input store; if that write
+        // has not reached the reader yet, compose it here so the send is whole.
+        if (body !== '' && !draft.replace(/\s+$/, '').endsWith(body.trim())) {
+          draft = draft.trim() === '' ? body : `${draft}${draft.endsWith('\n') ? '' : '\n'}${body}`;
+        }
+        if (draft.trim() === '') return false
+        if (!deliver(draft)) return false
+        try {
+          handle.setDraft('');
+        } catch {
+          /* the text stays if the shell refuses the clear */
+        }
+        countStat('send', id);
+        return true
+      }
+
+      /** The live handle, for the batch writer that needs the same action face. */
+      function composerHandle() {
+        return composer
+      }
+
+      /** Drop the pending double-press timer when the runtime goes away. */
+      function dispose() {
+        if (barInsertTimer === undefined) return
+        clearTimeout(barInsertTimer);
+        barInsertTimer = undefined;
+        barInsertId = '';
+      }
+
+      return {
+        composerNode,
+        canInsert,
+        syncComposerFocus,
+        attachComposer,
+        detachComposer,
+        composerHasText,
+        composerHandle,
+        insertPreset,
+        appendPrompt,
+        sendDraft,
+        dispose,
+      }
+    }
+
+/**
+ * The per-Session annotation store.
+ *
+ * Every note is keyed by the Session it quotes, so switching conversations keeps each tray.
+ *
+ * Built into `client.js` by `scripts/build.mjs`; edit this file, not the bundle.
+ */
+
+    /** Every stored annotation set, keyed by Session id. */
+    function readNoteStore() {
+      try {
+        const raw = storage()?.getItem(NOTES_KEY);
+        if (typeof raw !== 'string' || raw === '') return {}
+        const parsed = JSON.parse(raw);
+        return parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+      } catch {
+        return {}
+      }
+    }
+
+    /** One Session's stored annotations, degraded to [] when malformed. */
+    function notesOfSession(sessionId) {
+      if (typeof sessionId !== 'string' || sessionId === '') return []
+      const list = readNoteStore()[sessionId];
+      if (!Array.isArray(list)) return []
+      return list.filter(
+        (item) =>
+          item !== null &&
+          typeof item === 'object' &&
+          typeof item.quote === 'string' &&
+          typeof item.id === 'string',
+      )
+    }
+
+    /** Persist one Session's annotations, dropping empty sets and old Sessions. */
+    function saveNotesOfSession(sessionId, list) {
+      if (typeof sessionId !== 'string' || sessionId === '') return
+      const store = readNoteStore();
+      if (!Array.isArray(list) || list.length === 0) delete store[sessionId];
+      else store[sessionId] = list.slice(-MAX_NOTES);
+      const keys = Object.keys(store);
+      if (keys.length > MAX_NOTE_SESSIONS) {
+        for (const key of keys.slice(0, keys.length - MAX_NOTE_SESSIONS)) delete store[key];
+      }
+      writeJson(NOTES_KEY, store);
     }
 
 /**
@@ -3056,172 +3280,35 @@ function createDelivery({ ctx, getState, setState, text }) {
       // --- composer insertion ---------------------------------------------
 
       /**
-       * The mounted composer bridge, when a conversation input is on screen.
-       * It carries the composer's public action face (`setDraft`) and a reader
-       * for the current draft; the plugin never touches the editor DOM.
+       * The mounted composer bridge and the draft splice. The module owns the
+       * handle, the double-press counter and the write path; the runtime keeps
+       * the side effects it needs: toast text, counters, delivery and the
+       * auto-paste handoff on focus.
        */
-      let composer;
-      /**
-       * A bar press counts its insert only when no second press follows: the
-       * pair is one send, not an insert plus a send.
-       */
-      let barInsertTimer;
-      let barInsertId = '';
-
-      /** The focused composer editor element, when the caret is inside it. */
-      function composerNode() {
-        try {
-          const active = /** @type {HTMLElement | null} */ (document.activeElement);
-          if (!active) return undefined
-          const editable =
-            active.isContentEditable === true ||
-            active.getAttribute?.('contenteditable') === 'true';
-          if (!editable) return undefined
-          // The DSH composer editor marks itself `data-composer-input`; Lexical
-          // marks its root too, and the slot host covers older shells.
-          if (typeof active.hasAttribute === 'function' && active.hasAttribute('data-composer-input')) return active
-          if (active.getAttribute?.('data-lexical-editor') === 'true') return active
-          if (typeof active.closest === 'function' && active.closest('[data-slot="conversation.composer"]')) {
-            return active
-          }
-          return undefined
-        } catch {
-          return undefined
-        }
-      }
-
-      /** Write mode is available only while a composer is mounted and focused. */
-      function canInsert() {
-        return composer !== undefined && composerNode() !== undefined
-      }
-
-      /** Keep the visible mode flag (the primary button label) in sync with focus. */
-      function syncComposerFocus() {
-        const focused = canInsert();
-        if (focused === state.composerFocused) return
-        setState({ composerFocused: focused });
-        // Auto-paste: the moment the caret lands in the composer, hand the
-        // pending notes over and empty the tray. A failed write keeps them.
-        if (focused && state.autoPaste === true && state.annotations.length > 0) {
-          writeAnnotations();
-        }
-      }
-
-      /**
-       * Attach the live composer handle handed over by the input bridge.
-       * `sync: false` stores it without a store update, for React's render
-       * phase; the bridge's effect then attaches with the focus refresh.
-       */
-      function attachComposer(handle, sync = true) {
-        composer = handle;
-        if (sync) syncComposerFocus();
-      }
-
-      /** Detach only when the released handle is still the mounted one. */
-      function detachComposer(handle) {
-        if (composer !== handle) return
-        composer = undefined;
-        syncComposerFocus();
-      }
-
-      /**
-       * Append the selected preset to the composer draft instead of sending it.
-       * The caret ends up past the written text; existing content is kept and
-       * separated by one newline (a blank draft gets no leading newline).
-       */
-      function insertPreset(id, count = true) {
-        const handle = composer;
-        if (handle === undefined || typeof handle.setDraft !== 'function') {
-          setState({ note: text('insertUnavailable'), error: '' });
-          return false
-        }
-        const preset = id === undefined ? activePreset() : presetOf(state.presets, id);
-        if (!preset) return false
-        let draft = '';
-        try {
-          draft = handle.readDraft?.() ?? '';
-        } catch {
-          draft = '';
-        }
-        if (typeof draft !== 'string') draft = '';
-        const next =
-          draft.trim() === ''
-            ? preset.text
-            : `${draft}${draft.endsWith('\n') ? '' : '\n'}${preset.text}`;
-        try {
-          handle.setDraft(next);
-        } catch (error) {
-          console.warn('[dsh-nudge] composer insert failed', error);
-          setState({ note: text('insertUnavailable'), error: '' });
-          return false
-        }
-        setState({ note: '', error: '' });
-        if (count === true) countStat('insert', preset.id);
-        return true
-      }
-
-      /**
-       * A single press on a pinned prompt: append it now, and count the insert
-       * only if the press is not followed by the second half of a double click.
-       */
-      function appendPrompt(id) {
-        if (barInsertTimer !== undefined) {
-          clearTimeout(barInsertTimer);
-          barInsertTimer = undefined;
-          if (barInsertId !== '') countStat('insert', barInsertId);
-          barInsertId = '';
-        }
-        if (!insertPreset(id, false)) return false
-        barInsertId = id;
-        barInsertTimer = setTimeout(() => {
-          barInsertTimer = undefined;
-          const pending = barInsertId;
-          barInsertId = '';
-          if (pending !== '') countStat('insert', pending);
-        }, 260);
-        return true
-      }
-
-      /**
-       * A double press on a pinned prompt: send the draft the first press
-       * composed. That press's insert count is dropped, so the pair counts as
-       * one send; a failed send keeps the draft as it was.
-       */
-      function sendDraft(id) {
-        const handle = composer;
-        if (handle === undefined || typeof handle.setDraft !== 'function') {
-          setState({ note: text('insertUnavailable'), error: '' });
-          return false
-        }
-        if (barInsertTimer !== undefined) {
-          clearTimeout(barInsertTimer);
-          barInsertTimer = undefined;
-          barInsertId = '';
-        }
-        const preset = presetOf(state.presets, id);
-        let draft = '';
-        try {
-          draft = handle.readDraft?.() ?? '';
-        } catch {
-          draft = '';
-        }
-        if (typeof draft !== 'string') draft = '';
-        const body = preset?.text ?? '';
-        // The first press writes through the shell's input store; if that write
-        // has not reached the reader yet, compose it here so the send is whole.
-        if (body !== '' && !draft.replace(/\s+$/, '').endsWith(body.trim())) {
-          draft = draft.trim() === '' ? body : `${draft}${draft.endsWith('\n') ? '' : '\n'}${body}`;
-        }
-        if (draft.trim() === '') return false
-        if (!deliver(draft)) return false
-        try {
-          handle.setDraft('');
-        } catch {
-          /* the text stays if the shell refuses the clear */
-        }
-        countStat('send', id);
-        return true
-      }
+      const insertion = createComposerInsertion({
+        getState: () => state,
+        setState,
+        text,
+        countStat,
+        deliver,
+        activePreset,
+        onFocus: () => {
+          // Auto-paste: the moment the caret lands in the composer, hand the
+          // pending notes over and empty the tray. A failed write keeps them.
+          if (state.autoPaste === true && state.annotations.length > 0) writeAnnotations();
+        },
+      });
+      const {
+        attachComposer,
+        detachComposer,
+        syncComposerFocus,
+        canInsert,
+        composerHasText,
+        composerHandle,
+        insertPreset,
+        appendPrompt,
+        sendDraft,
+      } = insertion;
 
       // --- annotations ----------------------------------------------------
 
@@ -4707,7 +4794,7 @@ function createDelivery({ ctx, getState, setState, text }) {
       function writeAnnotations() {
         const pending = pendingAnnotations();
         if (pending.length === 0) return false
-        const handle = composer;
+        const handle = composerHandle();
         if (handle === undefined || typeof handle.setDraft !== 'function') {
           setState({ note: text('insertUnavailable'), error: '' });
           return false
@@ -4812,17 +4899,6 @@ function createDelivery({ ctx, getState, setState, text }) {
         const delivered = deliver(preset.text);
         if (delivered) countStat('send', preset.id);
         return delivered
-      }
-
-      /** Whether the mounted composer already holds text. */
-      function composerHasText() {
-        if (composer === undefined) return false
-        try {
-          const draft = composer.readDraft?.();
-          return typeof draft === 'string' && draft.trim() !== ''
-        } catch {
-          return false
-        }
       }
 
       /**
@@ -5865,11 +5941,7 @@ function createDelivery({ ctx, getState, setState, text }) {
         } catch {
           /* no document */
         }
-        if (barInsertTimer !== undefined) {
-          clearTimeout(barInsertTimer);
-          barInsertTimer = undefined;
-          barInsertId = '';
-        }
+        insertion.dispose();
         if (selectionTimer !== undefined) clearTimeout(selectionTimer);
         if (attentionTimer !== undefined) clearTimeout(attentionTimer);
         if (repaintTimer !== undefined) clearTimeout(repaintTimer);

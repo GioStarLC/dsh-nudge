@@ -10,6 +10,7 @@
  * Run: node scripts/check-units.mjs
  */
 import { MAX_TIP_LENGTH, MAX_TIPS, STATS_DAYS } from '../src/client/constants.js'
+import { createComposerInsertion } from '../src/client/composer-insert.js'
 import { occurrencesOf, rectDistance } from '../src/client/dom.js'
 import { chipSlotAt, clamp, isPoint, rectValue } from '../src/client/geometry.js'
 import {
@@ -204,6 +205,84 @@ check(
   rectDistance({ left: 0, top: 0, right: 10, bottom: 10 }, { left: 10, top: 0, right: 20, bottom: 10 }),
   10,
 )
+
+
+// --- composer insertion: the draft splice and the press counting ---------
+
+{
+  const state = {
+    presets: [
+      { id: 'p1', text: '第一条' },
+      { id: 'p2', text: '第二条' },
+    ],
+    composerFocused: false,
+    note: '',
+    error: '',
+  }
+  const written = []
+  const stats = []
+  const sent = []
+  let draft = ''
+  const insertion = createComposerInsertion({
+    getState: () => state,
+    setState: (patch) => Object.assign(state, patch),
+    text: (key) => key,
+    countStat: (field, id) => stats.push([field, id]),
+    deliver: (message) => {
+      sent.push(message)
+      return true
+    },
+    activePreset: () => state.presets[0],
+    onFocus: () => {},
+  })
+
+  check('composer: inserting without a mounted handle is refused', insertion.insertPreset('p1'), false)
+  check('composer: the refusal explains itself', state.note, 'insertUnavailable')
+
+  insertion.attachComposer({
+    readDraft: () => draft,
+    setDraft: (value) => {
+      draft = value
+      written.push(value)
+    },
+  })
+
+  check('composer: a blank draft takes the prompt alone', insertion.insertPreset('p1'), true)
+  check('composer: the draft is the prompt', draft, '第一条')
+  check('composer: the insert is counted once', stats.length, 1)
+
+  check('composer: a filled draft is kept', insertion.insertPreset('p2'), true)
+  check('composer: the prompt lands on its own line', draft, '第一条\n第二条')
+  same('composer: the second insert is counted', stats[1], ['insert', 'p2'])
+
+  draft = '已有内容\n'
+  insertion.insertPreset('p1')
+  check('composer: a trailing newline is not doubled', draft, '已有内容\n第一条')
+
+  draft = ''
+  check('composer: an unknown id is refused', insertion.insertPreset('nope'), false)
+
+  // A double press: the reader has not caught up with the first press yet, so
+  // the send has to compose the body itself and still send one whole message.
+  draft = '第一条'
+  stats.length = 0
+  check('composer: the second press sends', insertion.sendDraft('p1'), true)
+  same('composer: the sent draft is whole', sent, ['第一条'])
+  check('composer: a send clears the draft', draft, '')
+  same('composer: the pair counts as one send', stats, [['send', 'p1']])
+
+  check('composer: a draft reader that lags still sends the body', (() => {
+    draft = ''
+    insertion.attachComposer({ readDraft: () => draft, setDraft: () => {} })
+    return insertion.sendDraft('p2')
+  })(), true)
+  check('composer: composerHasText trims whitespace', (() => {
+    insertion.attachComposer({ readDraft: () => '   ', setDraft: () => {} })
+    return insertion.composerHasText()
+  })(), false)
+  insertion.detachComposer(undefined)
+  insertion.dispose()
+}
 
 console.log(`\nunit checks: ${checks - failures} passed, ${failures} failed`)
 if (failures > 0) process.exit(1)
