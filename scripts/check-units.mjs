@@ -11,6 +11,7 @@
  */
 import { MAX_TIP_LENGTH, MAX_TIPS, STATS_DAYS } from '../src/client/constants.js'
 import { createAnnotations } from '../src/client/annotations.js'
+import { createCardPlacement } from '../src/client/card-placement.js'
 import { createComposerInsertion } from '../src/client/composer-insert.js'
 import { createHighlights } from '../src/client/highlights.js'
 import { createPopup } from '../src/client/popup.js'
@@ -592,6 +593,42 @@ check(
   state.annotations = [{ id: 'n3', quote: '丙', note: 'x', written: false }]
   check('writing: without a composer the write is refused', api.writeAnnotations(), false)
   check('writing: the refusal explains itself', state.note, 'insertUnavailable')
+}
+
+
+// --- card placement: the fold anchor -------------------------------------
+
+{
+  const state = { collapsed: false, pos: { x: 100, y: 120 }, settingsOpen: true, unread: true }
+  const api = createCardPlacement({
+    getState: () => state,
+    setState: (patch) => Object.assign(state, patch),
+  })
+  const previousWindow = globalThis.window
+  globalThis.window = { innerWidth: 800, innerHeight: 600 }
+  try {
+    api.setCollapsed(true, { x: 400, y: 300 })
+    check('placement: the fold collapses the card', state.collapsed, true)
+    same('placement: the pill lands under the pointer', [state.pos.x, state.pos.y], [382, 282])
+    same('placement: settings fold away, unread waits for the unfold', [state.settingsOpen, state.unread], [false, true])
+
+    api.setCollapsed(false)
+    check('placement: the unfold is expanded', state.collapsed, false)
+    check('placement: the unfold clears the unread mark', state.unread, false)
+    same('placement: the unfold returns to the stored spot', [state.pos.x, state.pos.y], [100, 88])
+
+    api.setCollapsed(true)
+    api.moveTo(40, 50)
+    same('placement: a dragged pill is clamped into the viewport', [state.pos.x, state.pos.y], [40, 50])
+    api.setCollapsed(false)
+    same('placement: a dragged pill wins over the old anchor', [state.pos.x, state.pos.y], [40, 50])
+
+    api.resetCardAnchor()
+    check('placement: the anchor can be forgotten', state.collapsed, false)
+  } finally {
+    if (previousWindow === undefined) delete globalThis.window
+    else globalThis.window = previousWindow
+  }
 }
 
 console.log(`\nunit checks: ${checks - failures} passed, ${failures} failed`)
