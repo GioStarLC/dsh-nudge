@@ -11,6 +11,7 @@
  */
 import { MAX_TIP_LENGTH, MAX_TIPS, STATS_DAYS } from '../src/client/constants.js'
 import { createComposerInsertion } from '../src/client/composer-insert.js'
+import { createHighlights } from '../src/client/highlights.js'
 import { createPopup } from '../src/client/popup.js'
 import { createPresetActions } from '../src/client/preset-actions.js'
 import { createTipActions } from '../src/client/tip-actions.js'
@@ -452,6 +453,46 @@ check(
     if (previousWindow === undefined) delete globalThis.window
     else globalThis.window = previousWindow
   }
+}
+
+
+// --- highlights: the repaint guard ---------------------------------------
+
+{
+  const state = { quick: false, annotations: [] }
+  const api = createHighlights({
+    getState: () => state,
+    flowAnchorsChanged: () => false,
+    startEditAnnotation: () => {},
+    inEditable: () => false,
+  })
+  const timers = []
+  const realSetTimeout = globalThis.setTimeout
+  const realClearTimeout = globalThis.clearTimeout
+  const cleared = []
+  globalThis.setTimeout = (fn) => {
+    timers.push(fn)
+    return 7
+  }
+  globalThis.clearTimeout = (id) => cleared.push(id)
+  try {
+    api.scheduleRepaint()
+    check('highlights: nothing is scheduled while quick notes are off', timers.length, 0)
+
+    state.quick = true
+    api.scheduleRepaint()
+    api.scheduleRepaint()
+    check('highlights: one repaint per frame-ish task', timers.length, 1)
+
+    api.dispose()
+    check('highlights: dispose clears the pending repaint', cleared.includes(7), true)
+    check('highlights: dispose is safe to repeat', (() => { api.dispose(); return true })(), true)
+  } finally {
+    globalThis.setTimeout = realSetTimeout
+    globalThis.clearTimeout = realClearTimeout
+  }
+
+  check('highlights: a click while quick notes are off is ignored', api.onTranscriptClick({ target: null }) === undefined, true)
 }
 
 console.log(`\nunit checks: ${checks - failures} passed, ${failures} failed`)
