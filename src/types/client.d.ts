@@ -181,8 +181,8 @@ interface NudgeAnnotationDraft {
   anchorPoint: { node: Node; offset: number } | null
   rect: { left: number; top: number; right: number; bottom: number; width: number; height: number } | null
   pointer: NudgePoint | null
-  /** The selection already covers its passage; the card keeps off the pointer. */
-  wholePassage: boolean
+  /** The selection is a phrase of one paragraph, heading or list item; only then does 记为答案 park under the pointer. */
+  phrasePassage: boolean
 }
 
 /** The conversation a click is about. */

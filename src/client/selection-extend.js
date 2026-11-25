@@ -7,7 +7,7 @@
  * Built into `client.js` by `scripts/build.mjs`; edit this file, not the bundle.
  */
 import { EDITABLE_SELECTOR, MODAL_SELECTOR, SELF_SELECTOR } from './constants.js'
-import { anchorFromRange, coversPassage } from './dom.js'
+import { anchorFromRange, phraseOfPassage } from './dom.js'
 import { viewport } from './geometry.js'
 
     /**
@@ -119,7 +119,7 @@ import { viewport } from './geometry.js'
                 }
               : null,
             pointer: null,
-            wholePassage: coversPassage(range, quote),
+            phrasePassage: phraseOfPassage(range, quote),
           },
           annotationCardHidden: false,
         })

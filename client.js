@@ -1498,6 +1498,18 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
      * promoted to the whole block, so the highlight covers the paragraph the
      * words sit in rather than the words alone.
      */
+    /** Tags whose phrase keeps the one-click 记为答案 shortcut. */
+    const PHRASE_TAGS = {
+      P: true,
+      LI: true,
+      H1: true,
+      H2: true,
+      H3: true,
+      H4: true,
+      H5: true,
+      H6: true,
+    };
+
     const PASSAGE_TAGS = {
       P: true,
       LI: true,
@@ -1548,15 +1560,8 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
       return text.replace(/\s+$/, '')
     }
 
-    /**
-     * The whole passages a selection touches, in document order.
-     *
-     * A selection inside a paragraph names that paragraph; one crossing several
-     * names all of them. The innermost block wins, so a list item wrapping a
-     * paragraph contributes its words once, and a flow item that carries no
-     * block of its own stands for its whole text.
-     */
-    function passagesOfRange(range) {
+    /** The innermost passage blocks a selection touches, in document order. */
+    function passageBlocksOf(range) {
       const elements = document.querySelectorAll?.(ANCHOR_SELECTOR) ?? [];
       const blocks = [];
       for (const element of elements) {
@@ -1573,32 +1578,48 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
         };
         walk(element);
       }
-      const innermost = blocks.filter(
+      return blocks.filter(
         (block) => !blocks.some((other) => other !== block && block.contains?.(other) === true),
-      );
-      const texts = innermost.map(blockTextOf).filter((text) => text.trim() !== '');
+      )
+    }
+
+    /**
+     * The whole passages a selection touches, in document order.
+     *
+     * A selection inside a paragraph names that paragraph; one crossing several
+     * names all of them. The innermost block wins, so a list item wrapping a
+     * paragraph contributes its words once, and a flow item that carries no
+     * block of its own stands for its whole text.
+     */
+    function passagesOfRange(range) {
+      const texts = passageBlocksOf(range).map(blockTextOf).filter((text) => text.trim() !== '');
       return texts.length === 0 ? '' : texts.join('\n\n')
     }
 
     /**
-     * Whether a selection already spans the passage it sits in.
+     * Whether a selection is a phrase picked out of one paragraph, heading or
+     * list item.
      *
-     * Whitespace is ignored, so a selection that only differs by line breaks is
-     * still the passage. A drag that stops a character or two short reads the
-     * same way to the eye, hence the ratio rather than an exact match. A range
-     * that names no passage (a selection outside the transcript) is never
-     * covered: the card keeps its usual placement there.
+     * Only then does the 记为答案 button park under the release point: the
+     * click that follows a phrase is usually meant to mark it. A whole
+     * passage, a table cell, a code block, or a selection crossing several
+     * blocks reads as something to copy or quote, so the card keeps off the
+     * pointer there. A drag that stops a character or two short still reads as
+     * the passage to the eye, hence the ratio rather than an exact match.
      */
-    function coversPassage(range, quote) {
-      let passage = '';
+    function phraseOfPassage(range, quote) {
       try {
-        passage = passagesOfRange(range);
+        const blocks = passageBlocksOf(range);
+        if (blocks.length !== 1) return false
+        const block = blocks[0];
+        if (PHRASE_TAGS[String(block.tagName ?? '').toUpperCase()] !== true) return false
+        if (typeof block.closest === 'function' && block.closest('table') !== null) return false
+        const total = packedText(blockTextOf(block)).length;
+        if (total === 0) return false
+        return packedText(quote).length / total < WHOLE_PASSAGE_RATIO
       } catch {
-        passage = '';
+        return false
       }
-      const total = packedText(passage).length;
-      if (total === 0) return false
-      return packedText(quote).length / total >= WHOLE_PASSAGE_RATIO
     }
 
     /** A DOM Range covering [start, end) of a packed map, or null. */
@@ -2779,6 +2800,8 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
       let flashTimer;
       /** True while a pointer gesture is down, so no card opens mid-drag. */
       let pointerHeld = false;
+      /** Clicks behind the live selection: 2 is a double-click word pick. */
+      let clickCount = 0;
 
       /** Cancel a capture that has not fired yet (a new press is starting). */
       function cancelPendingCapture() {
@@ -2802,6 +2825,9 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
           event && typeof event.clientX === 'number' && typeof event.clientY === 'number'
             ? { x: event.clientX, y: event.clientY }
             : null;
+        // Kept until the capture runs: the pointer path and the safety net both
+        // read it, and the safety net has no event of its own.
+        if (event && typeof event.detail === 'number') clickCount = event.detail;
         selectionTimer = setTimeout(() => {
           selectionTimer = undefined;
           captureSelection(pointer);
@@ -2821,6 +2847,7 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
         if (event?.shiftKey !== true) return
         if (inEditable(event?.target)) return
         if (inEditable(document.activeElement)) return
+        clickCount = 0;
         captureSelectionLater();
       }
 
@@ -2832,6 +2859,7 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
        */
       function onPointerGestureDown() {
         pointerHeld = true;
+        clickCount = 0;
         cancelPendingCapture();
       }
 
@@ -2911,9 +2939,10 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
         } catch {
           anchor = null;
         }
-        // Whether the selection is already the passage: the card still opens,
-        // but it stops parking a button under the release point then, because
-        // the click after a whole-paragraph selection is rarely meant for it.
+        // Whether the selection is a phrase of one paragraph, heading or list
+        // item: only then does the card park its first button under the release point.
+        // A whole passage, a code block, a table cell, a multi-block selection
+        // or a double-clicked word keeps the card off the pointer.
         settleAnnotation({
           ...IDLE_ANNOTATION,
           annotationDraft: {
@@ -2935,7 +2964,7 @@ body:has(.dsh-nudge-settings) [data-shortcut-modal="settings"]{height:auto;min-h
                 }
               : null,
             pointer,
-            wholePassage: coversPassage(selection.range, selection.quote),
+            phrasePassage: clickCount < 2 && phraseOfPassage(selection.range, selection.quote),
           },
           note: '',
           error: '',
@@ -4608,12 +4637,12 @@ function createDelivery({ ctx, getState, setState, text }) {
        * A mouse selection ends on the release point, so the card opens above it
        * with its first button — 记为答案 — centred on that point: the next click
        * lands without moving the mouse. That shortcut is only for a phrase
-       * picked out of a passage. A selection that already is the passage is
-       * usually read, copied or quoted, not marked, and the click that follows
-       * it belongs to something else — so the card keeps off the pointer then
-       * and hangs over the quote box instead. When the card does not fit above
-       * the point, or the pointer belongs to a click elsewhere, the quote box
-       * is the anchor too.
+       * picked out of one paragraph, heading or list item. A whole passage, a code block,
+       * a table cell, a selection crossing several blocks and a double-clicked
+       * word are read, copied or quoted instead, so the card keeps off the
+       * pointer then and hangs over the quote box. When the card does not fit
+       * above the point, or the pointer belongs to a click elsewhere, the
+       * quote box is the anchor too.
        */
       function popupPosition() {
         const draft = getState().annotationDraft;
@@ -4629,7 +4658,7 @@ function createDelivery({ ctx, getState, setState, text }) {
         const boxWidth = Math.min(width, vw - margin * 2);
         const rect = draft?.rect ?? null;
         const pointer =
-          draft?.wholePassage === true || !pointerNearRect(draft?.pointer, rect) ? null : draft.pointer;
+          draft?.phrasePassage !== true || !pointerNearRect(draft?.pointer, rect) ? null : draft.pointer;
         const clampX = (value) => Math.max(margin, Math.min(value, vw - boxWidth - margin));
         if (pointer) {
           const { x, y } = pointer;
@@ -5513,7 +5542,7 @@ function createDelivery({ ctx, getState, setState, text }) {
                 }
               : null,
             pointer: null,
-            wholePassage: coversPassage(range, quote),
+            phrasePassage: phraseOfPassage(range, quote),
           },
           annotationCardHidden: false,
         });

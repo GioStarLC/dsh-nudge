@@ -444,12 +444,21 @@ check(
     state.annotationDraft = {
       pointer: { x: 400, y: 300 },
       rect: { left: 380, top: 290, right: 420, bottom: 310, width: 40, height: 20 },
+      phrasePassage: true,
     }
     const above = api.popupPosition()
     check('popup: a pointer far enough down opens the card upward', above.transform, 'translateY(-100%)')
     check('popup: the first button is centred on the release point', above.left, '356px')
 
-    state.annotationDraft = { pointer: { x: 400, y: 60 }, rect: null }
+    state.annotationDraft = {
+      pointer: { x: 400, y: 300 },
+      rect: { left: 380, top: 290, right: 420, bottom: 310, width: 40, height: 20 },
+      phrasePassage: false,
+    }
+    const overBox = api.popupPosition()
+    check('popup: a non-phrase selection hangs the card over the box', overBox.left, '230px')
+
+    state.annotationDraft = { pointer: { x: 400, y: 60 }, rect: null, phrasePassage: true }
     const fallback = api.popupPosition()
     check('popup: a pointer too high falls back to the parked card', fallback.transform, 'none')
 

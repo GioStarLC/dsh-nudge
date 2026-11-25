@@ -67,6 +67,18 @@ import { ANCHOR_SELECTOR, CONTEXT_CHARS, MAX_OCCURRENCES, WHOLE_PASSAGE_RATIO } 
      * promoted to the whole block, so the highlight covers the paragraph the
      * words sit in rather than the words alone.
      */
+    /** Tags whose phrase keeps the one-click 记为答案 shortcut. */
+    const PHRASE_TAGS = {
+      P: true,
+      LI: true,
+      H1: true,
+      H2: true,
+      H3: true,
+      H4: true,
+      H5: true,
+      H6: true,
+    }
+
     const PASSAGE_TAGS = {
       P: true,
       LI: true,
@@ -117,15 +129,8 @@ import { ANCHOR_SELECTOR, CONTEXT_CHARS, MAX_OCCURRENCES, WHOLE_PASSAGE_RATIO } 
       return text.replace(/\s+$/, '')
     }
 
-    /**
-     * The whole passages a selection touches, in document order.
-     *
-     * A selection inside a paragraph names that paragraph; one crossing several
-     * names all of them. The innermost block wins, so a list item wrapping a
-     * paragraph contributes its words once, and a flow item that carries no
-     * block of its own stands for its whole text.
-     */
-    function passagesOfRange(range) {
+    /** The innermost passage blocks a selection touches, in document order. */
+    function passageBlocksOf(range) {
       const elements = document.querySelectorAll?.(ANCHOR_SELECTOR) ?? []
       const blocks = []
       for (const element of elements) {
@@ -142,32 +147,48 @@ import { ANCHOR_SELECTOR, CONTEXT_CHARS, MAX_OCCURRENCES, WHOLE_PASSAGE_RATIO } 
         }
         walk(element)
       }
-      const innermost = blocks.filter(
+      return blocks.filter(
         (block) => !blocks.some((other) => other !== block && block.contains?.(other) === true),
       )
-      const texts = innermost.map(blockTextOf).filter((text) => text.trim() !== '')
+    }
+
+    /**
+     * The whole passages a selection touches, in document order.
+     *
+     * A selection inside a paragraph names that paragraph; one crossing several
+     * names all of them. The innermost block wins, so a list item wrapping a
+     * paragraph contributes its words once, and a flow item that carries no
+     * block of its own stands for its whole text.
+     */
+    function passagesOfRange(range) {
+      const texts = passageBlocksOf(range).map(blockTextOf).filter((text) => text.trim() !== '')
       return texts.length === 0 ? '' : texts.join('\n\n')
     }
 
     /**
-     * Whether a selection already spans the passage it sits in.
+     * Whether a selection is a phrase picked out of one paragraph, heading or
+     * list item.
      *
-     * Whitespace is ignored, so a selection that only differs by line breaks is
-     * still the passage. A drag that stops a character or two short reads the
-     * same way to the eye, hence the ratio rather than an exact match. A range
-     * that names no passage (a selection outside the transcript) is never
-     * covered: the card keeps its usual placement there.
+     * Only then does the 记为答案 button park under the release point: the
+     * click that follows a phrase is usually meant to mark it. A whole
+     * passage, a table cell, a code block, or a selection crossing several
+     * blocks reads as something to copy or quote, so the card keeps off the
+     * pointer there. A drag that stops a character or two short still reads as
+     * the passage to the eye, hence the ratio rather than an exact match.
      */
-    function coversPassage(range, quote) {
-      let passage = ''
+    function phraseOfPassage(range, quote) {
       try {
-        passage = passagesOfRange(range)
+        const blocks = passageBlocksOf(range)
+        if (blocks.length !== 1) return false
+        const block = blocks[0]
+        if (PHRASE_TAGS[String(block.tagName ?? '').toUpperCase()] !== true) return false
+        if (typeof block.closest === 'function' && block.closest('table') !== null) return false
+        const total = packedText(blockTextOf(block)).length
+        if (total === 0) return false
+        return packedText(quote).length / total < WHOLE_PASSAGE_RATIO
       } catch {
-        passage = ''
+        return false
       }
-      const total = packedText(passage).length
-      if (total === 0) return false
-      return packedText(quote).length / total >= WHOLE_PASSAGE_RATIO
     }
 
     /** A DOM Range covering [start, end) of a packed map, or null. */
@@ -332,4 +353,4 @@ import { ANCHOR_SELECTOR, CONTEXT_CHARS, MAX_OCCURRENCES, WHOLE_PASSAGE_RATIO } 
       return { start: best.index, end: best.index + anchor.quote.length }
     }
 
-export { elementOfNode, NON_TEXT_TAGS, isHiddenElement, packedText, packedMapOf, passagesOfRange, coversPassage, rangeFromPacked, occurrencesOf, rectDistance, anchorFromRange, anchorFromQuote, sameRanges, locateAnchor }
+export { elementOfNode, NON_TEXT_TAGS, isHiddenElement, packedText, packedMapOf, passagesOfRange, phraseOfPassage, rangeFromPacked, occurrencesOf, rectDistance, anchorFromRange, anchorFromQuote, sameRanges, locateAnchor }

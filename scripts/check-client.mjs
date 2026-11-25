@@ -2381,21 +2381,46 @@ function countedFlowItem(key, text, counter) {
 }
 
 {
-  // Placement after a selection. A phrase picked out of a passage keeps the
-  // shortcut — the answer button sits under the release point, one click away.
-  // A selection that already *is* the passage must not: the click that follows
-  // it is almost always meant for the text, not for 记为答案.
+  // Placement after a selection. Only a phrase picked out of one paragraph or
+  // heading keeps the shortcut — the answer button sits under the release
+  // point, one click away. A whole passage, a code block, a table cell, a
+  // selection crossing several blocks and a double-clicked word are read,
+  // copied or quoted instead, so the card keeps off the pointer there.
   const booted = await boot({})
   booted.runtime.setQuick(true)
   const whole = passageStub('P', '整段正文甲一二三四')
   const almost = passageStub('P', '整段正文乙一二三四五')
   const phrase = passageStub('P', '整段正文丙一二三四五')
-  const flow = passageFlowStub('turn-13', [whole, almost, phrase])
+  const heading = passageStub('H2', '标题里的一段文字')
+  const item = passageStub('LI', '列表项里的一段文字')
+  const code = passageStub('PRE', '代码里的一段')
+  const cell = passageStub('P', '表格单元格里的文字')
+  const flow = passageFlowStub('turn-13', [whole, almost, phrase, heading, item, code])
+  const cellFlow = passageFlowStub('turn-14', [cell])
+  const table = { nodeType: 1, tagName: 'TABLE' }
+  cell.block.closest = (selector) =>
+    selector === '[data-chat-anchor-key]' ? cellFlow : selector === 'table' ? table : null
   booted.sandbox.document.querySelectorAll = (selector) =>
-    selector === '[data-chat-anchor-key]' ? [flow] : []
+    selector === '[data-chat-anchor-key]' ? [flow, cellFlow] : []
   const View = booted.registrations.find((item) => item.entry.name === 'shell.overlay').Component
   const pointer = { x: 520, y: 300 }
   const box = { left: 400, top: 300, right: 700, bottom: 322, width: 300, height: 22 }
+  const placeWith = (range, quote, label) => {
+    booted.sandbox.getSelection = () => ({
+      rangeCount: 1,
+      isCollapsed: false,
+      toString: () => quote,
+      anchorNode: range.startContainer,
+      anchorOffset: range.startOffset,
+      focusNode: range.endContainer,
+      focusOffset: range.endOffset,
+      getRangeAt: () => range,
+      removeAllRanges() {},
+    })
+    check(`placement: captured "${label}"`, booted.runtime.captureSelection(pointer), true)
+    const style = findByClass(View(), 'dsh-nudge-popup')?.props?.style
+    return { style, draft: booted.runtime.getSnapshot().annotationDraft }
+  }
   const place = (passage, count) => {
     const range = {
       commonAncestorContainer: passage.block,
@@ -2408,53 +2433,108 @@ function countedFlowItem(key, text, counter) {
       getBoundingClientRect: () => box,
       intersectsNode: (node) => node === passage.textNode,
     }
-    booted.sandbox.getSelection = () => ({
-      rangeCount: 1,
-      isCollapsed: false,
-      toString: () => passage.textNode.data.slice(0, count),
-      anchorNode: passage.textNode,
-      anchorOffset: 0,
-      focusNode: passage.textNode,
-      focusOffset: count,
-      getRangeAt: () => range,
-      removeAllRanges() {},
-    })
-    check(`placement: captured "${range.startContainer.data.slice(0, count)}"`, booted.runtime.captureSelection(pointer), true)
-    const style = findByClass(View(), 'dsh-nudge-popup')?.props?.style
-    return { style, draft: booted.runtime.getSnapshot().annotationDraft }
+    const quote = passage.textNode.data.slice(0, count)
+    return placeWith(range, quote, quote)
   }
+  const shortcut = (result) =>
+    Number.parseFloat(result.style?.left) + 44 === pointer.x && result.style?.top === '324px'
+  const overQuote = (result) =>
+    result.style?.left === '380px' && Number.parseFloat(result.style?.top) <= pointer.y
 
   // Every character selected: the card hangs over the quote box, above the
   // pointer, instead of putting a button under it.
   const full = place(whole, 9)
-  check('placement: a whole-passage selection is recognised as whole', full.draft?.wholePassage, true)
+  check('placement: a whole-passage selection is not a phrase', full.draft?.phrasePassage, false)
   check('placement: it leaves the release point alone', full.style?.left, '380px')
-  check(
-    'placement: its card ends above the pointer',
-    Number.parseFloat(full.style?.top) <= pointer.y,
-    true,
-  )
+  check('placement: its card ends above the pointer', overQuote(full), true)
 
   // One character short is still the paragraph to the eye: 9 of 10 counts.
   const edge = place(almost, 9)
-  check('placement: 90% of the passage already counts as whole', edge.draft?.wholePassage, true)
+  check('placement: 90% of the passage already counts as whole', edge.draft?.phrasePassage, false)
   check('placement: the boundary case moves off the pointer too', edge.style?.left, '380px')
 
   // A phrase inside the passage keeps the one-click shortcut.
   const part = place(phrase, 8)
-  check('placement: a phrase inside the passage is not the whole', part.draft?.wholePassage, false)
+  check('placement: a phrase inside the passage carries the shortcut', part.draft?.phrasePassage, true)
   check(
     'placement: the answer button stays centred on the release point',
     Number.parseFloat(part.style?.left) + 44,
     pointer.x,
   )
   check('placement: the card is pinned below the release point', part.style?.top, '324px')
+  check('placement: a heading phrase keeps it too', shortcut(place(heading, 4)), true)
+  check('placement: a list item phrase keeps it too', shortcut(place(item, 4)), true)
 
-  // A selection that names no passage (outside the transcript) keeps it too.
+  // Everything that is not a phrase of one paragraph stays off the pointer.
+  check('placement: a code block phrase keeps off', overQuote(place(code, 4)), true)
+  check('placement: a table cell phrase keeps off', overQuote(place(cell, 4)), true)
+  const across = {
+    commonAncestorContainer: flow,
+    startContainer: phrase.textNode,
+    startOffset: 0,
+    endContainer: heading.textNode,
+    endOffset: 4,
+    collapsed: false,
+    cloneRange: () => across,
+    getBoundingClientRect: () => box,
+    intersectsNode: (node) => node === phrase.textNode || node === heading.textNode,
+  }
+  const multiText = `${phrase.textNode.data.slice(0, 4)}\n\n${heading.textNode.data.slice(0, 4)}`
+  check(
+    'placement: a selection across two blocks keeps off',
+    overQuote(placeWith(across, multiText, '跨两段')),
+    true,
+  )
+
+  // A selection that names no passage (outside the transcript) keeps off too.
   booted.sandbox.getSelection = selectionStub('正文之外', { nodeType: 1, closest: () => null }, box)
   booted.runtime.captureSelection(pointer)
   const outside = findByClass(View(), 'dsh-nudge-popup')?.props?.style
-  check('placement: a selection outside the transcript keeps the shortcut', outside?.left, '476px')
+  check('placement: a selection outside the transcript keeps off', outside?.left, '380px')
+}
+
+{
+  // A double-click picks a word; the click that follows belongs to the text,
+  // not to 记为答案, so the card keeps off the release point.
+  const booted = await boot({})
+  booted.runtime.setQuick(true)
+  const passage = passageStub('P', '双击选中的那个词后面还有字')
+  const flow = passageFlowStub('turn-15', [passage])
+  booted.sandbox.document.querySelectorAll = (selector) =>
+    selector === '[data-chat-anchor-key]' ? [flow] : []
+  const box = { left: 400, top: 300, right: 700, bottom: 322, width: 300, height: 22 }
+  booted.sandbox.getSelection = () => {
+    const range = {
+      commonAncestorContainer: passage.block,
+      startContainer: passage.textNode,
+      startOffset: 0,
+      endContainer: passage.textNode,
+      endOffset: 4,
+      collapsed: false,
+      cloneRange: () => range,
+      getBoundingClientRect: () => box,
+      intersectsNode: (node) => node === passage.textNode,
+    }
+    return {
+      rangeCount: 1,
+      isCollapsed: false,
+      toString: () => passage.textNode.data.slice(0, 4),
+      anchorNode: passage.textNode,
+      anchorOffset: 0,
+      focusNode: passage.textNode,
+      focusOffset: 4,
+      getRangeAt: () => range,
+      removeAllRanges() {},
+    }
+  }
+  booted.dispatch('mouseup', { clientX: 520, clientY: 300, detail: 2 })
+  await waitFor(() => booted.runtime.getSnapshot().annotationDraft !== null, { timeout: 3000 })
+  const draft = booted.runtime.getSnapshot().annotationDraft
+  const View = booted.registrations.find((item) => item.entry.name === 'shell.overlay').Component
+  const style = findByClass(View(), 'dsh-nudge-popup')?.props?.style
+  check('placement: a double-clicked word is captured', draft?.quote, passage.textNode.data.slice(0, 4))
+  check('placement: a double-clicked word is not a phrase', draft?.phrasePassage, false)
+  check('placement: a double-clicked word keeps off the pointer', style?.left, '380px')
 }
 
 {
@@ -2542,10 +2622,35 @@ function countedFlowItem(key, text, counter) {
     '170px 0px',
   )
 
-  // A pointer that ended the selection itself stays the anchor.
+  // A pointer that ended a phrase picked out of a paragraph stays the anchor.
   const near = await boot({})
   near.runtime.setQuick(true)
-  near.sandbox.getSelection = selectionStub('选中的一段话', { nodeType: 1, closest: () => null }, quoteRect)
+  const passage = passageStub('P', '选中的一段话')
+  const flow = passageFlowStub('turn-16', [passage])
+  near.sandbox.document.querySelectorAll = (selector) =>
+    selector === '[data-chat-anchor-key]' ? [flow] : []
+  const nearRange = {
+    commonAncestorContainer: passage.block,
+    startContainer: passage.textNode,
+    startOffset: 0,
+    endContainer: passage.textNode,
+    endOffset: 4,
+    collapsed: false,
+    cloneRange: () => nearRange,
+    getBoundingClientRect: () => quoteRect,
+    intersectsNode: (node) => node === passage.textNode,
+  }
+  near.sandbox.getSelection = () => ({
+    rangeCount: 1,
+    isCollapsed: false,
+    toString: () => passage.textNode.data.slice(0, 4),
+    anchorNode: passage.textNode,
+    anchorOffset: 0,
+    focusNode: passage.textNode,
+    focusOffset: 4,
+    getRangeAt: () => nearRange,
+    removeAllRanges() {},
+  })
   near.runtime.captureSelection({ x: 150, y: 310 })
   const nearView = near.registrations.find((item) => item.entry.name === 'shell.overlay').Component
   popup = findByClass(nearView(), 'dsh-nudge-popup')

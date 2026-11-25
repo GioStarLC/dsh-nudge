@@ -16,7 +16,7 @@ import {
   FLASH_HOLD_MS,
   SELF_SELECTOR,
 } from './constants.js'
-import { anchorFromQuote, anchorFromRange, coversPassage, packedText, passagesOfRange } from './dom.js'
+import { anchorFromQuote, anchorFromRange, packedText, passagesOfRange, phraseOfPassage } from './dom.js'
 import { rectValue, viewport } from './geometry.js'
 import { annotationBlock, annotationNoteLine, blockBreak, quoteMarkdown, tidyQuote } from './annotation-text.js'
 import { saveNotesOfSession } from './notes.js'
@@ -148,6 +148,8 @@ import { frameLabelKey, isFrameWidth } from './settings.js'
       let flashTimer
       /** True while a pointer gesture is down, so no card opens mid-drag. */
       let pointerHeld = false
+      /** Clicks behind the live selection: 2 is a double-click word pick. */
+      let clickCount = 0
 
       /** Cancel a capture that has not fired yet (a new press is starting). */
       function cancelPendingCapture() {
@@ -171,6 +173,9 @@ import { frameLabelKey, isFrameWidth } from './settings.js'
           event && typeof event.clientX === 'number' && typeof event.clientY === 'number'
             ? { x: event.clientX, y: event.clientY }
             : null
+        // Kept until the capture runs: the pointer path and the safety net both
+        // read it, and the safety net has no event of its own.
+        if (event && typeof event.detail === 'number') clickCount = event.detail
         selectionTimer = setTimeout(() => {
           selectionTimer = undefined
           captureSelection(pointer)
@@ -190,6 +195,7 @@ import { frameLabelKey, isFrameWidth } from './settings.js'
         if (event?.shiftKey !== true) return
         if (inEditable(event?.target)) return
         if (inEditable(document.activeElement)) return
+        clickCount = 0
         captureSelectionLater()
       }
 
@@ -201,6 +207,7 @@ import { frameLabelKey, isFrameWidth } from './settings.js'
        */
       function onPointerGestureDown() {
         pointerHeld = true
+        clickCount = 0
         cancelPendingCapture()
       }
 
@@ -280,9 +287,10 @@ import { frameLabelKey, isFrameWidth } from './settings.js'
         } catch {
           anchor = null
         }
-        // Whether the selection is already the passage: the card still opens,
-        // but it stops parking a button under the release point then, because
-        // the click after a whole-paragraph selection is rarely meant for it.
+        // Whether the selection is a phrase of one paragraph, heading or list
+        // item: only then does the card park its first button under the release point.
+        // A whole passage, a code block, a table cell, a multi-block selection
+        // or a double-clicked word keeps the card off the pointer.
         settleAnnotation({
           ...IDLE_ANNOTATION,
           annotationDraft: {
@@ -304,7 +312,7 @@ import { frameLabelKey, isFrameWidth } from './settings.js'
                 }
               : null,
             pointer,
-            wholePassage: coversPassage(selection.range, selection.quote),
+            phrasePassage: clickCount < 2 && phraseOfPassage(selection.range, selection.quote),
           },
           note: '',
           error: '',

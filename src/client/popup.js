@@ -43,12 +43,12 @@ import { viewport } from './geometry.js'
        * A mouse selection ends on the release point, so the card opens above it
        * with its first button — 记为答案 — centred on that point: the next click
        * lands without moving the mouse. That shortcut is only for a phrase
-       * picked out of a passage. A selection that already is the passage is
-       * usually read, copied or quoted, not marked, and the click that follows
-       * it belongs to something else — so the card keeps off the pointer then
-       * and hangs over the quote box instead. When the card does not fit above
-       * the point, or the pointer belongs to a click elsewhere, the quote box
-       * is the anchor too.
+       * picked out of one paragraph, heading or list item. A whole passage, a code block,
+       * a table cell, a selection crossing several blocks and a double-clicked
+       * word are read, copied or quoted instead, so the card keeps off the
+       * pointer then and hangs over the quote box. When the card does not fit
+       * above the point, or the pointer belongs to a click elsewhere, the
+       * quote box is the anchor too.
        */
       function popupPosition() {
         const draft = getState().annotationDraft
@@ -64,7 +64,7 @@ import { viewport } from './geometry.js'
         const boxWidth = Math.min(width, vw - margin * 2)
         const rect = draft?.rect ?? null
         const pointer =
-          draft?.wholePassage === true || !pointerNearRect(draft?.pointer, rect) ? null : draft.pointer
+          draft?.phrasePassage !== true || !pointerNearRect(draft?.pointer, rect) ? null : draft.pointer
         const clampX = (value) => Math.max(margin, Math.min(value, vw - boxWidth - margin))
         if (pointer) {
           const { x, y } = pointer
